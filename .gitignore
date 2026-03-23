@@ -58,3 +58,6 @@ compile_commands.json
 repomix-output.xml
 *.pdf
 *.docx
+
+# ── Example binaries ──────────────────────────────────────────────────────
+examples/13_c_api
