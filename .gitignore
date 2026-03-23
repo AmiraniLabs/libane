@@ -1,0 +1,60 @@
+# ── Build directories ─────────────────────────────────────────────────────
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+install_manifest.txt
+Makefile
+
+# ── Compiled output ────────────────────────────────────────────────────────
+*.o
+*.a
+*.dylib
+*.so
+*.so.*
+*.dll
+*.lib
+a.out
+
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+dist/
+*.egg-info/
+*.egg
+.eggs/
+.venv/
+venv/
+env/
+
+# ── Catch2 / CTest artifacts ───────────────────────────────────────────────
+Testing/
+_deps/
+*.junit.xml
+
+# ── macOS ─────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+*.dSYM/
+
+# ── IDE / editors ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+*.swp
+*.swo
+*~
+.clangd/
+.cache/
+compile_commands.json
+
+# ── Generated / temporary files ───────────────────────────────────────────
+repomix-output.xml
+*.pdf
+*.docx

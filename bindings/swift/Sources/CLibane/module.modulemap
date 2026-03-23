@@ -1,0 +1,5 @@
+module CLibane {
+    header "libane.h"
+    link "ane"
+    export *
+}
