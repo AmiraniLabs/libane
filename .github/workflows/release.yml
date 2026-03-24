@@ -16,6 +16,7 @@ jobs:
 
     permissions:
       id-token: write  # required for PyPI trusted publishing
+      contents: write  # required for checkout and GitHub Release creation
 
     steps:
       - uses: actions/checkout@v4
