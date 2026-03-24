@@ -1,6 +1,6 @@
 /**
  * libane — Apple Neural Engine Native C++ Runtime Library
- * Amirani Labs · v0.1.0
+ * Amirani Labs · v0.7.0
  *
  * Stable C ABI. ABI stability guaranteed across minor versions.
  * Uses AppleNeuralEngine.framework via dlopen — private API, intentional.

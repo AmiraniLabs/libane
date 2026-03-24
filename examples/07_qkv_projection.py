@@ -71,6 +71,6 @@ print(f"  Latency p50: {times[N//2]:.2f} ms  (all 3 projections)")
 print()
 
 # Verify against numpy reference
-ref_Q = (x_data.astype(np.float32) @ W_Q.astype(np.float32)).astype(np.float16)
+ref_Q = (W_Q.astype(np.float32).T @ x_data.astype(np.float32)).astype(np.float16)
 diff  = np.abs(Q.reshape(QKV, SEQ).astype(np.float32) - ref_Q.astype(np.float32))
 print(f"  Q vs numpy ref mean abs err: {diff.mean():.5f}")

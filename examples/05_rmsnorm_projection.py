@@ -32,7 +32,7 @@ def rmsnorm_np(x, s, eps=1e-5):
     return ((x32 / rms) * s.astype(np.float32).reshape(-1, 1)).astype(np.float16)
 
 x_norm = rmsnorm_np(x_f16, scale)
-ref = (x_norm.astype(np.float32) @ W.astype(np.float32)[:D_IN, :D_OUT]).astype(np.float16)
+ref = (W.astype(np.float32).T @ x_norm.astype(np.float32)).astype(np.float16)
 
 # ── ANE fused graph ───────────────────────────────────────────────────────────
 g   = ane.Graph()
@@ -47,7 +47,7 @@ cg.set_output_shapes([[1, D_OUT, 1, SEQ]])
 result = cg(x_f16)
 
 # ── Verify ───────────────────────────────────────────────────────────────────
-diff = np.abs(result.astype(np.float32) - ref.astype(np.float32))
+diff = np.abs(result.reshape(D_OUT, SEQ).astype(np.float32) - ref.astype(np.float32))
 rel  = diff / (np.abs(ref.astype(np.float32)) + 1e-6)
 
 print(f"RMSNorm({D_IN}) → Matmul[{D_IN}×{D_OUT}]  seq={SEQ}")

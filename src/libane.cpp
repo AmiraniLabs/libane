@@ -16,6 +16,7 @@
 #include <mutex>
 #include <atomic>
 #include <string>
+#include <vector>
 
 /* ── Global state ────────────────────────────────────────────────────────── */
 
@@ -67,6 +68,38 @@ static libane::mil::TensorShape to_mil_shape(const libane_shape_t& s) {
     ms.height   = (s.ndim >= 3) ? s.dims[2] : 1;
     ms.seq      = (s.ndim >= 4) ? s.dims[3] : 8;
     return ms;
+}
+
+/**
+ * Pack row-major matrix A[M,K] into ANE logical [K,M] channel-major layout.
+ * ANE linear index is [channel * S + seq] => [k * M + m].
+ */
+static void pack_matmul_input_for_ane(const libane_f16_t* A_row_major,
+                                      libane_f16_t*       A_ane,
+                                      int M, int K) {
+    for (int m = 0; m < M; ++m) {
+        for (int k = 0; k < K; ++k) {
+            // A_ane[k, m] = A_row_major[m, k]
+            A_ane[static_cast<size_t>(k) * M + m] =
+                A_row_major[static_cast<size_t>(m) * K + k];
+        }
+    }
+}
+
+/**
+ * Unpack ANE logical output [N,M] channel-major into row-major C[M,N].
+ * ANE linear index is [n * M + m].
+ */
+static void unpack_matmul_output_from_ane(const libane_f16_t* Y_ane,
+                                          libane_f16_t*       C_row_major,
+                                          int M, int N) {
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
+            // C_row_major[m, n] = Y_ane[n, m]
+            C_row_major[static_cast<size_t>(m) * N + n] =
+                Y_ane[static_cast<size_t>(n) * M + m];
+        }
+    }
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -518,14 +551,20 @@ libane_status_t libane_matmul_f16(const libane_f16_t* A,
             size_t in_bytes  = static_cast<size_t>(M) * K * 2;
             size_t out_bytes = static_cast<size_t>(M) * N * 2;
 
-            auto in_buf  = libane::global_buffer_pool().acquire_with_data(A, in_bytes);
+            // Bridge row-major API tensors <-> ANE [1,C,1,S] channel-major buffers.
+            std::vector<libane_f16_t> A_ane(static_cast<size_t>(M) * K);
+            std::vector<libane_f16_t> Y_ane(static_cast<size_t>(M) * N);
+            pack_matmul_input_for_ane(A, A_ane.data(), M, K);
+
+            auto in_buf  = libane::global_buffer_pool().acquire_with_data(A_ane.data(), in_bytes);
             auto out_buf = libane::global_buffer_pool().acquire(out_bytes);
 
             bool ok = libane::runtime::ane_execute(prog,
                                                     in_buf->iosurface(),
                                                     out_buf->iosurface());
             if (ok) {
-                out_buf->copy_to(C, out_bytes);
+                out_buf->copy_to(Y_ane.data(), out_bytes);
+                unpack_matmul_output_from_ane(Y_ane.data(), C, M, N);
                 libane::global_buffer_pool().release(std::move(in_buf));
                 libane::global_buffer_pool().release(std::move(out_buf));
                 return LIBANE_OK;
@@ -705,7 +744,11 @@ libane_status_t libane_graph_execute(libane_compiled_graph_t cg,
         *cg->cg, in_ptrs, in_bytes, out_ptrs, out_bytes);
 
     if (!ok) {
-        set_error("libane_graph_execute: execution failed");
+        const char* rt = libane::runtime::ane_last_error();
+        if (rt && rt[0] != '\0')
+            set_error("libane_graph_execute: execution failed: %s", rt);
+        else
+            set_error("libane_graph_execute: execution failed");
         return LIBANE_ERR_EXECUTE_FAILED;
     }
     return LIBANE_OK;

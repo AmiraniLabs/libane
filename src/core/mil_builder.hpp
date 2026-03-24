@@ -97,6 +97,12 @@ struct WeightBlob {
     static WeightBlob from_fp16(const void* src, size_t weight_bytes);
 
     /**
+     * Build blob from fp16 [rows, cols] matrix, transposed to [cols, rows].
+     * Use for MATMUL weights: user provides W[IC, OC], conv1x1 needs [OC, IC].
+     */
+    static WeightBlob from_fp16_transposed(const void* src, int rows, int cols);
+
+    /**
      * Build blob from fp32 weights; internally casts to fp16.
      * Supports optional column-major transposition for conv1x1 weight layout.
      * Use transpose=true when building conv1x1 weights from a row-major

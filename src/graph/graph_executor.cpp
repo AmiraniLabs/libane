@@ -41,9 +41,15 @@ bool GraphExecutor::execute(const CompiledGraph&            cg,
     for (size_t i = 0; i < cg.graph_input_ids().size(); ++i) {
         TensorId tid = cg.graph_input_ids()[i];
         if (!cg.tensor_bytes().count(tid)) return false;
+        const auto* tshape = cg.tensor_shape(tid);
+        if (!tshape) return false;
 
-        auto buf = global_buffer_pool().acquire_with_data(
-            input_ptrs[i], input_bytes[i]);
+        // Input pointers are contiguous logical [1,C,1,S] fp16 tensors.
+        // Acquire tensor-aware buffers so copy_from applies ANE stride-safe packing.
+        auto buf = global_buffer_pool().acquire_tensor_padded(
+            tshape->channels, tshape->seq, cg.io_alloc_bytes());
+        if (!buf) return false;
+        buf->copy_from(input_ptrs[i], input_bytes[i]);
         if (!buf) return false;
         tmp_input_bufs[tid] = std::move(buf);
     }

@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: macos-latest  # M1 ARM, macOS 14 — has ANE access
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DLIBANE_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.logicalcpu)
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  wheel:
+    name: Build & Check Wheel
+    runs-on: macos-latest
+    needs: build-and-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: pip install scikit-build-core pybind11 build twine
+
+      - name: Build wheel
+        working-directory: bindings/python
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+        run: python -m build --wheel
+
+      - name: Check wheel
+        working-directory: bindings/python
+        run: twine check dist/*
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ github.sha }}
+          path: bindings/python/dist/*.whl
+          retention-days: 7

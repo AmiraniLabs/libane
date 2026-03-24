@@ -90,7 +90,8 @@ TEST_CASE("softmax_fragment: single-line body", "[fragment]") {
     auto f = MilBuilder::softmax_fragment(128, 256, "inp", "sm_out");
     CHECK(f.input_name  == "inp");
     CHECK(f.output_name == "sm_out");
-    CHECK(has(f.body, "sm_out = softmax(axis=3, x=inp)"));
+    CHECK(has(f.body, "val=int32(1)"));
+    CHECK(has(f.body, "sm_out = softmax(axis=sm_out_sax, x=inp)"));
     CHECK(has(f.body, "sm_out_sm"));
 }
 

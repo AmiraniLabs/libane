@@ -76,7 +76,21 @@ void AneBuffer::unlock_for_cpu() {
 void AneBuffer::copy_from(const void* src, size_t nbytes) {
     assert(nbytes <= bytes_);
     lock_for_cpu();
-    std::memcpy(ptr_, src, nbytes);
+    if (tensor_layout_) {
+        const size_t c = static_cast<size_t>(tensor_channels_);
+        const size_t s = static_cast<size_t>(tensor_seq_);
+        assert(nbytes == c * s * 2);
+
+        const auto* src8 = static_cast<const uint8_t*>(src);
+        auto* dst8 = static_cast<uint8_t*>(ptr_);
+
+        // Pack contiguous [C,S] fp16 into ANE's expected [C,S] contiguous view.
+        // We intentionally write densely because ANE runtime derives layout from
+        // IOSurface dimensions, not from explicit per-channel gaps in CPU memory.
+        std::memcpy(dst8, src8, c * s * 2);
+    } else {
+        std::memcpy(ptr_, src, nbytes);
+    }
     unlock_for_cpu();
 }
 
@@ -110,12 +124,31 @@ void AneBuffer::copy_to(void* dst, size_t nbytes) const {
     if (iosurface_) {
         // Lock read-only for the copy
         IOSurfaceLock(iosurface_, kIOSurfaceLockReadOnly, nullptr);
-        std::memcpy(dst, IOSurfaceGetBaseAddress(iosurface_), nbytes);
+        const auto* src_base = static_cast<const uint8_t*>(IOSurfaceGetBaseAddress(iosurface_));
+        if (tensor_layout_) {
+            const size_t c = static_cast<size_t>(tensor_channels_);
+            const size_t s = static_cast<size_t>(tensor_seq_);
+            assert(nbytes == c * s * 2);
+            auto* dst8 = static_cast<uint8_t*>(dst);
+
+            std::memcpy(dst8, src_base, c * s * 2);
+        } else {
+            std::memcpy(dst, src_base, nbytes);
+        }
         IOSurfaceUnlock(iosurface_, kIOSurfaceLockReadOnly, nullptr);
         return;
     }
 #endif
-    std::memcpy(dst, ptr_, nbytes);
+    if (tensor_layout_) {
+        const size_t c = static_cast<size_t>(tensor_channels_);
+        const size_t s = static_cast<size_t>(tensor_seq_);
+        assert(nbytes == c * s * 2);
+        const auto* src8 = static_cast<const uint8_t*>(ptr_);
+        auto* dst8 = static_cast<uint8_t*>(dst);
+        std::memcpy(dst8, src8, c * s * 2);
+    } else {
+        std::memcpy(dst, ptr_, nbytes);
+    }
 }
 
 void AneBuffer::copy_to_f32(float* dst, size_t count) const {
@@ -245,15 +278,61 @@ std::unique_ptr<AneBuffer> BufferPool::acquire(size_t nbytes) {
     if (it != idle_.end() && !it->second.empty()) {
         auto buf = std::move(it->second.back());
         it->second.pop_back();
+        // Reset tensor metadata on generic acquire.
+        buf->tensor_layout_ = false;
+        buf->tensor_channels_ = 0;
+        buf->tensor_seq_ = 0;
+        buf->tensor_channel_stride_bytes_ = 0;
         return buf;
     }
-    return allocate(nbytes);
+    auto buf = allocate(nbytes);
+    buf->tensor_layout_ = false;
+    buf->tensor_channels_ = 0;
+    buf->tensor_seq_ = 0;
+    buf->tensor_channel_stride_bytes_ = 0;
+    return buf;
+}
+
+std::unique_ptr<AneBuffer> BufferPool::acquire_tensor(int channels, int seq) {
+    return acquire_tensor_padded(channels, seq, 0);
+}
+
+std::unique_ptr<AneBuffer> BufferPool::acquire_tensor_padded(int channels, int seq,
+                                                             size_t min_alloc_bytes) {
+    assert(channels > 0 && seq > 0);
+    size_t logical_bytes = static_cast<size_t>(channels) * seq * 2;
+    size_t req_bytes = std::max(logical_bytes, min_alloc_bytes);
+    auto buf = acquire(req_bytes);
+
+    buf->tensor_layout_ = true;
+    buf->tensor_channels_ = channels;
+    buf->tensor_seq_ = seq;
+
+#ifdef __APPLE__
+    if (buf->is_iosurface()) {
+        // Kept for introspection/debug only; copy paths for tensor_layout_ use
+        // dense contiguous [C,S] CPU views.
+        buf->tensor_channel_stride_bytes_ = static_cast<size_t>(seq) * 2;
+    } else {
+        buf->tensor_channel_stride_bytes_ = static_cast<size_t>(seq) * 2;
+    }
+#else
+    buf->tensor_channel_stride_bytes_ = static_cast<size_t>(seq) * 2;
+#endif
+    return buf;
 }
 
 std::unique_ptr<AneBuffer> BufferPool::acquire_with_data(const void* fp16_data,
                                                            size_t nbytes) {
     auto buf = acquire(nbytes);
     buf->copy_from(fp16_data, nbytes);
+    return buf;
+}
+
+std::unique_ptr<AneBuffer> BufferPool::acquire_tensor_with_data(const void* fp16_data,
+                                                                int channels, int seq) {
+    auto buf = acquire_tensor(channels, seq);
+    buf->copy_from(fp16_data, static_cast<size_t>(channels) * seq * 2);
     return buf;
 }
 

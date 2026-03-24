@@ -99,11 +99,19 @@ public:
 
     const std::vector<CompiledPlanGroup>&       groups()          const { return groups_; }
     const std::unordered_map<TensorId, size_t>& tensor_bytes()    const { return tensor_bytes_; }
+    const std::unordered_map<TensorId, mil::TensorShape>& tensor_shapes() const { return tensor_shapes_; }
+    size_t                                      io_alloc_bytes() const { return io_alloc_bytes_; }
     const std::vector<TensorId>&                graph_input_ids() const { return graph_input_ids_; }
     const std::vector<TensorId>&                graph_output_ids()const { return graph_output_ids_; }
 
     /** Return pre-allocated ANE buffer for tensor id, or nullptr if not found. */
     AneBuffer* ane_buf(TensorId id) const;
+
+    /** Return tensor shape for a tensor id, or nullptr if not found. */
+    const mil::TensorShape* tensor_shape(TensorId id) const {
+        auto it = tensor_shapes_.find(id);
+        return it == tensor_shapes_.end() ? nullptr : &it->second;
+    }
 
     /* ── Accessors for tests ─────────────────────────────────────────────── */
 
@@ -115,6 +123,8 @@ private:
 
     std::vector<CompiledPlanGroup>                           groups_;
     std::unordered_map<TensorId, size_t>                     tensor_bytes_;
+    std::unordered_map<TensorId, mil::TensorShape>           tensor_shapes_;
+    size_t                                                    io_alloc_bytes_ = 0;
     std::unordered_map<TensorId, std::unique_ptr<AneBuffer>> ane_bufs_;
     std::vector<TensorId>                                    graph_input_ids_;
     std::vector<TensorId>                                    graph_output_ids_;

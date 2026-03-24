@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-test-publish:
+    name: Build, Test & Publish
+    runs-on: macos-latest  # M1 ARM, macOS 14 — has ANE access
+
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ane
+
+    permissions:
+      id-token: write  # required for PyPI trusted publishing
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches library version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          LIB_VER=$(grep 'LIBANE_VERSION ' include/libane.h | grep -o '"[^"]*"' | tr -d '"')
+          if [ "$TAG" != "$LIB_VER" ]; then
+            echo "Tag $TAG does not match LIBANE_VERSION $LIB_VER"
+            exit 1
+          fi
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLIBANE_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.logicalcpu)
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: pip install scikit-build-core pybind11 build twine
+
+      - name: Build wheel
+        working-directory: bindings/python
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+        run: python -m build --wheel
+
+      - name: Check wheel
+        working-directory: bindings/python
+        run: twine check dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: bindings/python/dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bindings/python/dist/*.whl
+          generate_release_notes: true

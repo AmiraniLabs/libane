@@ -6,6 +6,11 @@
 
 #include <stdexcept>
 #include <string>
+#include <algorithm>
+
+#ifdef __APPLE__
+#  include <IOSurface/IOSurface.h>
+#endif
 
 namespace libane {
 namespace graph {
@@ -139,6 +144,52 @@ std::unique_ptr<CompiledGraph> GraphCompiler::compile(const AneGraph& graph) {
     cg->tensor_bytes_     = plan.tensor_bytes;
     cg->graph_input_ids_  = plan.graph_input_ids;
     cg->graph_output_ids_ = plan.graph_output_ids;
+    for (const auto& t : graph.tensors())
+        cg->tensor_shapes_[t.id] = t.shape;
+
+    // Runtime enforces uniform IOSurface allocation size across multi-input
+    // dispatches; choose one per-graph allocation target for all I/O tensors.
+    for (const auto& kv : plan.tensor_bytes) {
+        cg->io_alloc_bytes_ = std::max(cg->io_alloc_bytes_, kv.second);
+    }
+
+    auto round_up = [](size_t x, size_t m) {
+        return ((x + m - 1) / m) * m;
+    };
+
+    // ANE raw channel stride constraints:
+    // - Must be at least S*2 bytes for each tensor that shares this alloc size.
+    // - Keep 64-byte aligned to match hardware vector length.
+    // Choose a single io_alloc_bytes_ that satisfies all graph I/O tensors.
+    if (cg->io_alloc_bytes_ > 0) {
+        size_t target = std::max(cg->io_alloc_bytes_, static_cast<size_t>(49152));
+        target = round_up(target, static_cast<size_t>(64));
+
+        bool ok = false;
+        for (int iter = 0; iter < 40960 && !ok; ++iter) {
+            ok = true;
+            for (TensorId tid : plan.graph_input_ids) {
+                const auto& s = graph.tensor(tid).shape;
+                size_t stride = target / static_cast<size_t>(s.channels);
+                if (stride < static_cast<size_t>(s.seq) * 2 || (stride % 64) != 0) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) {
+                for (TensorId tid : plan.graph_output_ids) {
+                    const auto& s = graph.tensor(tid).shape;
+                    size_t stride = target / static_cast<size_t>(s.channels);
+                    if (stride < static_cast<size_t>(s.seq) * 2 || (stride % 64) != 0) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if (!ok) target += 64;
+        }
+        cg->io_alloc_bytes_ = target;
+    }
 
     for (const auto& group : plan.groups) {
         // ── Collect fused inputs (chain + side) ───────────────────────────
@@ -180,6 +231,13 @@ std::unique_ptr<CompiledGraph> GraphCompiler::compile(const AneGraph& graph) {
                         node.weights.data() + half, half);
                     weight_entries.push_back({ beta_file, std::move(beta_blob.data) });
 
+                } else if (node.op == LIBANE_OP_MATMUL) {
+                    // conv1x1 expects [OC, IC]; user provides [IC, OC] → transpose
+                    int IC = graph.tensor(node.inputs[0]).shape.channels;
+                    int OC = graph.tensor(node.output).shape.channels;
+                    auto blob = mil::WeightBlob::from_fp16_transposed(
+                        node.weights.data(), IC, OC);
+                    weight_entries.push_back({ node.weight_file, std::move(blob.data) });
                 } else {
                     auto blob = mil::WeightBlob::from_fp16(
                         node.weights.data(), node.weights.size());
@@ -204,8 +262,9 @@ std::unique_ptr<CompiledGraph> GraphCompiler::compile(const AneGraph& graph) {
         cg->groups_.push_back(std::move(cpg));
 
         // Pre-allocate a persistent ANE buffer for the group output tensor
-        size_t out_bytes = plan.tensor_bytes.at(group.output);
-        cg->ane_bufs_[group.output] = global_buffer_pool().acquire(out_bytes);
+        const auto& out_shape = graph.tensor(group.output).shape;
+        cg->ane_bufs_[group.output] = global_buffer_pool().acquire_tensor_padded(
+            out_shape.channels, out_shape.seq, cg->io_alloc_bytes_);
     }
 
     return cg;

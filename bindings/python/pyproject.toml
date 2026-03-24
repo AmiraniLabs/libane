@@ -1,23 +1,33 @@
 [build-system]
-requires = ["setuptools>=68", "pybind11>=2.12", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+requires = ["scikit-build-core>=0.4", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
 
 [project]
-name = "ane"
+name = "libane"
 version = "0.7.0"
-description = "Apple Neural Engine Python bindings — libane"
-readme = "../../README.md"
-license = { text = "MIT" }
+description = "Run ML graphs directly on the Apple Neural Engine from Python — Graph IR, op fusion, and ANE-native dispatch"
+readme = { file = "../../README.md", content-type = "text/markdown" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "Amirani Labs" }]
-keywords = ["apple", "neural-engine", "ANE", "ml", "metal", "apple-silicon"]
+keywords = [
+    "apple", "neural-engine", "ANE", "apple-silicon",
+    "inference", "deep-learning", "llm", "transformer",
+    "m1", "m2", "m3", "m4", "macos", "metal",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "Operating System :: MacOS",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: C++",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Hardware",
+    "Typing :: Typed",
 ]
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
@@ -26,8 +36,14 @@ dependencies = ["numpy>=1.24"]
 mlx = ["mlx>=0.8"]
 dev = ["pytest>=8", "numpy>=1.24"]
 
-[tool.setuptools]
-py-modules = []
+[project.urls]
+Homepage = "https://github.com/AmiraniLabs/libane"
+"Bug Tracker" = "https://github.com/AmiraniLabs/libane/issues"
+Changelog = "https://github.com/AmiraniLabs/libane/blob/main/CHANGELOG.md"
 
-[tool.setuptools.package-data]
-"*" = ["*.pyi"]
+[tool.scikit-build]
+cmake.source-dir = "../.."
+cmake.args = ["-DLIBANE_BUILD_PYTHON=ON", "-DLIBANE_BUILD_TESTS=OFF"]
+cmake.build-type = "Release"
+install.components = ["python"]
+wheel.packages = []

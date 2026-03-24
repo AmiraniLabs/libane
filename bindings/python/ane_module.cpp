@@ -35,6 +35,7 @@
 #include "../../include/libane.h"
 
 namespace py = pybind11;
+using namespace pybind11::literals;
 
 /* ── numpy dtype helpers ─────────────────────────────────────────────────── */
 
@@ -65,10 +66,11 @@ static py::array ensure_f16(py::array arr) {
 
 /* ── matmul (fp16) ───────────────────────────────────────────────────────── */
 
-static py::array_t<uint16_t> py_matmul(py::array A_in, py::array B_in) {
+static py::array py_matmul(py::array A_in, py::array B_in) {
     require_2d(A_in, "A");
     require_2d(B_in, "B");
 
+    py::module_ np = py::module_::import("numpy");
     py::array A = ensure_f16(A_in);
     py::array B = ensure_f16(B_in);
     auto abuf = A.request();
@@ -80,7 +82,9 @@ static py::array_t<uint16_t> py_matmul(py::array A_in, py::array B_in) {
     int N = static_cast<int>(bbuf.shape[1]);
     if (K != Kb) throw std::invalid_argument("A.shape[1] must equal B.shape[0]");
 
-    auto C = py::array_t<uint16_t>({M, N});
+    // Core C API accepts/returns standard row-major matrices.
+    // Layout bridging to ANE [1,C,1,S] is handled inside libane_matmul_f16().
+    py::array C = np.attr("empty")(py::make_tuple(M, N), "dtype"_a="float16");
     auto cbuf = C.request();
 
     libane_status_t st = libane_matmul_f16(
@@ -91,10 +95,7 @@ static py::array_t<uint16_t> py_matmul(py::array A_in, py::array B_in) {
     if (st != LIBANE_OK)
         throw std::runtime_error(std::string("matmul failed: ") + libane_last_error());
 
-    py::module_ np = py::module_::import("numpy");
-    return py::array_t<uint16_t>(
-        py::array::ShapeContainer({(py::ssize_t)M, (py::ssize_t)N}),
-        static_cast<uint16_t*>(cbuf.ptr));
+    return C;
 }
 
 /* ── matmul (fp32) ───────────────────────────────────────────────────────── */
@@ -132,8 +133,10 @@ static py::array py_softmax(py::array x) {
 
     py::module_ np = py::module_::import("numpy");
     if (S % 8 != 0 || S > 65536 || rows > 16384) {
-        py::object e = np.attr("exp")(x - np.attr("max")(x, "axis"_a=-1, "keepdims"_a=true));
-        return py::array(e / np.attr("sum")(e, "axis"_a=-1, "keepdims"_a=true));
+        py::object mx = np.attr("max")(x, "axis"_a=-1, "keepdims"_a=true);
+        py::object e  = np.attr("exp")(np.attr("subtract")(x, mx));
+        py::object s  = np.attr("sum")(e, "axis"_a=-1, "keepdims"_a=true);
+        return py::array(np.attr("divide")(e, s));
     }
     libane_shape_t shape; shape.dims[0]=1; shape.dims[1]=rows;
                           shape.dims[2]=1; shape.dims[3]=S; shape.ndim=4;
@@ -142,14 +145,13 @@ static py::array py_softmax(py::array x) {
 
     py::array x16 = np.attr("ascontiguousarray")(np.attr("asarray")(x, "dtype"_a="float16"));
     auto x16b = x16.request();
-    py::array_t<uint16_t> out({static_cast<py::ssize_t>(rows),
-                                static_cast<py::ssize_t>(S)});
+    py::array out = np.attr("empty")(py::make_tuple(rows, S), "dtype"_a="float16");
     auto outb = out.request();
     auto st = libane_execute(h, x16b.ptr, outb.ptr, shape);
     libane_release(h);
     if (st != LIBANE_OK)
         throw std::runtime_error(std::string("softmax execute: ") + libane_last_error());
-    return py::array(np.attr("asarray")(out, "dtype"_a="float16").attr("reshape")(x.attr("shape")));
+    return py::array(out.attr("reshape")(x.attr("shape")));
 }
 
 /* ── gelu ────────────────────────────────────────────────────────────────── */
@@ -161,11 +163,14 @@ static py::array py_gelu(py::array x) {
 
     py::module_ np = py::module_::import("numpy");
     if (numel % 8 != 0 || numel > 65536) {
-        py::object xf = np.attr("asarray")(x, "dtype"_a="float32");
-        py::object t  = np.attr("tanh")(0.7978845608f *
-                            (xf + 0.044715f * xf * xf * xf));
-        return py::array(np.attr("asarray")(0.5f * xf * (1.0f + t),
-                         "dtype"_a=x.dtype()).attr("reshape")(x.attr("shape")));
+        py::object xf  = np.attr("asarray")(x, "dtype"_a="float32");
+        py::object xf3 = np.attr("multiply")(xf, np.attr("multiply")(xf, xf));
+        py::object inn = np.attr("add")(xf, np.attr("multiply")(py::float_(0.044715), xf3));
+        py::object t   = np.attr("tanh")(np.attr("multiply")(py::float_(0.7978845608), inn));
+        py::object res = np.attr("multiply")(py::float_(0.5),
+                             np.attr("multiply")(xf, np.attr("add")(py::float_(1.0), t)));
+        return py::array(np.attr("asarray")(res, "dtype"_a=x.dtype())
+                             .attr("reshape")(x.attr("shape")));
     }
     libane_shape_t shape; shape.dims[0]=1; shape.dims[1]=1;
                           shape.dims[2]=1; shape.dims[3]=numel; shape.ndim=4;
@@ -173,15 +178,15 @@ static py::array py_gelu(py::array x) {
     if (!h) throw std::runtime_error(std::string("gelu compile: ") + libane_last_error());
 
     py::array x16 = np.attr("ascontiguousarray")(
-        np.attr("asarray")(x, "dtype"_a="float16").attr("reshape")({numel}));
+        np.attr("asarray")(x, "dtype"_a="float16").attr("reshape")(py::make_tuple(numel)));
     auto x16b = x16.request();
-    py::array_t<uint16_t> out({numel});
+    py::array out = np.attr("empty")(py::make_tuple(numel), "dtype"_a="float16");
     auto outb = out.request();
     auto st = libane_execute(h, x16b.ptr, outb.ptr, shape);
     libane_release(h);
     if (st != LIBANE_OK)
         throw std::runtime_error(std::string("gelu execute: ") + libane_last_error());
-    return py::array(np.attr("asarray")(out, "dtype"_a="float16").attr("reshape")(x.attr("shape")));
+    return py::array(out.attr("reshape")(x.attr("shape")));
 }
 
 /* ── Graph class ─────────────────────────────────────────────────────────── */
@@ -205,10 +210,11 @@ public:
         return id;
     }
 
-    uint32_t add_op(libane_op_t op,
+    uint32_t add_op(int op_int,
                     const std::vector<uint32_t>& inputs,
                     const std::vector<int>& output_shape,
                     py::object weights_obj) {
+        libane_op_t op = static_cast<libane_op_t>(op_int);
         libane_shape_t out_s = to_shape(output_shape);
         const void* wptr = nullptr;
         size_t wlen = 0;
@@ -303,7 +309,7 @@ public:
         // the user must call execute() with explicit out_shapes.
         size_t n_out = out_shapes_.empty() ? 1 : out_shapes_.size();
 
-        std::vector<py::array_t<uint16_t>> out_arrays;
+        std::vector<py::array> out_arrays;
         std::vector<void*>   out_ptrs;
         std::vector<size_t>  out_bytes_vec;
 
@@ -311,8 +317,9 @@ public:
             for (auto& shape : out_shapes_) {
                 size_t numel = 1;
                 for (auto d : shape) numel *= d;
-                out_arrays.emplace_back(py::array_t<uint16_t>(
-                    std::vector<py::ssize_t>(shape.begin(), shape.end())));
+                py::list dims;
+                for (auto d : shape) dims.append(d);
+                out_arrays.emplace_back(np.attr("empty")(dims, "dtype"_a="float16"));
                 auto ob = out_arrays.back().request();
                 out_ptrs.push_back(ob.ptr);
                 out_bytes_vec.push_back(numel * 2);
@@ -320,8 +327,8 @@ public:
         } else {
             // Single output, size derived from input (same shape assumed)
             size_t numel = in_bytes.empty() ? 0 : in_bytes[0] / 2;
-            out_arrays.emplace_back(py::array_t<uint16_t>(
-                std::vector<py::ssize_t>{static_cast<py::ssize_t>(numel)}));
+            out_arrays.emplace_back(
+                np.attr("empty")(py::make_tuple(numel), "dtype"_a="float16"));
             auto ob = out_arrays.back().request();
             out_ptrs.push_back(ob.ptr);
             out_bytes_vec.push_back(numel * 2);
@@ -337,11 +344,11 @@ public:
                 std::string("graph execute failed: ") + libane_last_error());
 
         if (n_out == 1) {
-            return np.attr("asarray")(out_arrays[0], "dtype"_a="float16");
+            return out_arrays[0];
         }
         py::list result;
         for (auto& a : out_arrays)
-            result.append(np.attr("asarray")(a, "dtype"_a="float16"));
+            result.append(a);
         return result;
     }
 
@@ -474,11 +481,11 @@ For multi-output graphs, call set_output_shapes() first::
     m.attr("RMSNORM")   = static_cast<int>(LIBANE_OP_RMSNORM);
 
     /* ── Log level constants ──────────────────────────────────────────── */
-    m.attr("LOG_SILENT") = LIBANE_LOG_SILENT;
-    m.attr("LOG_ERROR")  = LIBANE_LOG_ERROR;
-    m.attr("LOG_WARN")   = LIBANE_LOG_WARN;
-    m.attr("LOG_INFO")   = LIBANE_LOG_INFO;
-    m.attr("LOG_DEBUG")  = LIBANE_LOG_DEBUG;
+    m.attr("LOG_SILENT") = static_cast<int>(LIBANE_LOG_SILENT);
+    m.attr("LOG_ERROR")  = static_cast<int>(LIBANE_LOG_ERROR);
+    m.attr("LOG_WARN")   = static_cast<int>(LIBANE_LOG_WARN);
+    m.attr("LOG_INFO")   = static_cast<int>(LIBANE_LOG_INFO);
+    m.attr("LOG_DEBUG")  = static_cast<int>(LIBANE_LOG_DEBUG);
 
     m.attr("__version__") = LIBANE_VERSION;
 }

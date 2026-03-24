@@ -1,15 +1,31 @@
 # libane
 
-**Apple Neural Engine native C++ inference runtime.**
+**Direct access to the Apple Neural Engine from C++ and Python.**
 
-libane turns the ANE from a black box into a first-class compute target. It
-exposes a Graph IR that lets you describe a full forward pass, compiles it into
-the minimum number of ANE dispatches via automatic fusion, and executes it in a
-single call. Matmul is implemented as conv1×1 for the 3× throughput advantage
-documented in the [Orion paper](https://arxiv.org/abs/2603.06728).
+[![PyPI](https://img.shields.io/pypi/v/libane?label=PyPI)](https://pypi.org/project/libane/)
+[![CI](https://github.com/AmiraniLabs/libane/actions/workflows/ci.yml/badge.svg)](https://github.com/AmiraniLabs/libane/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Apple%20Silicon-black?logo=apple)](https://github.com/AmiraniLabs/libane)
+
+libane is a low-level ANE runtime and compiler interface. It exposes a Graph IR
+for describing full forward passes, compiles them into the minimum number of ANE
+dispatches via automatic op fusion, and executes them through a stable C ABI.
+Matmul is implemented as conv1×1 for the [3× throughput advantage over MIL
+matmul](https://arxiv.org/abs/2603.06728) on ANE.
 
 > **Private API.** libane uses `AppleNeuralEngine.framework` via `dlopen`.
 > This is intentional and documented. Do not submit to the App Store.
+
+---
+
+## Install
+
+```sh
+pip install libane
+```
+
+Requires Apple Silicon (M1 or later) and macOS 14+. The wheel is a compiled
+extension — no extra build steps needed.
 
 ---
 
@@ -20,32 +36,65 @@ documented in the [Orion paper](https://arxiv.org/abs/2603.06728).
 | **Hardware** | Apple Silicon (M1 or later) |
 | **OS** | macOS 14 Sonoma or later |
 | **Toolchain** | Xcode 15+, CMake 3.24+, C++17 |
-| **Python** | 3.10+ with pybind11 and numpy (optional) |
+| **Python** | 3.10+ (optional) |
 
 ---
 
-## Building
+## Python quick-start
+
+```python
+import ane
+import numpy as np
+
+print(ane.available())   # True on Apple Silicon
+print(ane.version())     # "0.7.0"
+
+# Single-op matmul
+A = np.random.randn(128, 512).astype(np.float16)
+B = np.random.randn(512, 256).astype(np.float16)
+C = ane.matmul(A, B)    # shape (128, 256), fp16
+
+# Graph API — fused FFN block
+D, FFN, SEQ = 512, 2048, 128
+W_up   = np.random.randn(D,   FFN).astype(np.float16)
+W_down = np.random.randn(FFN, D  ).astype(np.float16)
+scale  = np.ones(D, dtype=np.float16)
+
+g = ane.Graph()
+x   = g.add_input("x",  [1, D,   1, SEQ])
+rn  = g.add_op(ane.RMSNORM, [x],   [1, D,   1, SEQ], weights=scale)
+up  = g.add_op(ane.MATMUL,  [rn],  [1, FFN, 1, SEQ], weights=W_up)
+act = g.add_op(ane.GELU,    [up],  [1, FFN, 1, SEQ])
+out = g.add_op(ane.MATMUL,  [act], [1, D,   1, SEQ], weights=W_down)
+g.mark_output(out)
+
+cg = g.compile()
+cg.set_output_shapes([[1, D, 1, SEQ]])
+
+x_data = np.random.randn(D, SEQ).astype(np.float16)
+result = cg(x_data)
+print(result.shape)   # (1, 512, 1, 128)
+```
+
+See [`examples/ffn_inference.py`](examples/ffn_inference.py) for a timed
+end-to-end example.
+
+---
+
+## Building from source
 
 ```sh
-git clone https://github.com/amirani-labs/libane
+git clone https://github.com/AmiraniLabs/libane
 cd libane
 cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j$(sysctl -n hw.logicalcpu)
 ctest --test-dir build --output-on-failure
 ```
 
-To build the Python module:
+To build the Python module from source:
 
 ```sh
-pip install pybind11 numpy
-cmake -B build -DLIBANE_BUILD_PYTHON=ON
-cmake --build build --target ane -j$(sysctl -n hw.logicalcpu)
-# The .so lands in build/bindings/python/
-```
-
-Or install directly with pip (builds from source):
-
-```sh
+pip install pybind11 numpy scikit-build-core
 pip install ./bindings/python
 ```
 
@@ -101,47 +150,6 @@ libane_graph_release(g);
 
 ---
 
-## Python quick-start
-
-```python
-import ane
-import numpy as np
-
-print(ane.available())   # True on Apple Silicon
-print(ane.version())     # "0.7.0"
-
-# Single-op
-A = np.random.randn(128, 512).astype(np.float16)
-B = np.random.randn(512, 256).astype(np.float16)
-C = ane.matmul(A, B)    # shape (128, 256), fp16
-
-# Graph API — fused FFN block
-D, FFN, SEQ = 512, 2048, 128
-W_up   = np.random.randn(D,   FFN).astype(np.float16)
-W_down = np.random.randn(FFN, D  ).astype(np.float16)
-scale  = np.ones(D, dtype=np.float16)
-
-g = ane.Graph()
-x   = g.add_input("x",  [1, D,   1, SEQ])
-rn  = g.add_op(ane.RMSNORM, [x],   [1, D,   1, SEQ], weights=scale)
-up  = g.add_op(ane.MATMUL,  [rn],  [1, FFN, 1, SEQ], weights=W_up)
-act = g.add_op(ane.GELU,    [up],  [1, FFN, 1, SEQ])
-out = g.add_op(ane.MATMUL,  [act], [1, D,   1, SEQ], weights=W_down)
-g.mark_output(out)
-
-cg = g.compile()
-cg.set_output_shapes([[1, D, 1, SEQ]])
-
-x_data = np.random.randn(D, SEQ).astype(np.float16)
-result = cg(x_data)
-print(result.shape)   # (1, 512, 1, 128)
-```
-
-See [`examples/ffn_inference.py`](examples/ffn_inference.py) for a timed
-end-to-end example.
-
----
-
 ## Architecture
 
 ```
@@ -161,7 +169,7 @@ libane
 │   ├── runtime/
 │   │   └── ane_runtime.mm    AppleNeuralEngine.framework wrapper
 │   └── fallback/             Accelerate BLAS CPU fallback
-└── bindings/python/          pybind11 module
+└── bindings/python/          pybind11 module (pip install libane)
 ```
 
 Fusion rules compact linear chains into single ANE programs. A 6-op FFN
@@ -179,14 +187,27 @@ dispatches instead of 6, eliminating intermediate DRAM round-trips.
 | `LAYERNORM` | normalise + gamma/beta affine |
 | `GELU` | tanh approximation only |
 | `SILU` | x × sigmoid(x) |
-| `SOFTMAX` | over S (spatial) dimension |
+| `SOFTMAX` | over C (channel) dimension; axis=1 |
 | `ADD` / `MUL` | elementwise binary; shapes must match |
 | `TRANSPOSE` | [0,3,2,1] only: [1,C,1,S] → [1,S,1,C] |
 
 ---
 
+## Known Limitations
+
+- **Experimental / research-use only.** Not production-supported.
+- **Private Apple framework dependency.** Uses `AppleNeuralEngine.framework` via `dlopen`. Not App Store safe.
+- **Constrained tensor layout.** Graph API requires `[1, C, 1, S]` (NCHW with batch=1, height=1). Arbitrary shapes are not supported.
+- **Channel cap.** Graph API validation enforces `C ≤ 16384`. Larger channel counts (e.g. vocabulary projections) require raw MIL emission and are not exposed through the graph API.
+- **fp16 only.** No quantization (int8, int4) support. Weights and activations are fp16 throughout.
+- **Some ops are compiler-sensitive.** ANE's MIL compiler accepts a strict subset of MIL. Certain op combinations or shapes may require fallback paths. See the fallback module.
+- **Not a general-purpose model runner.** libane is a programmable kernel/runtime/compiler interface for ANE-native experimentation, not a drop-in inference engine.
+- **macOS 14+ required.** Older systems are not tested and not supported.
+
+---
+
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).
 
 libane is not affiliated with or endorsed by Apple Inc.

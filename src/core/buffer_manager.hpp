@@ -108,6 +108,14 @@ private:
 #else
     void* iosurface_ = nullptr;
 #endif
+
+    // Optional logical tensor metadata for [1,C,1,S] fp16 packing/unpacking.
+    // When enabled, copy_from/copy_to map contiguous [C,S] user memory to the
+    // padded per-channel IOSurface layout used by ANE.
+    bool   tensor_layout_              = false;
+    int    tensor_channels_            = 0;
+    int    tensor_seq_                 = 0;
+    size_t tensor_channel_stride_bytes_ = 0;
 };
 
 /* ── Buffer pool ─────────────────────────────────────────────────────────── */
@@ -133,9 +141,34 @@ public:
     std::unique_ptr<AneBuffer> acquire(size_t bytes);
 
     /**
+     * Acquire a tensor buffer for logical shape [1, C, 1, S] (fp16).
+     *
+     * On IOSurface-backed paths, the backing allocation may be padded to satisfy
+     * ANE stride/alignment constraints. The returned buffer knows (C,S) and will
+     * pack/unpack logical contiguous [C,S] tensors during copy_from/copy_to.
+     */
+    std::unique_ptr<AneBuffer> acquire_tensor(int channels, int seq);
+
+    /**
+     * Acquire a tensor buffer for [1,C,1,S], with backing allocation padded
+     * to at least min_alloc_bytes.
+     *
+     * Useful for ANE multi-input programs that require all input IOSurfaces to
+     * share the same allocation size.
+     */
+    std::unique_ptr<AneBuffer> acquire_tensor_padded(int channels, int seq,
+                                                     size_t min_alloc_bytes);
+
+    /**
      * Acquire a buffer and copy fp16 data in.
      */
     std::unique_ptr<AneBuffer> acquire_with_data(const void* fp16_data, size_t bytes);
+
+    /**
+     * Acquire a tensor buffer for [1,C,1,S] and copy contiguous fp16 [C,S] data.
+     */
+    std::unique_ptr<AneBuffer> acquire_tensor_with_data(const void* fp16_data,
+                                                        int channels, int seq);
 
     /**
      * Acquire a buffer and copy-cast fp32 data in.

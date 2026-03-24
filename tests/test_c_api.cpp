@@ -168,24 +168,29 @@ TEST_CASE("libane_execute softmax produces valid probabilities", "[api]") {
         return;
     }
 
+    // Shape [1, C=8, 1, S=8]: axis=1 softmax normalises over C channels.
+    // For each S position the C channel values must sum to 1.0.
     libane_shape_t shape;
-    shape.dims[0]=1; shape.dims[1]=1; shape.dims[2]=1; shape.dims[3]=8; shape.ndim=4;
+    shape.dims[0]=1; shape.dims[1]=8; shape.dims[2]=1; shape.dims[3]=8; shape.ndim=4;
 
     auto h = libane_compile(LIBANE_OP_SOFTMAX, shape, nullptr, 0);
     if (!h) { WARN("ANE compile limit reached — skipping: " << libane_last_error()); return; }
     REQUIRE(h != nullptr);
 
-    // Input: 8 fp16 values [1,2,3,4,5,6,7,8]
     using fp16_t = libane_f16_t;
-    std::vector<fp16_t> in(8), out(8);
+    // Each S position gets the same C values [1..8]; after channel softmax they sum to 1.0.
+    std::vector<fp16_t> in(8*8), out(8*8);
     float vals[] = {1.0f,2.0f,3.0f,4.0f,5.0f,6.0f,7.0f,8.0f};
-    for (int i = 0; i < 8; ++i) in[i] = f16(vals[i]);
+    for (int c = 0; c < 8; ++c)
+        for (int s = 0; s < 8; ++s)
+            in[c * 8 + s] = f16(vals[c]);
 
     libane_status_t st = libane_execute(h, in.data(), out.data(), shape);
     CHECK(st == LIBANE_OK);
 
+    // Check one S position: sum of C=8 channel values must be ~1.0
     float sum = 0.0f;
-    for (int i = 0; i < 8; ++i) sum += f32(out[i]);
+    for (int c = 0; c < 8; ++c) sum += f32(out[c * 8 + 0]);
     CHECK(std::abs(sum - 1.0f) < 0.05f); // fp16 precision
 
     libane_release(h);
@@ -410,6 +415,113 @@ TEST_CASE("ANE matmul_f16 executes on hardware when available", "[api][ane]") {
     }
 }
 
+TEST_CASE("ANE matmul_f16 A @ I == A on large shape", "[api][ane][matmul][layout]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available on this machine — skipping ANE layout test");
+        return;
+    }
+
+    // 160*160*2 = 51200 bytes (>49 KB IOSurface minimum).
+    const int M = 160, K = 160, N = 160;
+    std::vector<libane_f16_t> A(M * K), I(K * N), C(M * N);
+
+    for (int m = 0; m < M; ++m) {
+        for (int k = 0; k < K; ++k) {
+            float v = static_cast<float>(((m * 17 + k * 13) % 31) - 15);
+            A[m * K + k] = f16(v);
+        }
+    }
+    for (int k = 0; k < K; ++k) {
+        for (int n = 0; n < N; ++n) {
+            I[k * N + n] = f16(k == n ? 1.0f : 0.0f);
+        }
+    }
+
+    libane_status_t st = libane_matmul_f16(A.data(), I.data(), C.data(), M, K, N);
+    REQUIRE(st == LIBANE_OK);
+
+    for (int i = 0; i < M * N; ++i) {
+        float err = std::abs(f32(C[i]) - f32(A[i]));
+        CHECK(err < 0.1f);
+    }
+}
+
+TEST_CASE("ANE matmul_f16 I @ B == B on large shape", "[api][ane][matmul][layout]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available on this machine — skipping ANE layout test");
+        return;
+    }
+
+    // 160*160*2 = 51200 bytes (>49 KB IOSurface minimum).
+    const int M = 160, K = 160, N = 160;
+    std::vector<libane_f16_t> I(M * K), B(K * N), C(M * N);
+
+    for (int m = 0; m < M; ++m) {
+        for (int k = 0; k < K; ++k) {
+            I[m * K + k] = f16(m == k ? 1.0f : 0.0f);
+        }
+    }
+    for (int k = 0; k < K; ++k) {
+        for (int n = 0; n < N; ++n) {
+            float v = static_cast<float>(((k * 19 + n * 7) % 37) - 18);
+            B[k * N + n] = f16(v);
+        }
+    }
+
+    libane_status_t st = libane_matmul_f16(I.data(), B.data(), C.data(), M, K, N);
+    REQUIRE(st == LIBANE_OK);
+
+    for (int i = 0; i < M * N; ++i) {
+        float err = std::abs(f32(C[i]) - f32(B[i]));
+        CHECK(err < 0.1f);
+    }
+}
+
+TEST_CASE("ANE matmul_f16 one-hot rows select B rows", "[api][ane][matmul][layout]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available on this machine — skipping ANE layout test");
+        return;
+    }
+
+    // 160*160*2 = 51200 bytes (>49 KB IOSurface minimum).
+    const int M = 160, K = 160, N = 160;
+    std::vector<libane_f16_t> A(M * K, f16(0.0f)), B(K * N), C(M * N);
+
+    // Row m is one-hot at column (m % K).
+    for (int m = 0; m < M; ++m) {
+        int j = m % K;
+        A[m * K + j] = f16(1.0f);
+    }
+
+    for (int k = 0; k < K; ++k) {
+        for (int n = 0; n < N; ++n) {
+            float v = static_cast<float>(((k * 11 + n * 5) % 29) - 14);
+            B[k * N + n] = f16(v);
+        }
+    }
+
+    libane_status_t st = libane_matmul_f16(A.data(), B.data(), C.data(), M, K, N);
+    REQUIRE(st == LIBANE_OK);
+
+    for (int m = 0; m < M; ++m) {
+        int j = m % K;
+        for (int n = 0; n < N; ++n) {
+            float got = f32(C[m * N + n]);
+            float exp = f32(B[j * N + n]);
+            CHECK(std::abs(got - exp) < 0.1f);
+        }
+    }
+}
+
 TEST_CASE("ANE softmax executes on hardware when available", "[api][ane]") {
     libane_set_backend(nullptr);
 
@@ -432,11 +544,11 @@ TEST_CASE("ANE softmax executes on hardware when available", "[api][ane]") {
     libane_status_t st = libane_execute(h, in.data(), out.data(), shape);
     REQUIRE(st == LIBANE_OK);
 
-    // Uniform softmax: each row of 64 outputs should sum to ~1.0
-    for (size_t r = 0; r < 8; ++r) {
+    // axis=1 (channel) softmax: for each S position the C=8 channel values sum to ~1.0.
+    for (size_t s = 0; s < 64; ++s) {
         float sum = 0.0f;
-        for (size_t c = 0; c < 64; ++c)
-            sum += f32(out[r * 64 + c]);
+        for (size_t c = 0; c < 8; ++c)
+            sum += f32(out[c * 64 + s]);
         CHECK(std::abs(sum - 1.0f) < 0.05f);
     }
 

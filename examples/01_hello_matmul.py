@@ -36,9 +36,7 @@ for _ in range(50):
 ane_ms = (time.perf_counter() - t0) / 50 * 1000
 
 # ── Compare ───────────────────────────────────────────────────────────────────
-C_ane_f32 = C_ane.view(np.uint16).astype(np.float32)   # reinterpret uint16 → fp16 → f32
-# numpy result already fp16 stored as float16
-diff = np.abs(C_np.astype(np.float32) - C_ane_f32).mean()
+diff = np.abs(C_np.astype(np.float32) - C_ane.astype(np.float32)).mean()
 
 print(f"Matrix shape:  A[{M}×{K}] × B[{K}×{N}] = C[{M}×{N}]")
 print(f"numpy  (CPU):  {np_ms:.2f} ms")

@@ -1,5 +1,5 @@
 # ── Build directories ─────────────────────────────────────────────────────
-build/
+build*/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
@@ -19,6 +19,7 @@ Makefile
 a.out
 
 # ── Python ────────────────────────────────────────────────────────────────
+dist/
 __pycache__/
 *.py[cod]
 *.pyo

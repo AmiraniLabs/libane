@@ -21,3 +21,6 @@ if(APPLE)
         "-framework Accelerate"
     )
 endif()
+
+install(TARGETS ane DESTINATION . COMPONENT python)
+install(FILES ane.pyi DESTINATION . COMPONENT python)

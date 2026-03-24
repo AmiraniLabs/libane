@@ -69,7 +69,7 @@ def layernorm_np(x, g, b, eps=1e-5):
                b.astype(np.float32).reshape(-1,1)).astype(np.float16)
 
 x_ln  = layernorm_np(x_data, gamma, beta)
-ref_Q = (x_ln.astype(np.float32) @ W_Q.astype(np.float32)).astype(np.float16)
+ref_Q = (W_Q.astype(np.float32).T @ x_ln.astype(np.float32)).astype(np.float16)
 
 diff = np.abs(Q.reshape(QKV, SEQ).astype(np.float32) - ref_Q.astype(np.float32))
 print(f"LayerNorm({D}) → [Q_proj, K_proj]   seq={SEQ}")

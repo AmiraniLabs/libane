@@ -148,6 +148,19 @@ WeightBlob WeightBlob::from_fp16(const void* src, size_t weight_bytes) {
     return b;
 }
 
+WeightBlob WeightBlob::from_fp16_transposed(const void* src, int rows, int cols) {
+    // Transpose [rows, cols] → [cols, rows] in-place conversion
+    size_t count = static_cast<size_t>(rows) * cols;
+    auto b = make_blob(count * 2);
+    const auto* s = reinterpret_cast<const uint16_t*>(src);
+    auto*       d = reinterpret_cast<uint16_t*>(b.data.data() + kDataOffset);
+    for (int r = 0; r < rows; ++r)
+        for (int c = 0; c < cols; ++c)
+            d[static_cast<size_t>(c) * rows + r] = s[static_cast<size_t>(r) * cols + c];
+    b.compute_hash();
+    return b;
+}
+
 WeightBlob WeightBlob::from_fp32(const float* src, int rows, int cols, bool transpose) {
     size_t count = static_cast<size_t>(rows) * cols;
     auto b = make_blob(count * 2);
@@ -390,7 +403,8 @@ MilProgram MilBuilder::softmax(int C, int SP) {
 
     std::string t = header();
     t += "    func main<ios18>(" + tensor_type(shape) + " x) {\n";
-    t += "        " + tensor_type(shape) + " y = softmax(axis = 3, x = x)[name=string(\"sm\")];\n";
+    t += "        int32 sm_ax = const()[name=string(\"sm_ax\"), val=int32(1)];\n";
+    t += "        " + tensor_type(shape) + " y = softmax(axis=sm_ax, x=x)[name=string(\"sm\")];\n";
     t += "    } -> (y);\n";
     t += "}\n";
 
@@ -792,7 +806,9 @@ MilFragment MilBuilder::softmax_fragment(int C, int SP,
     std::string tt = tensor_type(shape);
 
     std::string body;
-    body += "        " + tt + " " + out_var + " = softmax(axis=3, x=" + in_var + ")[name=string(\"" + p + "sm\")];\n";
+    const std::string ax_var = p + "sax";
+    body += "        int32 " + ax_var + " = const()[name=string(\"" + ax_var + "\"), val=int32(1)];\n";
+    body += "        " + tt + " " + out_var + " = softmax(axis=" + ax_var + ", x=" + in_var + ")[name=string(\"" + p + "sm\")];\n";
 
     MilFragment f;
     f.body         = std::move(body);

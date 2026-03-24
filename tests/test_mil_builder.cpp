@@ -223,11 +223,11 @@ TEST_CASE("MilBuilder::gelu rejects invalid shape", "[mil][build]") {
 
 /* ── MilBuilder — softmax ───────────────────────────────────────────────── */
 
-TEST_CASE("MilBuilder::softmax over S dimension", "[mil][build]") {
+TEST_CASE("MilBuilder::softmax over C (channel) dimension", "[mil][build]") {
     auto prog = MilBuilder::softmax(8, 64);
     REQUIRE_FALSE(prog.text.empty());
     CHECK_THAT(prog.text, ContainsSubstring("softmax("));
-    CHECK_THAT(prog.text, ContainsSubstring("axis = 3"));
+    CHECK_THAT(prog.text, ContainsSubstring("val=int32(1)"));
     CHECK_THAT(prog.text, ContainsSubstring("tensor<fp16, [1, 8, 1, 64]>"));
     CHECK(prog.weight_name.empty());
 }
