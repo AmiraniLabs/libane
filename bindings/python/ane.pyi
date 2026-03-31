@@ -1,5 +1,5 @@
 """
-ane — Apple Neural Engine Python bindings (libane v0.7.0)
+ane — Apple Neural Engine Python bindings (libane v0.7.1)
 
 ANE-accelerated ML operations with automatic CPU fallback.
 Uses AppleNeuralEngine.framework via dlopen — private API, intentional.
