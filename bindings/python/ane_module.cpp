@@ -1,5 +1,5 @@
 /**
- * Python bindings for libane v0.7.0.
+ * Python bindings for libane v0.7.1.
  *
  * PyPI package: ane · Install: pip install ane
  * Requires: pybind11, numpy
@@ -380,7 +380,7 @@ static PyCompiledGraph* py_compile(PyGraph& g) {
 
 PYBIND11_MODULE(ane, m) {
     m.doc() = R"(
-ane — Apple Neural Engine Python bindings (libane v0.7.0)
+ane — Apple Neural Engine Python bindings (libane v0.7.1)
 Amirani Labs
 
 ANE-accelerated ML operations with automatic CPU fallback.

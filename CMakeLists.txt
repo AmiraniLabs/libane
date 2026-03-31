@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(libane VERSION 0.7.0 LANGUAGES CXX OBJCXX)
+project(libane VERSION 0.7.1 LANGUAGES CXX OBJCXX)
 
 # ── C++ standard ─────────────────────────────────────────────────────────────
 set(CMAKE_CXX_STANDARD 17)
