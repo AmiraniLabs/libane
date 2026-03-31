@@ -2,6 +2,7 @@
 #include "core/mil_builder.hpp"
 #include "graph/ane_graph.hpp"
 #include "graph/fusion_rules.hpp"
+#include <algorithm>
 
 using namespace libane::mil;
 using namespace libane::graph;

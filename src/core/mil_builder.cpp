@@ -15,6 +15,7 @@
  * The weight dict @"offset" key = 64 (points into blob past the file header).
  */
 #include "mil_builder.hpp"
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <cassert>
