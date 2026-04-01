@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.7.1 — 2026-03-28
+
+Patch release focused on runtime correctness and release hardening.
+
+### Fixes
+
+- **Python matmul_f32** now normalizes inputs to contiguous float32 arrays,
+  fixing incorrect results for valid non-contiguous NumPy views (for example,
+  transposed matrices).
+- **Compile cache stats** now use atomic counters, removing a hit/miss/eviction
+  data race under concurrent access.
+- **Buffer-pool lifetime safety** improved in runtime execution paths via RAII
+  guards, reducing manual release-path duplication.
+
+### Quality and CI
+
+- Added Python runtime regression test coverage for non-contiguous
+  `matmul_f32` inputs.
+- CI now installs the built wheel and executes Python runtime tests.
+- Added an ignore rule for `bindings/swift/.build/` generated artifacts.
+
 ## v0.7.0 — 2026-03-23
 
 First public release.
