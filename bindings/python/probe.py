@@ -2202,7 +2202,10 @@ def scan_coreml_differential(C: int = _C, S: int = _S) -> list[ProbeResult]:
         },
         {
             "name": "scatter",
-            "sig": _sig2(C, S),
+            "sig": (
+                f"tensor<fp16, [1,{C},1,{S}]> a_input0, "
+                f"tensor<fp16, [1,{C},1,1,{C},1,{S}]> a_input1"
+            ),
             "body": (
                 f'        tensor<int32, [1,{C},1,{S}]> idx = const()[name=string("idx"), val=tensor<int32, [1,{C},1,{S}]>(0)];\n'
                 '        int32 ax = const()[name=string("ax"), val=int32(3)];\n'
@@ -2214,7 +2217,10 @@ def scan_coreml_differential(C: int = _C, S: int = _S) -> list[ProbeResult]:
         },
         {
             "name": "scatter_nd",
-            "sig": _sig2(C, S),
+            "sig": (
+                f"tensor<fp16, [1,{C},1,{S}]> a_input0, "
+                f"tensor<fp16, [1,{C},1,{S},{C},1,{S}]> a_input1"
+            ),
             "body": (
                 f'        tensor<int32, [1,{C},1,{S},1]> idx = const()[name=string("idx"), val=tensor<int32, [1,{C},1,{S},1]>(0)];\n'
                 f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
@@ -2313,7 +2319,7 @@ def scan_coreml_differential(C: int = _C, S: int = _S) -> list[ProbeResult]:
             "scatter": lambda: mb.program(
                 input_specs=[
                     mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
-                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, 1, C, 1, S), dtype=types.fp16),
                 ],
                 opset_version=ct.target.iOS18,
             )(lambda a, u: mb.scatter(
@@ -2322,7 +2328,7 @@ def scan_coreml_differential(C: int = _C, S: int = _S) -> list[ProbeResult]:
             "scatter_nd": lambda: mb.program(
                 input_specs=[
                     mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
-                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S, C, 1, S), dtype=types.fp16),
                 ],
                 opset_version=ct.target.iOS18,
             )(lambda a, u: mb.scatter_nd(
@@ -2718,6 +2724,7 @@ def export_json(results: list[ProbeResult], path: str) -> None:
     chip = _chip_info()
     payload = {
         "libane_version": libane_version,
+        "mil_build_info": _BUILD_INFO_FIELDS,
         "platform": {
             "os": platform.system(),
             "os_version": platform.mac_ver()[0] or platform.version(),
@@ -2744,7 +2751,6 @@ def export_json(results: list[ProbeResult], path: str) -> None:
                 "raw_acceptance": r.raw_acceptance,
                 "libane_lowered_support": r.libane_lowered_support,
                 "note": r.note,
-                "mil_build_info": _BUILD_INFO_FIELDS,
             }
             for r in results
         ],
