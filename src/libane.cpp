@@ -220,6 +220,12 @@ libane_handle_t libane_compile(libane_op_t op,
             case LIBANE_OP_LOGICAL_AND:
                 mil_prog = libane::mil::MilBuilder::logical_and(ms.channels, ms.seq);
                 break;
+            case LIBANE_OP_LOGICAL_OR:
+                mil_prog = libane::mil::MilBuilder::logical_or(ms.channels, ms.seq);
+                break;
+            case LIBANE_OP_LOGICAL_XOR:
+                mil_prog = libane::mil::MilBuilder::logical_xor(ms.channels, ms.seq);
+                break;
             case LIBANE_OP_LAYER_NORM:
             case LIBANE_OP_LAYERNORM:
                 mil_prog = libane::mil::MilBuilder::layernorm(ms.channels, ms.seq);

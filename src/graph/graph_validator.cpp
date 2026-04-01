@@ -258,6 +258,8 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
         case LIBANE_OP_ADD:
         case LIBANE_OP_MUL:
         case LIBANE_OP_LOGICAL_AND:
+        case LIBANE_OP_LOGICAL_OR:
+        case LIBANE_OP_LOGICAL_XOR:
             if (!n.weights.empty())
                 err("op is weight-free but " + std::to_string(n.weights.size()) +
                     " weight bytes were provided");

@@ -25,6 +25,8 @@ RMSNORM: int
 AVG_POOL: int
 MAX_POOL: int
 LOGICAL_AND: int
+LOGICAL_OR: int
+LOGICAL_XOR: int
 
 # ── Log level constants ───────────────────────────────────────────────────────
 

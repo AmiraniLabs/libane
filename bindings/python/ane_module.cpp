@@ -644,6 +644,8 @@ For multi-output graphs, call set_output_shapes() first::
     m.attr("AVG_POOL")  = static_cast<int>(LIBANE_OP_AVG_POOL);
     m.attr("MAX_POOL")  = static_cast<int>(LIBANE_OP_MAX_POOL);
     m.attr("LOGICAL_AND") = static_cast<int>(LIBANE_OP_LOGICAL_AND);
+    m.attr("LOGICAL_OR") = static_cast<int>(LIBANE_OP_LOGICAL_OR);
+    m.attr("LOGICAL_XOR") = static_cast<int>(LIBANE_OP_LOGICAL_XOR);
 
     /* ── Log level constants ──────────────────────────────────────────── */
     m.attr("LOG_SILENT") = static_cast<int>(LIBANE_LOG_SILENT);

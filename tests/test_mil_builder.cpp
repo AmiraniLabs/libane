@@ -276,6 +276,30 @@ TEST_CASE("MilBuilder::logical_and lowers to cast+mul", "[mil][build]") {
     CHECK(prog.output_shape == (TensorShape{1, 8, 1, 64}));
 }
 
+TEST_CASE("MilBuilder::logical_or lowers to cast+maximum", "[mil][build]") {
+    auto prog = MilBuilder::logical_or(8, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("cast(x=x, dtype=string(\"bool\"))"));
+    CHECK_THAT(prog.text, ContainsSubstring("cast(x=y, dtype=string(\"bool\"))"));
+    CHECK_THAT(prog.text, ContainsSubstring("maximum(x=xf, y=yf)"));
+    CHECK_FALSE(prog.text.find("logical_or(") != std::string::npos);
+    CHECK(prog.weight_name.empty());
+    CHECK(prog.input_shape  == (TensorShape{1, 8, 1, 64}));
+    CHECK(prog.output_shape == (TensorShape{1, 8, 1, 64}));
+}
+
+TEST_CASE("MilBuilder::logical_xor lowers to cast+not_equal", "[mil][build]") {
+    auto prog = MilBuilder::logical_xor(8, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("cast(x=x, dtype=string(\"bool\"))"));
+    CHECK_THAT(prog.text, ContainsSubstring("cast(x=y, dtype=string(\"bool\"))"));
+    CHECK_THAT(prog.text, ContainsSubstring("not_equal(x=xf, y=yf)"));
+    CHECK_FALSE(prog.text.find("logical_xor(") != std::string::npos);
+    CHECK(prog.weight_name.empty());
+    CHECK(prog.input_shape  == (TensorShape{1, 8, 1, 64}));
+    CHECK(prog.output_shape == (TensorShape{1, 8, 1, 64}));
+}
+
 /* ── MilBuilder — rmsnorm ────────────────────────────────────────────────── */
 
 TEST_CASE("MilBuilder::rmsnorm uses reduce_sum + pow path", "[mil][build]") {

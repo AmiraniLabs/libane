@@ -282,6 +282,24 @@ TEST_CASE("logical_and: matching input shapes passes", "[validator][binary]") {
     CHECK(GraphValidator::validate(g).ok());
 }
 
+TEST_CASE("logical_or: matching input shapes passes", "[validator][binary]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(512, 128));
+    TensorId b = g.add_input("b", S(512, 128));
+    TensorId c = g.add_op(LIBANE_OP_LOGICAL_OR, {a, b}, S(512, 128));
+    g.mark_output(c);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("logical_xor: matching input shapes passes", "[validator][binary]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(512, 128));
+    TensorId b = g.add_input("b", S(512, 128));
+    TensorId c = g.add_op(LIBANE_OP_LOGICAL_XOR, {a, b}, S(512, 128));
+    g.mark_output(c);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
 /* ── ADD missing second input ────────────────────────────────────────────── */
 
 TEST_CASE("add: one input fails weight check", "[validator][binary]") {

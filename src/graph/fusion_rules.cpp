@@ -18,6 +18,8 @@ bool FusionRules::op_supported(libane_op_t op) {
     case LIBANE_OP_ADD:
     case LIBANE_OP_MUL:
     case LIBANE_OP_LOGICAL_AND:
+    case LIBANE_OP_LOGICAL_OR:
+    case LIBANE_OP_LOGICAL_XOR:
     case LIBANE_OP_SILU:
     case LIBANE_OP_RMSNORM:
     case LIBANE_OP_LAYERNORM:

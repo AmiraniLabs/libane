@@ -250,6 +250,18 @@ public:
     static MilProgram logical_and(int C, int SP);
 
     /**
+     * Logical OR lowering path.
+     * Semantics: out = fp16(bool(x) || bool(y)).
+     */
+    static MilProgram logical_or(int C, int SP);
+
+    /**
+     * Logical XOR lowering path.
+     * Semantics: out = fp16(bool(x) xor bool(y)).
+     */
+    static MilProgram logical_xor(int C, int SP);
+
+    /**
      * Elementwise add. No weights.
      */
     static MilProgram add(int C, int SP);
@@ -349,6 +361,16 @@ public:
                                      const std::string& out_var);
 
     static MilFragment logical_and_fragment(int C, int SP,
+                                             const std::string& in_var,
+                                             const std::string& side_var,
+                                             const std::string& out_var);
+
+    static MilFragment logical_or_fragment(int C, int SP,
+                                            const std::string& in_var,
+                                            const std::string& side_var,
+                                            const std::string& out_var);
+
+    static MilFragment logical_xor_fragment(int C, int SP,
                                              const std::string& in_var,
                                              const std::string& side_var,
                                              const std::string& out_var);

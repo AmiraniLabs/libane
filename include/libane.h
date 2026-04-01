@@ -54,6 +54,8 @@ typedef enum {
     LIBANE_OP_AVG_POOL   = 12,
     LIBANE_OP_MAX_POOL   = 13,
     LIBANE_OP_LOGICAL_AND= 14,
+    LIBANE_OP_LOGICAL_OR = 15,
+    LIBANE_OP_LOGICAL_XOR= 16,
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */

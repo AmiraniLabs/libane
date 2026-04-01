@@ -2556,6 +2556,30 @@ def scan_lowered_support(C: int = 64, S: int = 512) -> list[ProbeResult]:
         )
     )
 
+    exp_or = np.where((a != 0.0) | (b != 0.0), 1.0, 0.0).astype(np.float32)
+    results.append(
+        _run_case(
+            "lowered/logical_or",
+            _op_code("LOGICAL_OR", 15),
+            [a, b],
+            expected=exp_or,
+            atol=0.05,
+            note='lowering=cast(bool)->cast(fp16)->maximum; out in {0,1}',
+        )
+    )
+
+    exp_xor = np.where((a != 0.0) ^ (b != 0.0), 1.0, 0.0).astype(np.float32)
+    results.append(
+        _run_case(
+            "lowered/logical_xor",
+            _op_code("LOGICAL_XOR", 16),
+            [a, b],
+            expected=exp_xor,
+            atol=0.05,
+            note='lowering=cast(bool)->cast(fp16)->not_equal->cast(fp16); out in {0,1}',
+        )
+    )
+
     return results
 
 

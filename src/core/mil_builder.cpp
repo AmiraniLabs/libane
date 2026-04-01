@@ -489,6 +489,63 @@ MilProgram MilBuilder::logical_and(int C, int SP) {
     return p;
 }
 
+/* ── logical_or (lowered) ───────────────────────────────────────────────── */
+
+MilProgram MilBuilder::logical_or(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    // Lower logical_or to casts + maximum over {0,1} fp16 masks.
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x, " + tt + " y) {\n";
+    t += "        " + tb + " xb = cast(x=x, dtype=string(\"bool\"))[name=string(\"lor_xb\")];\n";
+    t += "        " + tb + " yb = cast(x=y, dtype=string(\"bool\"))[name=string(\"lor_yb\")];\n";
+    t += "        " + tt + " xf = cast(x=xb, dtype=string(\"fp16\"))[name=string(\"lor_xf\")];\n";
+    t += "        " + tt + " yf = cast(x=yb, dtype=string(\"fp16\"))[name=string(\"lor_yf\")];\n";
+    t += "        " + tt + " z = maximum(x=xf, y=yf)[name=string(\"lor_out\")];\n";
+    t += "    } -> (z);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── logical_xor (lowered) ──────────────────────────────────────────────── */
+
+MilProgram MilBuilder::logical_xor(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    // Lower logical_xor to casts + not_equal over {0,1} fp16 masks.
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x, " + tt + " y) {\n";
+    t += "        " + tb + " xb = cast(x=x, dtype=string(\"bool\"))[name=string(\"lxr_xb\")];\n";
+    t += "        " + tb + " yb = cast(x=y, dtype=string(\"bool\"))[name=string(\"lxr_yb\")];\n";
+    t += "        " + tt + " xf = cast(x=xb, dtype=string(\"fp16\"))[name=string(\"lxr_xf\")];\n";
+    t += "        " + tt + " yf = cast(x=yb, dtype=string(\"fp16\"))[name=string(\"lxr_yf\")];\n";
+    t += "        " + tb + " zb = not_equal(x=xf, y=yf)[name=string(\"lxr_zb\")];\n";
+    t += "        " + tt + " z = cast(x=zb, dtype=string(\"fp16\"))[name=string(\"lxr_out\")];\n";
+    t += "    } -> (z);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
 /* ── add ─────────────────────────────────────────────────────────────────── */
 
 MilProgram MilBuilder::add(int C, int SP) {
@@ -992,6 +1049,61 @@ MilFragment MilBuilder::logical_and_fragment(int C, int SP,
     body += "        " + tt + " " + p + "xf = cast(x=" + p + "xb, dtype=string(\"fp16\"))[name=string(\"" + p + "xf\")];\n";
     body += "        " + tt + " " + p + "yf = cast(x=" + p + "yb, dtype=string(\"fp16\"))[name=string(\"" + p + "yf\")];\n";
     body += "        " + tt + " " + out_var + " = mul(x=" + p + "xf, y=" + p + "yf)[name=string(\"" + p + "and\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = in_var;
+    f.side_input_name = side_var;
+    f.output_name     = out_var;
+    f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::logical_or_fragment(int C, int SP,
+                                             const std::string& in_var,
+                                             const std::string& side_var,
+                                             const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string body;
+    body += "        " + tb + " " + p + "xb = cast(x=" + in_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "xb\")];\n";
+    body += "        " + tb + " " + p + "yb = cast(x=" + side_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "yb\")];\n";
+    body += "        " + tt + " " + p + "xf = cast(x=" + p + "xb, dtype=string(\"fp16\"))[name=string(\"" + p + "xf\")];\n";
+    body += "        " + tt + " " + p + "yf = cast(x=" + p + "yb, dtype=string(\"fp16\"))[name=string(\"" + p + "yf\")];\n";
+    body += "        " + tt + " " + out_var + " = maximum(x=" + p + "xf, y=" + p + "yf)[name=string(\"" + p + "or\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = in_var;
+    f.side_input_name = side_var;
+    f.output_name     = out_var;
+    f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::logical_xor_fragment(int C, int SP,
+                                              const std::string& in_var,
+                                              const std::string& side_var,
+                                              const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string body;
+    body += "        " + tb + " " + p + "xb = cast(x=" + in_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "xb\")];\n";
+    body += "        " + tb + " " + p + "yb = cast(x=" + side_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "yb\")];\n";
+    body += "        " + tt + " " + p + "xf = cast(x=" + p + "xb, dtype=string(\"fp16\"))[name=string(\"" + p + "xf\")];\n";
+    body += "        " + tt + " " + p + "yf = cast(x=" + p + "yb, dtype=string(\"fp16\"))[name=string(\"" + p + "yf\")];\n";
+    body += "        " + tb + " " + p + "zb = not_equal(x=" + p + "xf, y=" + p + "yf)[name=string(\"" + p + "zb\")];\n";
+    body += "        " + tt + " " + out_var + " = cast(x=" + p + "zb, dtype=string(\"fp16\"))[name=string(\"" + p + "xor\")];\n";
 
     MilFragment f;
     f.body            = std::move(body);

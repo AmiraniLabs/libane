@@ -213,6 +213,20 @@ TEST_CASE("build_plan: matmul+avg_pool+max_pool can fuse as unary chain", "[comp
     CHECK(plan.groups[0].output == t3);
 }
 
+TEST_CASE("build_plan: logical_or and logical_xor are supported binary ops", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(256, 128));
+    TensorId b = g.add_input("b", S(256, 128));
+    TensorId o = g.add_op(LIBANE_OP_LOGICAL_OR, {a, b}, S(256, 128));
+    TensorId x = g.add_op(LIBANE_OP_LOGICAL_XOR, {o, b}, S(256, 128));
+    g.mark_output(x);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 2);
+    CHECK(plan.groups[0].output == x);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * 4. Layernorm weight splitting
  * ═══════════════════════════════════════════════════════════════════════════ */
