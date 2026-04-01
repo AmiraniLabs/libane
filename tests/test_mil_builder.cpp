@@ -346,6 +346,61 @@ TEST_CASE("MilBuilder::gather_dynamic_mask lowers to x*mask", "[mil][build]") {
     CHECK(prog.output_shape == (TensorShape{1, 8, 1, 64}));
 }
 
+TEST_CASE("MilBuilder::neg lowers to mul(x, -1)", "[mil][build]") {
+    auto prog = MilBuilder::neg(8, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("fp16(-1.0)"));
+    CHECK_THAT(prog.text, ContainsSubstring("mul(x=x, y=n1)"));
+}
+
+TEST_CASE("MilBuilder::mod lowers to floor_div/mul/sub", "[mil][build]") {
+    auto prog = MilBuilder::mod(8, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("floor_div(x=x, y=y)"));
+    CHECK_THAT(prog.text, ContainsSubstring("mul(x=q, y=y)"));
+    CHECK_THAT(prog.text, ContainsSubstring("sub(x=x, y=qy)"));
+}
+
+TEST_CASE("MilBuilder::sinh lowers to exp identities", "[mil][build]") {
+    auto prog = MilBuilder::sinh(8, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("exp(x=x)"));
+    CHECK_THAT(prog.text, ContainsSubstring("exp(x=nx)"));
+    CHECK_THAT(prog.text, ContainsSubstring("sub(x=ex, y=enx)"));
+}
+
+TEST_CASE("MilBuilder::cosh lowers to exp identities", "[mil][build]") {
+    auto prog = MilBuilder::cosh(8, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("exp(x=x)"));
+    CHECK_THAT(prog.text, ContainsSubstring("exp(x=nx)"));
+    CHECK_THAT(prog.text, ContainsSubstring("add(x=ex, y=enx)"));
+}
+
+TEST_CASE("MilBuilder::tan lowers to sin/cos/real_div", "[mil][build]") {
+    auto prog = MilBuilder::tan(8, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("sin(x=x)"));
+    CHECK_THAT(prog.text, ContainsSubstring("cos(x=x)"));
+    CHECK_THAT(prog.text, ContainsSubstring("real_div(x=sx, y=cxe)"));
+}
+
+TEST_CASE("MilBuilder::asin lowers to atan/sqrt with guards", "[mil][build]") {
+    auto prog = MilBuilder::asin(8, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("sub(x=one, y=xsq)"));
+    CHECK_THAT(prog.text, ContainsSubstring("sqrt(x=den2e)"));
+    CHECK_THAT(prog.text, ContainsSubstring("atan(x=ratio)"));
+}
+
+TEST_CASE("MilBuilder::acos lowers to pi/2 - asin path", "[mil][build]") {
+    auto prog = MilBuilder::acos(8, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("fp16(1.5703125)"));
+    CHECK_THAT(prog.text, ContainsSubstring("atan(x=ratio)"));
+    CHECK_THAT(prog.text, ContainsSubstring("sub(x=hp, y=asv)"));
+}
+
 /* ── MilBuilder — rmsnorm ────────────────────────────────────────────────── */
 
 TEST_CASE("MilBuilder::rmsnorm uses reduce_sum + pow path", "[mil][build]") {

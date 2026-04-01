@@ -247,12 +247,20 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
         case LIBANE_OP_SOFTMAX:
         case LIBANE_OP_AVG_POOL:
         case LIBANE_OP_MAX_POOL:
+        case LIBANE_OP_NEG:
+        case LIBANE_OP_SINH:
+        case LIBANE_OP_COSH:
+        case LIBANE_OP_TAN:
+        case LIBANE_OP_ASIN:
+        case LIBANE_OP_ACOS:
         case LIBANE_OP_SILU:
         case LIBANE_OP_TRANSPOSE:
         case LIBANE_OP_CAST:
             if (!n.weights.empty())
                 err("op is weight-free but " + std::to_string(n.weights.size()) +
                     " weight bytes were provided");
+            if (n.inputs.size() != 1)
+                err("requires exactly one input, got " + std::to_string(n.inputs.size()));
             break;
 
         case LIBANE_OP_REDUCE_PROD: {
@@ -333,6 +341,7 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
 
         case LIBANE_OP_ADD:
         case LIBANE_OP_MUL:
+        case LIBANE_OP_MOD:
         case LIBANE_OP_LOGICAL_AND:
         case LIBANE_OP_LOGICAL_OR:
         case LIBANE_OP_LOGICAL_XOR:

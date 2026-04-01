@@ -307,6 +307,41 @@ TEST_CASE("build_plan: scatter_along_axis static-mask node supported", "[compile
     CHECK(plan.groups[0].output == o);
 }
 
+TEST_CASE("build_plan: neg unary node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_NEG, {x}, S(64, 128));
+    g.mark_output(o);
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].output == o);
+}
+
+TEST_CASE("build_plan: mod binary node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId y = g.add_input("y", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_MOD, {x, y}, S(64, 128));
+    g.mark_output(o);
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].output == o);
+}
+
+TEST_CASE("build_plan: sinh/cosh/tan/asin/acos unary nodes supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId a = g.add_op(LIBANE_OP_SINH, {x}, S(64, 128));
+    TensorId b = g.add_op(LIBANE_OP_COSH, {a}, S(64, 128));
+    TensorId c = g.add_op(LIBANE_OP_TAN,  {b}, S(64, 128));
+    TensorId d = g.add_op(LIBANE_OP_ASIN, {c}, S(64, 128));
+    TensorId e = g.add_op(LIBANE_OP_ACOS, {d}, S(64, 128));
+    g.mark_output(e);
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].output == e);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * 4. Layernorm weight splitting
  * ═══════════════════════════════════════════════════════════════════════════ */

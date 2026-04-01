@@ -302,6 +302,45 @@ TEST_CASE("gather(dynamic): weights provided fails", "[validator][weights]") {
     REQUIRE_FALSE(r.ok());
 }
 
+TEST_CASE("neg: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_NEG, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("sinh: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_SINH, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("cosh: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_COSH, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("tan: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_TAN, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("asin: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_ASIN, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("acos: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_ACOS, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("mod: binary weight-free passes", "[validator][weights]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId y = g.add_input("y", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_MOD, {x, y}, S(64, 128));
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
 TEST_CASE("transpose: no weights passes", "[validator][weights]") {
     // transpose [1,C,1,S] -> [1,S,1,C]: output channels = input seq, output seq = input channels
     auto r = validate_single(LIBANE_OP_TRANSPOSE, S(512, 128), S(128, 512), 0);

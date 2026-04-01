@@ -651,6 +651,13 @@ For multi-output graphs, call set_output_shapes() first::
     m.attr("GATHER")    = static_cast<int>(LIBANE_OP_GATHER);
     m.attr("SCATTER_ND") = static_cast<int>(LIBANE_OP_SCATTER_ND);
     m.attr("SCATTER_ALONG_AXIS") = static_cast<int>(LIBANE_OP_SCATTER_ALONG_AXIS);
+    m.attr("NEG")       = static_cast<int>(LIBANE_OP_NEG);
+    m.attr("MOD")       = static_cast<int>(LIBANE_OP_MOD);
+    m.attr("SINH")      = static_cast<int>(LIBANE_OP_SINH);
+    m.attr("COSH")      = static_cast<int>(LIBANE_OP_COSH);
+    m.attr("TAN")       = static_cast<int>(LIBANE_OP_TAN);
+    m.attr("ASIN")      = static_cast<int>(LIBANE_OP_ASIN);
+    m.attr("ACOS")      = static_cast<int>(LIBANE_OP_ACOS);
 
     /* ── Log level constants ──────────────────────────────────────────── */
     m.attr("LOG_SILENT") = static_cast<int>(LIBANE_LOG_SILENT);

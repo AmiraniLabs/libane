@@ -32,6 +32,13 @@ SCATTER: int
 GATHER: int
 SCATTER_ND: int
 SCATTER_ALONG_AXIS: int
+NEG: int
+MOD: int
+SINH: int
+COSH: int
+TAN: int
+ASIN: int
+ACOS: int
 
 # ── Log level constants ───────────────────────────────────────────────────────
 

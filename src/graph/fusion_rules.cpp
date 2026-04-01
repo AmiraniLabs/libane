@@ -25,6 +25,13 @@ bool FusionRules::op_supported(libane_op_t op) {
     case LIBANE_OP_SCATTER_ND:
     case LIBANE_OP_SCATTER_ALONG_AXIS:
     case LIBANE_OP_GATHER:
+    case LIBANE_OP_NEG:
+    case LIBANE_OP_MOD:
+    case LIBANE_OP_SINH:
+    case LIBANE_OP_COSH:
+    case LIBANE_OP_TAN:
+    case LIBANE_OP_ASIN:
+    case LIBANE_OP_ACOS:
     case LIBANE_OP_SILU:
     case LIBANE_OP_RMSNORM:
     case LIBANE_OP_LAYERNORM:

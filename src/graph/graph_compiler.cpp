@@ -128,6 +128,35 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
             out_shape.channels, out_shape.seq,
             in_var, tensor_var(node.inputs[1]), out_var);
 
+    case LIBANE_OP_NEG:
+        return mil::MilBuilder::neg_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_MOD:
+        return mil::MilBuilder::mod_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_SINH:
+        return mil::MilBuilder::sinh_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_COSH:
+        return mil::MilBuilder::cosh_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_TAN:
+        return mil::MilBuilder::tan_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_ASIN:
+        return mil::MilBuilder::asin_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_ACOS:
+        return mil::MilBuilder::acos_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
     default:
         throw std::runtime_error(
             "node_to_fragment: unsupported op " + std::to_string(node.op));

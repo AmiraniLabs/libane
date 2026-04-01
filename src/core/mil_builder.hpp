@@ -296,6 +296,27 @@ public:
      */
     static MilProgram gather_dynamic_mask(int C, int SP);
 
+    /** Unary negation lowering: out = mul(x, -1). */
+    static MilProgram neg(int C, int SP);
+
+    /** Elementwise modulo lowering: out = x - floor_div(x,y) * y. */
+    static MilProgram mod(int C, int SP);
+
+    /** Hyperbolic sine lowering: sinh(x) = 0.5 * (exp(x) - exp(-x)). */
+    static MilProgram sinh(int C, int SP);
+
+    /** Hyperbolic cosine lowering: cosh(x) = 0.5 * (exp(x) + exp(-x)). */
+    static MilProgram cosh(int C, int SP);
+
+    /** Tangent lowering: tan(x) = sin(x) / (cos(x) + eps). */
+    static MilProgram tan(int C, int SP);
+
+    /** Inverse sine lowering using atan and sqrt with clamp/epsilon guards. */
+    static MilProgram asin(int C, int SP);
+
+    /** Inverse cosine lowering: acos(x) = pi/2 - asin(x). */
+    static MilProgram acos(int C, int SP);
+
     /**
      * Elementwise add. No weights.
      */
@@ -429,6 +450,35 @@ public:
                                                      const std::string& in_var,
                                                      const std::string& mask_var,
                                                      const std::string& out_var);
+
+    static MilFragment neg_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& out_var);
+
+    static MilFragment mod_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& side_var,
+                                     const std::string& out_var);
+
+    static MilFragment sinh_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
+    static MilFragment cosh_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
+    static MilFragment tan_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& out_var);
+
+    static MilFragment asin_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
+    static MilFragment acos_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
 
     static MilFragment transpose_fragment(int C, int SP,
                                            const std::string& in_var,

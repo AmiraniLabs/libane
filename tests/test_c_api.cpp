@@ -317,6 +317,23 @@ TEST_CASE("libane_compile scatter_along_axis is graph-only", "[api]") {
     CHECK(std::strlen(libane_last_error()) > 0);
 }
 
+TEST_CASE("libane_compile neg/mod/sinh/cosh/tan/asin/acos are graph-only", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+
+    const libane_op_t ops[] = {
+        LIBANE_OP_NEG, LIBANE_OP_MOD, LIBANE_OP_SINH, LIBANE_OP_COSH,
+        LIBANE_OP_TAN, LIBANE_OP_ASIN, LIBANE_OP_ACOS
+    };
+    for (auto op : ops) {
+        auto h = libane_compile(op, shape, nullptr, 0);
+        CHECK(h == nullptr);
+        CHECK(std::strlen(libane_last_error()) > 0);
+    }
+}
+
 TEST_CASE("libane_execute avg_pool lowering path behaves as identity", "[api]") {
     libane_set_backend(nullptr);
     libane_set_log_level(LIBANE_LOG_SILENT);

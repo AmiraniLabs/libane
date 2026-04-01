@@ -241,6 +241,27 @@ libane_handle_t libane_compile(libane_op_t op,
             case LIBANE_OP_GATHER:
                 set_error("GATHER not supported via libane_compile — use graph API (static or dynamic mask)");
                 return nullptr;
+            case LIBANE_OP_NEG:
+                set_error("NEG not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_MOD:
+                set_error("MOD not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_SINH:
+                set_error("SINH not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_COSH:
+                set_error("COSH not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_TAN:
+                set_error("TAN not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_ASIN:
+                set_error("ASIN not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_ACOS:
+                set_error("ACOS not supported via libane_compile — use graph API");
+                return nullptr;
             case LIBANE_OP_LAYER_NORM:
             case LIBANE_OP_LAYERNORM:
                 mil_prog = libane::mil::MilBuilder::layernorm(ms.channels, ms.seq);

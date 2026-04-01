@@ -2682,6 +2682,90 @@ def scan_lowered_support(C: int = 64, S: int = 512) -> list[ProbeResult]:
         )
     )
 
+    # NEG
+    xn = np.linspace(-2.0, 2.0, n, dtype=np.float32)
+    results.append(
+        _run_case(
+            "lowered/neg",
+            _op_code("NEG", 22),
+            [xn],
+            expected=(-xn).astype(np.float32),
+            atol=0.05,
+            note="lowering=mul(x,-1)",
+        )
+    )
+
+    # MOD (including negatives) with positive denominator.
+    xm = np.array([((i % 31) - 15) * (-1.0 if i % 2 else 1.0) for i in range(n)], dtype=np.float32)
+    ym = np.array([(i % 5) + 2 for i in range(n)], dtype=np.float32)
+    exp_mod = xm - np.floor(xm / ym) * ym
+    results.append(
+        _run_case(
+            "lowered/mod",
+            _op_code("MOD", 23),
+            [xm, ym],
+            expected=exp_mod.astype(np.float32),
+            atol=0.2,
+            note="lowering=x-floor_div(x,y)*y (floor semantics)",
+        )
+    )
+
+    # SINH/COSH/TAN on bounded range for fp16 stability.
+    xt = np.linspace(-1.0, 1.0, n, dtype=np.float32)
+    results.append(
+        _run_case(
+            "lowered/sinh",
+            _op_code("SINH", 24),
+            [xt],
+            expected=np.sinh(xt).astype(np.float32),
+            atol=0.2,
+            note="lowering=0.5*(exp(x)-exp(-x))",
+        )
+    )
+    results.append(
+        _run_case(
+            "lowered/cosh",
+            _op_code("COSH", 25),
+            [xt],
+            expected=np.cosh(xt).astype(np.float32),
+            atol=0.2,
+            note="lowering=0.5*(exp(x)+exp(-x))",
+        )
+    )
+    results.append(
+        _run_case(
+            "lowered/tan",
+            _op_code("TAN", 26),
+            [xt],
+            expected=np.tan(xt).astype(np.float32),
+            atol=0.25,
+            note="lowering=sin(x)/(cos(x)+eps)",
+        )
+    )
+
+    # ASIN/ACOS over interior domain to avoid steep boundary blowups in fp16.
+    xa = np.linspace(-0.95, 0.95, n, dtype=np.float32)
+    results.append(
+        _run_case(
+            "lowered/asin",
+            _op_code("ASIN", 27),
+            [xa],
+            expected=np.arcsin(xa).astype(np.float32),
+            atol=0.3,
+            note="lowering=atan(x/sqrt(1-x^2+eps)) with clamp",
+        )
+    )
+    results.append(
+        _run_case(
+            "lowered/acos",
+            _op_code("ACOS", 28),
+            [xa],
+            expected=np.arccos(xa).astype(np.float32),
+            atol=0.3,
+            note="lowering=pi/2-asin(x) path with clamp/eps",
+        )
+    )
+
     return results
 
 
