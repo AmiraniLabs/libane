@@ -22,6 +22,9 @@ MUL: int
 TRANSPOSE: int
 SILU: int
 RMSNORM: int
+AVG_POOL: int
+MAX_POOL: int
+LOGICAL_AND: int
 
 # ── Log level constants ───────────────────────────────────────────────────────
 

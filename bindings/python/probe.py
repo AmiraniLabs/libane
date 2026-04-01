@@ -169,6 +169,8 @@ class ProbeResult:
     expected_eval_fail: bool = False
     note: Optional[str] = None
     failure_kind: Optional[str] = None
+    raw_acceptance: Optional[bool] = None
+    libane_lowered_support: Optional[bool] = None
 
     @property
     def status(self) -> str:
@@ -276,6 +278,7 @@ def probe_custom(
             atol=atol, compile_ms=0.0, eval_ms=None,
             error=f"ane module not available: {e}",
             failure_kind="compile_reject",
+            raw_acceptance=False,
         )
 
     t0 = time.perf_counter()
@@ -292,12 +295,14 @@ def probe_custom(
             atol=atol, compile_ms=compile_ms, eval_ms=None,
             error=str(e),
             failure_kind="compile_reject",
+            raw_acceptance=False,
         )
 
     if expected is None:
         return ProbeResult(
             name=name, compiled=True, passed=None, max_err=None,
             atol=atol, compile_ms=compile_ms, eval_ms=None,
+            raw_acceptance=True,
         )
 
     t1 = time.perf_counter()
@@ -311,6 +316,7 @@ def probe_custom(
             atol=atol, compile_ms=compile_ms, eval_ms=eval_ms,
             error=str(e),
             failure_kind="runtime_reject",
+            raw_acceptance=True,
         )
 
     passed, max_err = check(name, out, expected, atol)
@@ -318,6 +324,7 @@ def probe_custom(
         name=name, compiled=True, passed=passed, max_err=max_err,
         atol=atol, compile_ms=compile_ms, eval_ms=eval_ms,
         failure_kind=None if passed else "numeric_mismatch",
+        raw_acceptance=True,
     )
 
 
@@ -2402,6 +2409,156 @@ def scan_coreml_differential(C: int = _C, S: int = _S) -> list[ProbeResult]:
     return results
 
 
+def scan_lowered_support(C: int = 64, S: int = 512) -> list[ProbeResult]:
+    """
+    Probe libane graph-IR lowering support independently from raw MIL acceptance.
+
+    This scan answers: can libane execute the op semantics via graph lowering
+    on ANE, even when standalone raw MIL forms compile-reject.
+    """
+    print("── Lowered support ───────────────────────────────────────────────")
+    n = C * S
+
+    try:
+        import ane
+    except ImportError as e:
+        return [
+            ProbeResult(
+                name="lowered/import",
+                compiled=False,
+                passed=None,
+                max_err=None,
+                atol=0.0,
+                compile_ms=0.0,
+                eval_ms=None,
+                error=f"ane module not available: {e}",
+                failure_kind="compile_reject",
+                raw_acceptance=None,
+                libane_lowered_support=False,
+            )
+        ]
+
+    def _op_code(name: str, fallback: int) -> int:
+        return int(getattr(ane, name, fallback))
+
+    def _run_case(
+        case_name: str,
+        op_code: int,
+        inputs: list[np.ndarray],
+        expected: np.ndarray,
+        atol: float,
+        note: str,
+    ) -> ProbeResult:
+        shape = [1, C, 1, S]
+        t0 = time.perf_counter()
+        try:
+            g = ane.Graph()
+            tids = [g.add_input(f"in{i}", shape) for i in range(len(inputs))]
+            out = g.add_op(op_code, tids, shape)
+            g.mark_output(out)
+            cg = g.compile()
+            compile_ms = (time.perf_counter() - t0) * 1000.0
+        except Exception as e:
+            compile_ms = (time.perf_counter() - t0) * 1000.0
+            return ProbeResult(
+                name=case_name,
+                compiled=False,
+                passed=None,
+                max_err=None,
+                atol=atol,
+                compile_ms=compile_ms,
+                eval_ms=None,
+                error=str(e),
+                failure_kind="compile_reject",
+                note=note,
+                raw_acceptance=None,
+                libane_lowered_support=False,
+            )
+
+        t1 = time.perf_counter()
+        try:
+            call_inputs: object
+            if len(inputs) == 1:
+                call_inputs = inputs[0].reshape(1, C, 1, S).astype(np.float16)
+            else:
+                call_inputs = [x.reshape(1, C, 1, S).astype(np.float16) for x in inputs]
+            out_arr = np.asarray(cg(call_inputs), dtype=np.float16).reshape(-1)
+            eval_ms = (time.perf_counter() - t1) * 1000.0
+        except Exception as e:
+            eval_ms = (time.perf_counter() - t1) * 1000.0
+            return ProbeResult(
+                name=case_name,
+                compiled=True,
+                passed=False,
+                max_err=None,
+                atol=atol,
+                compile_ms=compile_ms,
+                eval_ms=eval_ms,
+                error=str(e),
+                failure_kind="runtime_reject",
+                note=note,
+                raw_acceptance=None,
+                libane_lowered_support=False,
+            )
+
+        passed, max_err = check(case_name, out_arr, expected, atol)
+        return ProbeResult(
+            name=case_name,
+            compiled=True,
+            passed=passed,
+            max_err=max_err,
+            atol=atol,
+            compile_ms=compile_ms,
+            eval_ms=eval_ms,
+            failure_kind=None if passed else "numeric_mismatch",
+            note=note,
+            raw_acceptance=None,
+            libane_lowered_support=passed,
+        )
+
+    results: list[ProbeResult] = []
+
+    x = np.linspace(-2.0, 2.0, n, dtype=np.float32)
+    results.append(
+        _run_case(
+            "lowered/avg_pool",
+            _op_code("AVG_POOL", 12),
+            [x],
+            expected=x.astype(np.float32),
+            atol=0.05,
+            note="lowering=identity for 1x1/stride1 pool use-case",
+        )
+    )
+
+    y = np.linspace(-1.5, 1.5, n, dtype=np.float32)
+    results.append(
+        _run_case(
+            "lowered/max_pool",
+            _op_code("MAX_POOL", 13),
+            [y],
+            expected=y.astype(np.float32),
+            atol=0.05,
+            note="lowering=identity for 1x1/stride1 pool use-case",
+        )
+    )
+
+    a = np.where(np.arange(n) % 3 == 0, 0.0, 2.0).astype(np.float32)
+    b = np.where(np.arange(n) % 5 == 0, 0.0, -4.0).astype(np.float32)
+    exp_and = np.where((a != 0.0) & (b != 0.0), 1.0, 0.0).astype(np.float32)
+    results.append(
+        _run_case(
+            "lowered/logical_and",
+            _op_code("LOGICAL_AND", 14),
+            [a, b],
+            expected=exp_and,
+            atol=0.05,
+            note='lowering=cast(bool)->cast(fp16)->mul; out in {0,1}',
+        )
+    )
+
+    return results
+
+
 def scan_all() -> list[ProbeResult]:
     """Run all scans and return combined results."""
     all_results: list[ProbeResult] = []
@@ -2430,6 +2587,10 @@ def print_report(results: list[ProbeResult]) -> None:
     runtime_reject = sum(1 for r in results if r.failure_kind == "runtime_reject")
     numeric_mismatch = sum(1 for r in results if r.failure_kind == "numeric_mismatch")
     semantic_mismatch = sum(1 for r in results if r.failure_kind == "semantic_mismatch")
+    raw_known = [r for r in results if r.raw_acceptance is not None]
+    lowered_known = [r for r in results if r.libane_lowered_support is not None]
+    raw_accept = sum(1 for r in raw_known if r.raw_acceptance)
+    lowered_support = sum(1 for r in lowered_known if r.libane_lowered_support)
 
     print()
     print("═" * 67)
@@ -2439,6 +2600,14 @@ def print_report(results: list[ProbeResult]) -> None:
     print(f"  Eval verified:     {eval_pass}/{total}")
     print(f"  Compile-only:      {compile_only}/{total}")
     print(f"  Supported (strict): {eval_pass}/{total}")
+    if raw_known:
+        print(f"  Raw acceptance:    {raw_accept}/{len(raw_known)}")
+    else:
+        print("  Raw acceptance:    n/a")
+    if lowered_known:
+        print(f"  Lowered support:   {lowered_support}/{len(lowered_known)}")
+    else:
+        print("  Lowered support:   n/a")
     if compile_fail_unexp:
         print(f"  Compile failures: {compile_fail_unexp}")
     if eval_fail_unexp:
@@ -2530,6 +2699,8 @@ def export_json(results: list[ProbeResult], path: str) -> None:
                 "status": r.status,
                 "support_level": r.support_level,
                 "eval_verified": bool(r.passed is True),
+                "raw_acceptance": r.raw_acceptance,
+                "libane_lowered_support": r.libane_lowered_support,
                 "note": r.note,
                 "mil_build_info": _BUILD_INFO_FIELDS,
             }
@@ -2584,6 +2755,8 @@ def _cli() -> None:
                         help="Run automated signature+wrapper+buildInfo sweep for gap ops")
     parser.add_argument("--differential", action="store_true",
                         help="Run coremltools-vs-libane MIL differential for gap ops")
+    parser.add_argument("--lowered-support", action="store_true",
+                        help="Probe libane graph-lowering support (separate from raw MIL acceptance)")
     parser.add_argument("--sin-cos-sweep", action="store_true",
                         help="Run sin/cos input-range sweep")
     parser.add_argument("--all",        action="store_true",
@@ -2606,7 +2779,7 @@ def _cli() -> None:
         args.unary, args.binary, args.reductions, args.composite,
         args.intermediate, args.explore, args.params, args.params_all,
         args.round_semantics, args.dep_matrix, args.gap_ops, args.sig_sweep,
-        args.differential, args.sin_cos_sweep,
+        args.differential, args.lowered_support, args.sin_cos_sweep,
     ])
 
     all_results: list[ProbeResult] = []
@@ -2639,6 +2812,8 @@ def _cli() -> None:
         all_results += scan_signature_sweep()
     if args.differential:
         all_results += scan_coreml_differential()
+    if args.lowered_support:
+        all_results += scan_lowered_support()
     if args.sin_cos_sweep:
         all_results += scan_sin_cos_ranges()
 
