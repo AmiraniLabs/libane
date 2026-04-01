@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FFN inference example — libane v0.7.0
+FFN inference example — libane v0.7.1
 Amirani Labs
 
 Builds a SwiGLU feed-forward block, compiles it to ANE, and runs a
