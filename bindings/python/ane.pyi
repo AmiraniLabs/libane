@@ -133,6 +133,75 @@ def gelu(x: np.ndarray) -> np.ndarray:
     """
     ...
 
+# ── Raw MIL probe API ────────────────────────────────────────────────────────
+
+class CompiledMil:
+    """
+    Compiled raw MIL program. Returned by ``compile_mil()`` and
+    ``compile_mil_with_weights()``.
+
+    Use :mod:`probe` for a higher-level interface.
+    """
+
+    def run(
+        self,
+        inputs: list[np.ndarray],
+        output_sizes: list[int],
+    ) -> list[np.ndarray]:
+        """
+        Execute the compiled MIL program.
+
+        Args:
+            inputs:       Input arrays (converted to float16 internally).
+                          Must be in alphabetical order of MIL parameter names.
+            output_sizes: Output sizes in fp16 elements (not bytes).
+
+        Returns:
+            List of np.float16 arrays, one per output.
+
+        Raises:
+            RuntimeError on ANE dispatch failure.
+        """
+        ...
+
+
+def compile_mil(mil_text: str) -> CompiledMil:
+    """
+    Compile a raw MIL program (no external weights).
+
+    Args:
+        mil_text: UTF-8 MIL source text (complete program including buildInfo header).
+
+    Returns:
+        ``CompiledMil`` ready for ``.run()``.
+
+    Raises:
+        RuntimeError if ANE is unavailable or compilation fails.
+    """
+    ...
+
+
+def compile_mil_with_weights(
+    mil_text: str,
+    weights: dict[str, np.ndarray],
+) -> CompiledMil:
+    """
+    Compile a raw MIL program with external weight files.
+
+    Args:
+        mil_text: UTF-8 MIL source text.
+        weights:  Mapping from filename to fp16 weight array.
+                  Filenames must match ``file()`` references in the MIL text.
+
+    Returns:
+        ``CompiledMil`` ready for ``.run()``.
+
+    Raises:
+        RuntimeError if ANE is unavailable or compilation fails.
+    """
+    ...
+
+
 # ── Graph API ─────────────────────────────────────────────────────────────────
 
 class Graph:

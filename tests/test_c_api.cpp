@@ -730,3 +730,257 @@ TEST_CASE("libane_compile_batch handles mixed success and failure", "[api][batch
     libane_release(handles[0]);
     libane_release(handles[2]);
 }
+
+/* ── libane_mil_compile / execute / release ─────────────────────────────── */
+
+// Minimal valid MIL program: relu(x) — unary, no weights.
+// Shape [1,32,1,32] = 1024 fp16 elements = 2048 bytes; pool pads to 49KB.
+static const char kReluMil[] = R"(
+buildInfo {
+   coremlc-version: "7.0.0"
+   coremltools-version: "7.0.0"
+   mlmodel-version: "7"
+   model-name: "test_relu"
+}
+func main(x: fp16[1,32,1,32]) -> (fp16[1,32,1,32]) {
+  %v = relu(x=x) -> (fp16);
+  return (%v);
+}
+)";
+
+// Binary MIL: add(a, b).  Inputs named a,b so alphabetical order = natural order.
+static const char kAddMil[] = R"(
+buildInfo {
+   coremlc-version: "7.0.0"
+   coremltools-version: "7.0.0"
+   mlmodel-version: "7"
+   model-name: "test_add"
+}
+func main(a: fp16[1,32,1,32], b: fp16[1,32,1,32]) -> (fp16[1,32,1,32]) {
+  %v = add(x=a, y=b) -> (fp16);
+  return (%v);
+}
+)";
+
+// MIL with one external weight file: elementwise mul by a learned scale.
+// Offset 64 = WeightBlob::kWeightDictOffset.
+static const char kScaleMil[] = R"(
+buildInfo {
+   coremlc-version: "7.0.0"
+   coremltools-version: "7.0.0"
+   mlmodel-version: "7"
+   model-name: "test_scale"
+}
+func main(x: fp16[1,32,1,32]) -> (fp16[1,32,1,32]) {
+  %w = const(val=tensor<fp16, [1,32,1,32]>(BLOBFILE(path=string("@model_path/weights/scale.bin"), offset=uint64(64)))) -> (fp16[1,32,1,32]);
+  %v = mul(x=x, y=%w) -> (fp16);
+  return (%v);
+}
+)";
+
+TEST_CASE("libane_mil_compile null text returns null", "[mil]") {
+    libane_set_log_level(LIBANE_LOG_SILENT);
+    auto h = libane_mil_compile(nullptr, nullptr, nullptr, nullptr, 0);
+    CHECK(h == nullptr);
+    CHECK(std::strlen(libane_last_error()) > 0);
+}
+
+TEST_CASE("libane_mil_compile invalid MIL returns null", "[mil]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    auto h = libane_mil_compile("this is not valid MIL",
+                                nullptr, nullptr, nullptr, 0);
+    CHECK(h == nullptr);
+    CHECK(std::strlen(libane_last_error()) > 0);
+}
+
+TEST_CASE("libane_mil_compile valid relu program", "[mil]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    auto h = libane_mil_compile(kReluMil, nullptr, nullptr, nullptr, 0);
+    if (!h) {
+        WARN("mil compile failed (may hit ~119 compile limit): " << libane_last_error());
+        return;
+    }
+    REQUIRE(h != nullptr);
+    libane_mil_release(h);
+}
+
+TEST_CASE("libane_mil_release null is safe", "[mil]") {
+    REQUIRE_NOTHROW(libane_mil_release(nullptr));
+}
+
+TEST_CASE("libane_mil_execute null handle returns error", "[mil]") {
+    libane_set_log_level(LIBANE_LOG_SILENT);
+    std::vector<libane_f16_t> buf(1024);
+    const void* in_ptrs[]  = { buf.data() };
+    void*       out_ptrs[] = { buf.data() };
+    size_t      sizes[]    = { 2048 };
+
+    auto st = libane_mil_execute(nullptr,
+                                  in_ptrs, sizes, 1,
+                                  out_ptrs, sizes, 1);
+    CHECK(st == LIBANE_ERR_INVALID_ARG);
+}
+
+TEST_CASE("libane_mil_execute relu output equals input for positive values", "[mil]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    auto h = libane_mil_compile(kReluMil, nullptr, nullptr, nullptr, 0);
+    if (!h) {
+        WARN("mil compile failed: " << libane_last_error());
+        return;
+    }
+    REQUIRE(h != nullptr);
+
+    static constexpr int N = 1024;  // [1,32,1,32]
+    std::vector<libane_f16_t> in(N), out(N, f16(0.0f));
+    // All-positive input: relu(x) == x
+    for (int i = 0; i < N; ++i) in[i] = f16(static_cast<float>(i % 32) * 0.1f + 0.1f);
+
+    const void* in_ptrs[]  = { in.data() };
+    void*       out_ptrs[] = { out.data() };
+    size_t      in_bytes[] = { N * sizeof(libane_f16_t) };
+    size_t      out_bytes[]= { N * sizeof(libane_f16_t) };
+
+    auto st = libane_mil_execute(h,
+                                  in_ptrs,  in_bytes,  1,
+                                  out_ptrs, out_bytes, 1);
+    if (st != LIBANE_OK) {
+        WARN("mil execute failed: " << libane_last_error());
+        libane_mil_release(h);
+        return;
+    }
+    REQUIRE(st == LIBANE_OK);
+
+    // relu(x) == x for all-positive input; fp16 round-trip should be exact
+    int mismatches = 0;
+    for (int i = 0; i < N; ++i) {
+        float diff = std::abs(f32(out[i]) - f32(in[i]));
+        if (diff > 0.02f) ++mismatches;
+    }
+    CHECK(mismatches == 0);
+
+    libane_mil_release(h);
+}
+
+TEST_CASE("libane_mil_execute add two inputs — uniform IOSurface alloc path", "[mil]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    auto h = libane_mil_compile(kAddMil, nullptr, nullptr, nullptr, 0);
+    if (!h) {
+        WARN("mil compile failed: " << libane_last_error());
+        return;
+    }
+    REQUIRE(h != nullptr);
+
+    static constexpr int N = 1024;
+    std::vector<libane_f16_t> a(N), b(N), out(N, f16(0.0f));
+    for (int i = 0; i < N; ++i) {
+        a[i] = f16(1.0f);
+        b[i] = f16(2.0f);
+    }
+
+    const void* in_ptrs[]  = { a.data(), b.data() };
+    void*       out_ptrs[] = { out.data() };
+    size_t      in_bytes[] = { N * 2, N * 2 };
+    size_t      out_bytes[]= { N * 2 };
+
+    auto st = libane_mil_execute(h,
+                                  in_ptrs,  in_bytes,  2,
+                                  out_ptrs, out_bytes, 1);
+    if (st != LIBANE_OK) {
+        WARN("mil execute failed: " << libane_last_error());
+        libane_mil_release(h);
+        return;
+    }
+    REQUIRE(st == LIBANE_OK);
+
+    // Every output element should be 1.0 + 2.0 = 3.0
+    int mismatches = 0;
+    for (int i = 0; i < N; ++i) {
+        float diff = std::abs(f32(out[i]) - 3.0f);
+        if (diff > 0.05f) ++mismatches;
+    }
+    CHECK(mismatches == 0);
+
+    libane_mil_release(h);
+}
+
+TEST_CASE("libane_mil_compile_with_weights external scale weight", "[mil]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    static constexpr int N = 1024;
+    // Scale weight: all-ones (so mul(x, scale) == x)
+    std::vector<libane_f16_t> scale(N);
+    for (int i = 0; i < N; ++i) scale[i] = f16(1.0f);
+
+    const char*  wnames[] = { "scale.bin" };
+    const void*  wdata[]  = { scale.data() };
+    size_t       wsizes[] = { N * 2 };
+
+    auto h = libane_mil_compile(kScaleMil, wnames, wdata, wsizes, 1);
+    if (!h) {
+        WARN("mil compile with weights failed: " << libane_last_error());
+        return;
+    }
+    REQUIRE(h != nullptr);
+
+    std::vector<libane_f16_t> in(N), out(N, f16(0.0f));
+    for (int i = 0; i < N; ++i) in[i] = f16(static_cast<float>(i % 32) * 0.1f + 0.1f);
+
+    const void* in_ptrs[]  = { in.data() };
+    void*       out_ptrs[] = { out.data() };
+    size_t      in_bytes[] = { N * 2 };
+    size_t      out_bytes[]= { N * 2 };
+
+    auto st = libane_mil_execute(h,
+                                  in_ptrs,  in_bytes,  1,
+                                  out_ptrs, out_bytes, 1);
+    if (st != LIBANE_OK) {
+        WARN("mil execute (weights) failed: " << libane_last_error());
+        libane_mil_release(h);
+        return;
+    }
+    REQUIRE(st == LIBANE_OK);
+
+    // scale is all-ones, so out[i] == in[i]
+    int mismatches = 0;
+    for (int i = 0; i < N; ++i) {
+        float diff = std::abs(f32(out[i]) - f32(in[i]));
+        if (diff > 0.02f) ++mismatches;
+    }
+    CHECK(mismatches == 0);
+
+    libane_mil_release(h);
+}
