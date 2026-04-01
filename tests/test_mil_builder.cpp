@@ -312,6 +312,19 @@ TEST_CASE("MilBuilder::reduce_prod lowers to log+reduce_sum+exp", "[mil][build]"
     CHECK(prog.output_shape == (TensorShape{1, 1, 1, 64}));
 }
 
+TEST_CASE("MilBuilder::scatter_static_mask lowers to mask blend", "[mil][build]") {
+    auto prog = MilBuilder::scatter_static_mask(8, 64, "mask.bin");
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("BLOBFILE(path=string(\"@model_path/weights/mask.bin\")"));
+    CHECK_THAT(prog.text, ContainsSubstring("sub(x=one, y=m)"));
+    CHECK_THAT(prog.text, ContainsSubstring("mul(x=base, y=inv)"));
+    CHECK_THAT(prog.text, ContainsSubstring("mul(x=updates, y=m)"));
+    CHECK_THAT(prog.text, ContainsSubstring("add(x=xb, y=uu)"));
+    CHECK(prog.weight_name == "mask.bin");
+    CHECK(prog.input_shape  == (TensorShape{1, 8, 1, 64}));
+    CHECK(prog.output_shape == (TensorShape{1, 8, 1, 64}));
+}
+
 /* ── MilBuilder — rmsnorm ────────────────────────────────────────────────── */
 
 TEST_CASE("MilBuilder::rmsnorm uses reduce_sum + pow path", "[mil][build]") {

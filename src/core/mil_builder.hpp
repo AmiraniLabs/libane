@@ -268,6 +268,16 @@ public:
     static MilProgram reduce_prod(int C, int SP);
 
     /**
+     * Static-mask scatter lowering.
+     *
+     * Semantics:
+     *   out = base * (1 - mask) + updates * mask
+     * where mask is a compile-time fp16 tensor [1,C,1,S] stored as weights.
+     */
+    static MilProgram scatter_static_mask(int C, int SP,
+                                           const std::string& mask_file = "mask.bin");
+
+    /**
      * Elementwise add. No weights.
      */
     static MilProgram add(int C, int SP);
@@ -384,6 +394,12 @@ public:
     static MilFragment reduce_prod_fragment(int C, int SP,
                                              const std::string& in_var,
                                              const std::string& out_var);
+
+    static MilFragment scatter_static_mask_fragment(int C, int SP,
+                                                     const std::string& base_var,
+                                                     const std::string& updates_var,
+                                                     const std::string& out_var,
+                                                     const std::string& mask_file = "mask.bin");
 
     static MilFragment transpose_fragment(int C, int SP,
                                            const std::string& in_var,

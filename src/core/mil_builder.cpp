@@ -579,6 +579,36 @@ MilProgram MilBuilder::reduce_prod(int C, int SP) {
     return p;
 }
 
+/* ── scatter static-mask (lowered) ──────────────────────────────────────── */
+
+MilProgram MilBuilder::scatter_static_mask(int C, int SP,
+                                            const std::string& mask_file) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string mref = tt + "(BLOBFILE(path=string(\"@model_path/weights/" + mask_file +
+                       "\"), offset=uint64(" + std::to_string(WeightBlob::kWeightDictOffset) + ")))";
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " base, " + tt + " updates) {\n";
+    t += "        " + tt + " m = const()[name=string(\"m\"), val=" + mref + "];\n";
+    t += "        fp16 one = const()[name=string(\"one\"), val=fp16(1.0)];\n";
+    t += "        " + tt + " inv = sub(x=one, y=m)[name=string(\"inv\")];\n";
+    t += "        " + tt + " xb = mul(x=base, y=inv)[name=string(\"xb\")];\n";
+    t += "        " + tt + " uu = mul(x=updates, y=m)[name=string(\"uu\")];\n";
+    t += "        " + tt + " out = add(x=xb, y=uu)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = mask_file;
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
 /* ── add ─────────────────────────────────────────────────────────────────── */
 
 MilProgram MilBuilder::add(int C, int SP) {
@@ -1173,6 +1203,37 @@ MilFragment MilBuilder::reduce_prod_fragment(int C, int SP,
     f.input_name   = in_var;
     f.output_name  = out_var;
     f.output_shape = out;
+    return f;
+}
+
+MilFragment MilBuilder::scatter_static_mask_fragment(int C, int SP,
+                                                      const std::string& base_var,
+                                                      const std::string& updates_var,
+                                                      const std::string& out_var,
+                                                      const std::string& mask_file) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string mref = tt + "(BLOBFILE(path=string(\"@model_path/weights/" + mask_file +
+                       "\"), offset=uint64(" + std::to_string(WeightBlob::kWeightDictOffset) + ")))";
+
+    std::string body;
+    body += "        " + tt + " " + p + "m = const()[name=string(\"" + p + "m\"), val=" + mref + "];\n";
+    body += "        fp16 " + p + "one = const()[name=string(\"" + p + "one\"), val=fp16(1.0)];\n";
+    body += "        " + tt + " " + p + "inv = sub(x=" + p + "one, y=" + p + "m)[name=string(\"" + p + "inv\")];\n";
+    body += "        " + tt + " " + p + "xb = mul(x=" + base_var + ", y=" + p + "inv)[name=string(\"" + p + "xb\")];\n";
+    body += "        " + tt + " " + p + "uu = mul(x=" + updates_var + ", y=" + p + "m)[name=string(\"" + p + "uu\")];\n";
+    body += "        " + tt + " " + out_var + " = add(x=" + p + "xb, y=" + p + "uu)[name=string(\"" + p + "out\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = base_var;
+    f.side_input_name = updates_var;
+    f.output_name     = out_var;
+    f.weight_file     = mask_file;
+    f.output_shape    = shape;
     return f;
 }
 

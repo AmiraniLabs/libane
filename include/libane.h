@@ -57,6 +57,7 @@ typedef enum {
     LIBANE_OP_LOGICAL_OR = 15,
     LIBANE_OP_LOGICAL_XOR= 16,
     LIBANE_OP_REDUCE_PROD= 17,
+    LIBANE_OP_SCATTER    = 18,
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */

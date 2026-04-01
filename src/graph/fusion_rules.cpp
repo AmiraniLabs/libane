@@ -21,6 +21,7 @@ bool FusionRules::op_supported(libane_op_t op) {
     case LIBANE_OP_LOGICAL_OR:
     case LIBANE_OP_LOGICAL_XOR:
     case LIBANE_OP_REDUCE_PROD:
+    case LIBANE_OP_SCATTER:
     case LIBANE_OP_SILU:
     case LIBANE_OP_RMSNORM:
     case LIBANE_OP_LAYERNORM:

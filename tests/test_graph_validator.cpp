@@ -224,6 +224,26 @@ TEST_CASE("reduce_prod: wrong output shape fails", "[validator][weights]") {
     REQUIRE_FALSE(r.ok());
 }
 
+TEST_CASE("scatter: static-mask weights and matching shapes pass", "[validator][weights]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(64, 128));
+    TensorId u = g.add_input("u", S(64, 128));
+    auto mask = fp16_ones(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_SCATTER, {a, u}, S(64, 128), mask.data(), mask.size() * 2);
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("scatter: missing mask weights fails", "[validator][weights]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(64, 128));
+    TensorId u = g.add_input("u", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_SCATTER, {a, u}, S(64, 128));
+    g.mark_output(o);
+    auto r = GraphValidator::validate(g);
+    REQUIRE_FALSE(r.ok());
+}
+
 TEST_CASE("transpose: no weights passes", "[validator][weights]") {
     // transpose [1,C,1,S] -> [1,S,1,C]: output channels = input seq, output seq = input channels
     auto r = validate_single(LIBANE_OP_TRANSPOSE, S(512, 128), S(128, 512), 0);

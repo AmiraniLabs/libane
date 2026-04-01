@@ -85,6 +85,19 @@ static std::vector<uint8_t> layernorm_bytes(int C, float gamma_val = 1.0f,
     return g;
 }
 
+static std::vector<uint8_t> scatter_mask_bytes(int C, int SP) {
+    // One static write position per channel: mask[c, idx(c)] = 1, else 0.
+    const size_t n = static_cast<size_t>(C) * SP;
+    std::vector<uint8_t> w(n * 2, 0);
+    const fp16 one = to_f16(1.0f);
+    for (int c = 0; c < C; ++c) {
+        int idx = (7 * c + 3) % SP;
+        size_t lin = static_cast<size_t>(c) * SP + static_cast<size_t>(idx);
+        std::memcpy(w.data() + lin * 2, &one, 2);
+    }
+    return w;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Tier 1 — C++ build_plan on realistic sub-graphs
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -414,4 +427,45 @@ TEST_CASE("T3: execute returns false for mismatched input count", "[integration]
 
     bool ok = GraphExecutor::execute(*cg, {}, {}, {out_ptr}, {out_bytes});
     CHECK(!ok);
+}
+
+TEST_CASE("T3: static-mask scatter compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+
+    AneGraph g;
+    TensorId base = g.add_input("base", S(C, SP));
+    TensorId upd  = g.add_input("updates", S(C, SP));
+    auto mask = scatter_mask_bytes(C, SP);
+    TensorId out = g.add_op(LIBANE_OP_SCATTER, {base, upd}, S(C, SP), mask.data(), mask.size());
+    g.mark_output(out);
+
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    std::vector<fp16> base_data(n), upd_data(n), out_data(n, to_f16(0.0f));
+    for (size_t i = 0; i < n; ++i) {
+        base_data[i] = to_f16(static_cast<float>(i % 97) * 0.125f - 3.0f);
+        upd_data[i]  = to_f16(100.0f + static_cast<float>(i % 31));
+    }
+
+    const void* in_ptrs[2] = {base_data.data(), upd_data.data()};
+    size_t in_sizes[2] = {base_data.size() * sizeof(fp16), upd_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_sizes[1] = {out_data.size() * sizeof(fp16)};
+
+    bool ok = GraphExecutor::execute(*cg,
+                                     {in_ptrs[0], in_ptrs[1]},
+                                     {in_sizes[0], in_sizes[1]},
+                                     {out_ptrs[0]},
+                                     {out_sizes[0]});
+    REQUIRE(ok);
+
+    for (int c = 0; c < C; ++c) {
+        int idx = (7 * c + 3) % SP;
+        size_t lin = static_cast<size_t>(c) * SP + static_cast<size_t>(idx);
+        CHECK(near(to_f32(out_data[lin]), to_f32(upd_data[lin]), 0.0f, 0.1f));
+    }
 }

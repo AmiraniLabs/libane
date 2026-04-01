@@ -2455,6 +2455,7 @@ def scan_lowered_support(C: int = 64, S: int = 512) -> list[ProbeResult]:
         atol: float,
         note: str,
         output_shape: Optional[list[int]] = None,
+        weights: Optional[np.ndarray] = None,
     ) -> ProbeResult:
         in_shape = [1, C, 1, S]
         out_shape = output_shape if output_shape is not None else in_shape
@@ -2462,7 +2463,7 @@ def scan_lowered_support(C: int = 64, S: int = 512) -> list[ProbeResult]:
         try:
             g = ane.Graph()
             tids = [g.add_input(f"in{i}", in_shape) for i in range(len(inputs))]
-            out = g.add_op(op_code, tids, out_shape)
+            out = g.add_op(op_code, tids, out_shape, None if weights is None else weights)
             g.mark_output(out)
             cg = g.compile()
             if output_shape is not None:
@@ -2601,6 +2602,28 @@ def scan_lowered_support(C: int = 64, S: int = 512) -> list[ProbeResult]:
             atol=0.2,
             note="lowering=exp(reduce_sum(log(x+eps))); domain expects positive inputs",
             output_shape=[1, 1, 1, S],
+        )
+    )
+
+    # Static-mask scatter lowering:
+    #   out = base * (1 - mask) + updates * mask
+    # implemented as a graph op with mask provided as compile-time fp16 weights.
+    base = np.linspace(-2.0, 2.0, n, dtype=np.float32)
+    upd = (1.0 + (np.arange(n, dtype=np.float32) % 37) * 0.125)
+    mask = np.zeros((n,), dtype=np.float16)
+    for c in range(C):
+        idx = (7 * c + 3) % S
+        mask[c * S + idx] = np.float16(1.0)
+    exp_sc = base * (1.0 - mask.astype(np.float32)) + upd * mask.astype(np.float32)
+    results.append(
+        _run_case(
+            "lowered/scatter_static_mask",
+            _op_code("SCATTER", 18),
+            [base, upd],
+            expected=exp_sc,
+            atol=0.05,
+            note="lowering=base*(1-mask)+updates*mask with static fp16 mask weights",
+            weights=mask,
         )
     )
 

@@ -273,6 +273,17 @@ TEST_CASE("libane_compile reduce_prod is graph-only", "[api]") {
     CHECK(std::strlen(libane_last_error()) > 0);
 }
 
+TEST_CASE("libane_compile scatter is graph-only", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+    auto h = libane_compile(LIBANE_OP_SCATTER, shape, nullptr, 0);
+    CHECK(h == nullptr);
+    CHECK(std::strlen(libane_last_error()) > 0);
+}
+
 TEST_CASE("libane_execute avg_pool lowering path behaves as identity", "[api]") {
     libane_set_backend(nullptr);
     libane_set_log_level(LIBANE_LOG_SILENT);
