@@ -227,6 +227,18 @@ TEST_CASE("build_plan: logical_or and logical_xor are supported binary ops", "[c
     CHECK(plan.groups[0].output == x);
 }
 
+TEST_CASE("build_plan: reduce_prod unary reduction node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(256, 128));
+    TensorId r = g.add_op(LIBANE_OP_REDUCE_PROD, {x}, S(1, 128));
+    g.mark_output(r);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 1);
+    CHECK(plan.groups[0].output == r);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * 4. Layernorm weight splitting
  * ═══════════════════════════════════════════════════════════════════════════ */

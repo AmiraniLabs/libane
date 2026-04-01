@@ -2448,15 +2448,19 @@ def scan_lowered_support(C: int = 64, S: int = 512) -> list[ProbeResult]:
         expected: np.ndarray,
         atol: float,
         note: str,
+        output_shape: Optional[list[int]] = None,
     ) -> ProbeResult:
-        shape = [1, C, 1, S]
+        in_shape = [1, C, 1, S]
+        out_shape = output_shape if output_shape is not None else in_shape
         t0 = time.perf_counter()
         try:
             g = ane.Graph()
-            tids = [g.add_input(f"in{i}", shape) for i in range(len(inputs))]
-            out = g.add_op(op_code, tids, shape)
+            tids = [g.add_input(f"in{i}", in_shape) for i in range(len(inputs))]
+            out = g.add_op(op_code, tids, out_shape)
             g.mark_output(out)
             cg = g.compile()
+            if output_shape is not None:
+                cg.set_output_shapes([out_shape])
             compile_ms = (time.perf_counter() - t0) * 1000.0
         except Exception as e:
             compile_ms = (time.perf_counter() - t0) * 1000.0
@@ -2577,6 +2581,20 @@ def scan_lowered_support(C: int = 64, S: int = 512) -> list[ProbeResult]:
             expected=exp_xor,
             atol=0.05,
             note='lowering=cast(bool)->cast(fp16)->not_equal->cast(fp16); out in {0,1}',
+        )
+    )
+
+    xr = np.linspace(0.95, 1.05, n, dtype=np.float32)
+    exp_rp = xr.reshape(1, C, 1, S).prod(axis=1, keepdims=True).astype(np.float32).reshape(-1)
+    results.append(
+        _run_case(
+            "lowered/reduce_prod",
+            _op_code("REDUCE_PROD", 17),
+            [xr],
+            expected=exp_rp,
+            atol=0.2,
+            note="lowering=exp(reduce_sum(log(x+eps))); domain expects positive inputs",
+            output_shape=[1, 1, 1, S],
         )
     )
 

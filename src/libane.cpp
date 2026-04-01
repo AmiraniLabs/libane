@@ -226,6 +226,9 @@ libane_handle_t libane_compile(libane_op_t op,
             case LIBANE_OP_LOGICAL_XOR:
                 mil_prog = libane::mil::MilBuilder::logical_xor(ms.channels, ms.seq);
                 break;
+            case LIBANE_OP_REDUCE_PROD:
+                set_error("REDUCE_PROD not supported via libane_compile — use graph API with output shape [1,1,1,S]");
+                return nullptr;
             case LIBANE_OP_LAYER_NORM:
             case LIBANE_OP_LAYERNORM:
                 mil_prog = libane::mil::MilBuilder::layernorm(ms.channels, ms.seq);

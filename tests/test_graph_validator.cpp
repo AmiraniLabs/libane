@@ -214,6 +214,16 @@ TEST_CASE("max_pool: no weights passes", "[validator][weights]") {
     CHECK(r.ok());
 }
 
+TEST_CASE("reduce_prod: [1,C,1,S] -> [1,1,1,S] passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_REDUCE_PROD, S(512, 128), S(1, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("reduce_prod: wrong output shape fails", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_REDUCE_PROD, S(512, 128), S(512, 128), 0);
+    REQUIRE_FALSE(r.ok());
+}
+
 TEST_CASE("transpose: no weights passes", "[validator][weights]") {
     // transpose [1,C,1,S] -> [1,S,1,C]: output channels = input seq, output seq = input channels
     auto r = validate_single(LIBANE_OP_TRANSPOSE, S(512, 128), S(128, 512), 0);

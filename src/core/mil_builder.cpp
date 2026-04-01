@@ -546,6 +546,39 @@ MilProgram MilBuilder::logical_xor(int C, int SP) {
     return p;
 }
 
+/* ── reduce_prod (lowered) ──────────────────────────────────────────────── */
+
+MilProgram MilBuilder::reduce_prod(int C, int SP) {
+    TensorShape in{1, C, 1, SP};
+    TensorShape out{1, 1, 1, SP};
+    in.validate();
+    out.validate();
+
+    std::string tin = tensor_type(in);
+    std::string tout = tensor_type(out);
+
+    // Lower reduce_prod using:
+    // reduce_prod(x) = exp(reduce_sum(log(x + eps), axis=1, keep_dims=true))
+    std::string t = header();
+    t += "    func main<ios18>(" + tin + " x) {\n";
+    t += "        fp16 rp_eps = const()[name=string(\"rp_eps\"), val=fp16(0x1.0cp-17)];\n";
+    t += "        " + tin + " rp_x = add(x=x, y=rp_eps)[name=string(\"rp_x\")];\n";
+    t += "        " + tin + " rp_l = log(x=rp_x, epsilon=rp_eps)[name=string(\"rp_l\")];\n";
+    t += "        tensor<int32, [1]> rp_ax = const()[name=string(\"rp_ax\"), val=tensor<int32, [1]>([1])];\n";
+    t += "        bool rp_kd = const()[name=string(\"rp_kd\"), val=bool(true)];\n";
+    t += "        " + tout + " rp_s = reduce_sum(x=rp_l, axes=rp_ax, keep_dims=rp_kd)[name=string(\"rp_s\")];\n";
+    t += "        " + tout + " y = exp(x=rp_s)[name=string(\"rp_out\")];\n";
+    t += "    } -> (y);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = in;
+    p.output_shape = out;
+    return p;
+}
+
 /* ── add ─────────────────────────────────────────────────────────────────── */
 
 MilProgram MilBuilder::add(int C, int SP) {
@@ -1111,6 +1144,35 @@ MilFragment MilBuilder::logical_xor_fragment(int C, int SP,
     f.side_input_name = side_var;
     f.output_name     = out_var;
     f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::reduce_prod_fragment(int C, int SP,
+                                              const std::string& in_var,
+                                              const std::string& out_var) {
+    TensorShape in{1, C, 1, SP};
+    TensorShape out{1, 1, 1, SP};
+    in.validate();
+    out.validate();
+
+    const std::string p = out_var + "_";
+    std::string tin = tensor_type(in);
+    std::string tout = tensor_type(out);
+
+    std::string body;
+    body += "        fp16 " + p + "eps = const()[name=string(\"" + p + "eps\"), val=fp16(0x1.0cp-17)];\n";
+    body += "        " + tin + " " + p + "x = add(x=" + in_var + ", y=" + p + "eps)[name=string(\"" + p + "x\")];\n";
+    body += "        " + tin + " " + p + "l = log(x=" + p + "x, epsilon=" + p + "eps)[name=string(\"" + p + "l\")];\n";
+    body += "        tensor<int32, [1]> " + p + "ax = const()[name=string(\"" + p + "ax\"), val=tensor<int32, [1]>([1])];\n";
+    body += "        bool " + p + "kd = const()[name=string(\"" + p + "kd\"), val=bool(true)];\n";
+    body += "        " + tout + " " + p + "s = reduce_sum(x=" + p + "l, axes=" + p + "ax, keep_dims=" + p + "kd)[name=string(\"" + p + "s\")];\n";
+    body += "        " + tout + " " + out_var + " = exp(x=" + p + "s)[name=string(\"" + p + "out\")];\n";
+
+    MilFragment f;
+    f.body         = std::move(body);
+    f.input_name   = in_var;
+    f.output_name  = out_var;
+    f.output_shape = out;
     return f;
 }
 

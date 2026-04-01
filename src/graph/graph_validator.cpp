@@ -255,6 +255,22 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
                     " weight bytes were provided");
             break;
 
+        case LIBANE_OP_REDUCE_PROD: {
+            if (!n.weights.empty())
+                err("op is weight-free but " + std::to_string(n.weights.size()) +
+                    " weight bytes were provided");
+            if (n.inputs.size() != 1) {
+                err("reduce_prod requires exactly one input, got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            const auto& in_t = g.tensor(n.inputs[0]);
+            if (out_t.shape.channels != 1 || out_t.shape.seq != in_t.shape.seq) {
+                err("reduce_prod output shape must be [1,1,1,S] with S matching input");
+            }
+            break;
+        }
+
         case LIBANE_OP_ADD:
         case LIBANE_OP_MUL:
         case LIBANE_OP_LOGICAL_AND:

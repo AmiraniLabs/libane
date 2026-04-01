@@ -262,6 +262,12 @@ public:
     static MilProgram logical_xor(int C, int SP);
 
     /**
+     * Reduce-product lowering path across channels (axis=1, keep_dims=true).
+     * Input: [1,C,1,S], Output: [1,1,1,S]
+     */
+    static MilProgram reduce_prod(int C, int SP);
+
+    /**
      * Elementwise add. No weights.
      */
     static MilProgram add(int C, int SP);
@@ -373,6 +379,10 @@ public:
     static MilFragment logical_xor_fragment(int C, int SP,
                                              const std::string& in_var,
                                              const std::string& side_var,
+                                             const std::string& out_var);
+
+    static MilFragment reduce_prod_fragment(int C, int SP,
+                                             const std::string& in_var,
                                              const std::string& out_var);
 
     static MilFragment transpose_fragment(int C, int SP,

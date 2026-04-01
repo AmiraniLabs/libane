@@ -300,6 +300,18 @@ TEST_CASE("MilBuilder::logical_xor lowers to cast+not_equal", "[mil][build]") {
     CHECK(prog.output_shape == (TensorShape{1, 8, 1, 64}));
 }
 
+TEST_CASE("MilBuilder::reduce_prod lowers to log+reduce_sum+exp", "[mil][build]") {
+    auto prog = MilBuilder::reduce_prod(16, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("log(x=rp_x, epsilon=rp_eps)"));
+    CHECK_THAT(prog.text, ContainsSubstring("reduce_sum(x=rp_l"));
+    CHECK_THAT(prog.text, ContainsSubstring("exp(x=rp_s)"));
+    CHECK_FALSE(prog.text.find("reduce_prod(") != std::string::npos);
+    CHECK(prog.weight_name.empty());
+    CHECK(prog.input_shape  == (TensorShape{1, 16, 1, 64}));
+    CHECK(prog.output_shape == (TensorShape{1, 1, 1, 64}));
+}
+
 /* ── MilBuilder — rmsnorm ────────────────────────────────────────────────── */
 
 TEST_CASE("MilBuilder::rmsnorm uses reduce_sum + pow path", "[mil][build]") {

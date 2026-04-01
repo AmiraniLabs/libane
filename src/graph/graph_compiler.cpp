@@ -107,6 +107,10 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
             out_shape.channels, out_shape.seq,
             in_var, tensor_var(node.inputs[1]), out_var);
 
+    case LIBANE_OP_REDUCE_PROD:
+        return mil::MilBuilder::reduce_prod_fragment(
+            in_shape.channels, in_shape.seq, in_var, out_var);
+
     default:
         throw std::runtime_error(
             "node_to_fragment: unsupported op " + std::to_string(node.op));
