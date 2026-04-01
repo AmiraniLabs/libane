@@ -204,6 +204,143 @@ TEST_CASE("softmax: no weights passes", "[validator][weights]") {
     CHECK(r.ok());
 }
 
+TEST_CASE("avg_pool: no weights passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_AVG_POOL, S(512, 128), S(512, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("max_pool: no weights passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_MAX_POOL, S(512, 128), S(512, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("reduce_prod: [1,C,1,S] -> [1,1,1,S] passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_REDUCE_PROD, S(512, 128), S(1, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("reduce_prod: wrong output shape fails", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_REDUCE_PROD, S(512, 128), S(512, 128), 0);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("scatter: static-mask weights and matching shapes pass", "[validator][weights]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(64, 128));
+    TensorId u = g.add_input("u", S(64, 128));
+    auto mask = fp16_ones(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_SCATTER, {a, u}, S(64, 128), mask.data(), mask.size() * 2);
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("scatter: missing mask weights fails", "[validator][weights]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(64, 128));
+    TensorId u = g.add_input("u", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_SCATTER, {a, u}, S(64, 128));
+    g.mark_output(o);
+    auto r = GraphValidator::validate(g);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("scatter_nd: static-mask weights and matching shapes pass", "[validator][weights]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(64, 128));
+    TensorId u = g.add_input("u", S(64, 128));
+    auto mask = fp16_ones(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_SCATTER_ND, {a, u}, S(64, 128), mask.data(), mask.size() * 2);
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("scatter_along_axis: static-mask weights and matching shapes pass", "[validator][weights]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(64, 128));
+    TensorId u = g.add_input("u", S(64, 128));
+    auto mask = fp16_ones(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_SCATTER_ALONG_AXIS, {a, u}, S(64, 128), mask.data(), mask.size() * 2);
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("gather(static): mask weights and matching shapes pass", "[validator][weights]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    auto mask = fp16_ones(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x}, S(64, 128), mask.data(), mask.size() * 2);
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("gather(dynamic): two inputs with matching shapes pass", "[validator][weights]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId m = g.add_input("m", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x, m}, S(64, 128));
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("gather(static): missing mask weights fails", "[validator][weights]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x}, S(64, 128));
+    g.mark_output(o);
+    auto r = GraphValidator::validate(g);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("gather(dynamic): weights provided fails", "[validator][weights]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId m = g.add_input("m", S(64, 128));
+    auto w = fp16_ones(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x, m}, S(64, 128), w.data(), w.size() * 2);
+    g.mark_output(o);
+    auto r = GraphValidator::validate(g);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("neg: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_NEG, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("sinh: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_SINH, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("cosh: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_COSH, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("tan: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_TAN, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("asin: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_ASIN, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("acos: unary weight-free passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_ACOS, S(64, 128), S(64, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("mod: binary weight-free passes", "[validator][weights]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId y = g.add_input("y", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_MOD, {x, y}, S(64, 128));
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
 TEST_CASE("transpose: no weights passes", "[validator][weights]") {
     // transpose [1,C,1,S] -> [1,S,1,C]: output channels = input seq, output seq = input channels
     auto r = validate_single(LIBANE_OP_TRANSPOSE, S(512, 128), S(128, 512), 0);
@@ -259,6 +396,33 @@ TEST_CASE("mul: matching input shapes passes", "[validator][binary]") {
     TensorId a = g.add_input("a", S(512, 128));
     TensorId b = g.add_input("b", S(512, 128));
     TensorId c = g.add_op(LIBANE_OP_MUL, {a, b}, S(512, 128));
+    g.mark_output(c);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("logical_and: matching input shapes passes", "[validator][binary]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(512, 128));
+    TensorId b = g.add_input("b", S(512, 128));
+    TensorId c = g.add_op(LIBANE_OP_LOGICAL_AND, {a, b}, S(512, 128));
+    g.mark_output(c);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("logical_or: matching input shapes passes", "[validator][binary]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(512, 128));
+    TensorId b = g.add_input("b", S(512, 128));
+    TensorId c = g.add_op(LIBANE_OP_LOGICAL_OR, {a, b}, S(512, 128));
+    g.mark_output(c);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("logical_xor: matching input shapes passes", "[validator][binary]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(512, 128));
+    TensorId b = g.add_input("b", S(512, 128));
+    TensorId c = g.add_op(LIBANE_OP_LOGICAL_XOR, {a, b}, S(512, 128));
     g.mark_output(c);
     CHECK(GraphValidator::validate(g).ok());
 }
