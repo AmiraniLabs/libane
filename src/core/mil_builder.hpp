@@ -228,6 +228,28 @@ public:
     static MilProgram softmax(int C, int SP);
 
     /**
+     * avg_pool lowering path for graph IR.
+     *
+     * Current graph usage is identity-equivalent kernel/stride (1x1/1x1), so
+     * we lower to identity to avoid ANE standalone compile rejects.
+     */
+    static MilProgram avg_pool(int C, int SP);
+
+    /**
+     * max_pool lowering path for graph IR.
+     *
+     * Current graph usage is identity-equivalent kernel/stride (1x1/1x1), so
+     * we lower to identity to avoid ANE standalone compile rejects.
+     */
+    static MilProgram max_pool(int C, int SP);
+
+    /**
+     * Logical AND lowering path.
+     * Semantics: out = fp16(bool(x) && bool(y)).
+     */
+    static MilProgram logical_and(int C, int SP);
+
+    /**
      * Elementwise add. No weights.
      */
     static MilProgram add(int C, int SP);
@@ -308,6 +330,14 @@ public:
                                          const std::string& in_var,
                                          const std::string& out_var);
 
+    static MilFragment avg_pool_fragment(int C, int SP,
+                                          const std::string& in_var,
+                                          const std::string& out_var);
+
+    static MilFragment max_pool_fragment(int C, int SP,
+                                          const std::string& in_var,
+                                          const std::string& out_var);
+
     static MilFragment add_fragment(int C, int SP,
                                      const std::string& in_var,
                                      const std::string& side_var,
@@ -317,6 +347,11 @@ public:
                                      const std::string& in_var,
                                      const std::string& side_var,
                                      const std::string& out_var);
+
+    static MilFragment logical_and_fragment(int C, int SP,
+                                             const std::string& in_var,
+                                             const std::string& side_var,
+                                             const std::string& out_var);
 
     static MilFragment transpose_fragment(int C, int SP,
                                            const std::string& in_var,

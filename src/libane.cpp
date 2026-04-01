@@ -202,6 +202,12 @@ libane_handle_t libane_compile(libane_op_t op,
             case LIBANE_OP_SOFTMAX:
                 mil_prog = libane::mil::MilBuilder::softmax(ms.channels, ms.seq);
                 break;
+            case LIBANE_OP_AVG_POOL:
+                mil_prog = libane::mil::MilBuilder::avg_pool(ms.channels, ms.seq);
+                break;
+            case LIBANE_OP_MAX_POOL:
+                mil_prog = libane::mil::MilBuilder::max_pool(ms.channels, ms.seq);
+                break;
             case LIBANE_OP_GELU:
                 mil_prog = libane::mil::MilBuilder::gelu(ms.channels, ms.seq);
                 break;
@@ -210,6 +216,9 @@ libane_handle_t libane_compile(libane_op_t op,
                 break;
             case LIBANE_OP_MUL:
                 mil_prog = libane::mil::MilBuilder::mul(ms.channels, ms.seq);
+                break;
+            case LIBANE_OP_LOGICAL_AND:
+                mil_prog = libane::mil::MilBuilder::logical_and(ms.channels, ms.seq);
                 break;
             case LIBANE_OP_LAYER_NORM:
             case LIBANE_OP_LAYERNORM:

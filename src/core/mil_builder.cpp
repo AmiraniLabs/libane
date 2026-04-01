@@ -416,6 +416,79 @@ MilProgram MilBuilder::softmax(int C, int SP) {
     return p;
 }
 
+/* ── avg_pool (lowered) ─────────────────────────────────────────────────── */
+
+MilProgram MilBuilder::avg_pool(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    // ANE accepts identity robustly. For the graph's current 1x1/stride1 pool
+    // use-case, avg_pool is semantically identity.
+    std::string t = header();
+    t += "    func main<ios18>(" + tensor_type(shape) + " x) {\n";
+    t += "        " + tensor_type(shape) + " y = identity(x=x)[name=string(\"avg_pool_lowered\")];\n";
+    t += "    } -> (y);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── max_pool (lowered) ─────────────────────────────────────────────────── */
+
+MilProgram MilBuilder::max_pool(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    // ANE accepts identity robustly. For the graph's current 1x1/stride1 pool
+    // use-case, max_pool is semantically identity.
+    std::string t = header();
+    t += "    func main<ios18>(" + tensor_type(shape) + " x) {\n";
+    t += "        " + tensor_type(shape) + " y = identity(x=x)[name=string(\"max_pool_lowered\")];\n";
+    t += "    } -> (y);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── logical_and (lowered) ──────────────────────────────────────────────── */
+
+MilProgram MilBuilder::logical_and(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    // Lower logical_and to casts + mul:
+    // bool(x) -> fp16 in {0,1}, bool(y) -> fp16 in {0,1}, out = mul.
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x, " + tt + " y) {\n";
+    t += "        " + tb + " xb = cast(x=x, dtype=string(\"bool\"))[name=string(\"lnd_xb\")];\n";
+    t += "        " + tb + " yb = cast(x=y, dtype=string(\"bool\"))[name=string(\"lnd_yb\")];\n";
+    t += "        " + tt + " xf = cast(x=xb, dtype=string(\"fp16\"))[name=string(\"lnd_xf\")];\n";
+    t += "        " + tt + " yf = cast(x=yb, dtype=string(\"fp16\"))[name=string(\"lnd_yf\")];\n";
+    t += "        " + tt + " z = mul(x=xf, y=yf)[name=string(\"lnd_out\")];\n";
+    t += "    } -> (z);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
 /* ── add ─────────────────────────────────────────────────────────────────── */
 
 MilProgram MilBuilder::add(int C, int SP) {
@@ -818,6 +891,46 @@ MilFragment MilBuilder::softmax_fragment(int C, int SP,
     return f;
 }
 
+MilFragment MilBuilder::avg_pool_fragment(int C, int SP,
+                                           const std::string& in_var,
+                                           const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+
+    std::string body;
+    body += "        " + tt + " " + out_var + " = identity(x=" + in_var + ")[name=string(\"" + p + "avg_pool_lowered\")];\n";
+
+    MilFragment f;
+    f.body         = std::move(body);
+    f.input_name   = in_var;
+    f.output_name  = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::max_pool_fragment(int C, int SP,
+                                           const std::string& in_var,
+                                           const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+
+    std::string body;
+    body += "        " + tt + " " + out_var + " = identity(x=" + in_var + ")[name=string(\"" + p + "max_pool_lowered\")];\n";
+
+    MilFragment f;
+    f.body         = std::move(body);
+    f.input_name   = in_var;
+    f.output_name  = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
 MilFragment MilBuilder::add_fragment(int C, int SP,
                                       const std::string& in_var,
                                       const std::string& side_var,
@@ -852,6 +965,33 @@ MilFragment MilBuilder::mul_fragment(int C, int SP,
 
     std::string body;
     body += "        " + tt + " " + out_var + " = mul(x=" + in_var + ", y=" + side_var + ")[name=string(\"" + p + "mul\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = in_var;
+    f.side_input_name = side_var;
+    f.output_name     = out_var;
+    f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::logical_and_fragment(int C, int SP,
+                                              const std::string& in_var,
+                                              const std::string& side_var,
+                                              const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string body;
+    body += "        " + tb + " " + p + "xb = cast(x=" + in_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "xb\")];\n";
+    body += "        " + tb + " " + p + "yb = cast(x=" + side_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "yb\")];\n";
+    body += "        " + tt + " " + p + "xf = cast(x=" + p + "xb, dtype=string(\"fp16\"))[name=string(\"" + p + "xf\")];\n";
+    body += "        " + tt + " " + p + "yf = cast(x=" + p + "yb, dtype=string(\"fp16\"))[name=string(\"" + p + "yf\")];\n";
+    body += "        " + tt + " " + out_var + " = mul(x=" + p + "xf, y=" + p + "yf)[name=string(\"" + p + "and\")];\n";
 
     MilFragment f;
     f.body            = std::move(body);

@@ -244,6 +244,38 @@ TEST_CASE("MilBuilder::add two-input elementwise", "[mil][build]") {
     CHECK_THAT(prog.text, ContainsSubstring("tensor<fp16, [1, 16, 1, 64]> y)"));
 }
 
+TEST_CASE("MilBuilder::avg_pool lowers to identity", "[mil][build]") {
+    auto prog = MilBuilder::avg_pool(16, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("identity(x=x)"));
+    CHECK_FALSE(prog.text.find("avg_pool(") != std::string::npos);
+    CHECK(prog.weight_name.empty());
+    CHECK(prog.input_shape  == (TensorShape{1, 16, 1, 64}));
+    CHECK(prog.output_shape == (TensorShape{1, 16, 1, 64}));
+}
+
+TEST_CASE("MilBuilder::max_pool lowers to identity", "[mil][build]") {
+    auto prog = MilBuilder::max_pool(16, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("identity(x=x)"));
+    CHECK_FALSE(prog.text.find("max_pool(") != std::string::npos);
+    CHECK(prog.weight_name.empty());
+    CHECK(prog.input_shape  == (TensorShape{1, 16, 1, 64}));
+    CHECK(prog.output_shape == (TensorShape{1, 16, 1, 64}));
+}
+
+TEST_CASE("MilBuilder::logical_and lowers to cast+mul", "[mil][build]") {
+    auto prog = MilBuilder::logical_and(8, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("cast(x=x, dtype=string(\"bool\"))"));
+    CHECK_THAT(prog.text, ContainsSubstring("cast(x=y, dtype=string(\"bool\"))"));
+    CHECK_THAT(prog.text, ContainsSubstring("mul(x=xf, y=yf)"));
+    CHECK_FALSE(prog.text.find("logical_and(") != std::string::npos);
+    CHECK(prog.weight_name.empty());
+    CHECK(prog.input_shape  == (TensorShape{1, 8, 1, 64}));
+    CHECK(prog.output_shape == (TensorShape{1, 8, 1, 64}));
+}
+
 /* ── MilBuilder — rmsnorm ────────────────────────────────────────────────── */
 
 TEST_CASE("MilBuilder::rmsnorm uses reduce_sum + pow path", "[mil][build]") {

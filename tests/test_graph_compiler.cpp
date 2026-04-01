@@ -198,6 +198,21 @@ TEST_CASE("build_plan: matmul+add fuses with side input tracked", "[compiler][fu
     CHECK(grp.node_ids.size() == 2);
 }
 
+TEST_CASE("build_plan: matmul+avg_pool+max_pool can fuse as unary chain", "[compiler][fusion]") {
+    AneGraph g;
+    auto w = matmul_weights(512, 256);
+    TensorId x  = g.add_input("x", S(512, 128));
+    TensorId t1 = g.add_op(LIBANE_OP_MATMUL,   {x},  S(256, 128), w.data(), w.size());
+    TensorId t2 = g.add_op(LIBANE_OP_AVG_POOL, {t1}, S(256, 128));
+    TensorId t3 = g.add_op(LIBANE_OP_MAX_POOL, {t2}, S(256, 128));
+    g.mark_output(t3);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 3);
+    CHECK(plan.groups[0].output == t3);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * 4. Layernorm weight splitting
  * ═══════════════════════════════════════════════════════════════════════════ */

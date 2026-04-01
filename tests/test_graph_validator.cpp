@@ -204,6 +204,16 @@ TEST_CASE("softmax: no weights passes", "[validator][weights]") {
     CHECK(r.ok());
 }
 
+TEST_CASE("avg_pool: no weights passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_AVG_POOL, S(512, 128), S(512, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("max_pool: no weights passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_MAX_POOL, S(512, 128), S(512, 128), 0);
+    CHECK(r.ok());
+}
+
 TEST_CASE("transpose: no weights passes", "[validator][weights]") {
     // transpose [1,C,1,S] -> [1,S,1,C]: output channels = input seq, output seq = input channels
     auto r = validate_single(LIBANE_OP_TRANSPOSE, S(512, 128), S(128, 512), 0);
@@ -259,6 +269,15 @@ TEST_CASE("mul: matching input shapes passes", "[validator][binary]") {
     TensorId a = g.add_input("a", S(512, 128));
     TensorId b = g.add_input("b", S(512, 128));
     TensorId c = g.add_op(LIBANE_OP_MUL, {a, b}, S(512, 128));
+    g.mark_output(c);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("logical_and: matching input shapes passes", "[validator][binary]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(512, 128));
+    TensorId b = g.add_input("b", S(512, 128));
+    TensorId c = g.add_op(LIBANE_OP_LOGICAL_AND, {a, b}, S(512, 128));
     g.mark_output(c);
     CHECK(GraphValidator::validate(g).ok());
 }

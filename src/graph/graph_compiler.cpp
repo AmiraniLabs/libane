@@ -70,6 +70,14 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
         return mil::MilBuilder::softmax_fragment(
             out_shape.channels, out_shape.seq, in_var, out_var);
 
+    case LIBANE_OP_AVG_POOL:
+        return mil::MilBuilder::avg_pool_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_MAX_POOL:
+        return mil::MilBuilder::max_pool_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
     case LIBANE_OP_TRANSPOSE:
         return mil::MilBuilder::transpose_fragment(
             in_shape.channels, in_shape.seq, in_var, out_var);
@@ -81,6 +89,11 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
 
     case LIBANE_OP_MUL:
         return mil::MilBuilder::mul_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_LOGICAL_AND:
+        return mil::MilBuilder::logical_and_fragment(
             out_shape.channels, out_shape.seq,
             in_var, tensor_var(node.inputs[1]), out_var);
 

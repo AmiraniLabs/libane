@@ -262,6 +262,106 @@ TEST_CASE("libane_execute with null input returns error", "[api]") {
     libane_release(h);
 }
 
+TEST_CASE("libane_execute avg_pool lowering path behaves as identity", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    // 64*512*2 = 65536 bytes (>49KB), avoids small-buffer IOSurface artifacts.
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+
+    auto h = libane_compile(LIBANE_OP_AVG_POOL, shape, nullptr, 0);
+    if (!h) { WARN("ANE compile failed — skipping: " << libane_last_error()); return; }
+    REQUIRE(h != nullptr);
+
+    const size_t n = static_cast<size_t>(shape.dims[1]) * shape.dims[3];
+    std::vector<libane_f16_t> in(n), out(n);
+    for (size_t i = 0; i < n; ++i)
+        in[i] = f16(static_cast<float>((int(i % 31) - 15) * 0.25f));
+
+    auto st = libane_execute(h, in.data(), out.data(), shape);
+    REQUIRE(st == LIBANE_OK);
+
+    for (size_t i = 0; i < std::min<size_t>(n, 512); ++i) {
+        CHECK(std::abs(f32(out[i]) - f32(in[i])) < 0.05f);
+    }
+
+    libane_release(h);
+}
+
+TEST_CASE("libane_execute max_pool lowering path behaves as identity", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+
+    auto h = libane_compile(LIBANE_OP_MAX_POOL, shape, nullptr, 0);
+    if (!h) { WARN("ANE compile failed — skipping: " << libane_last_error()); return; }
+    REQUIRE(h != nullptr);
+
+    const size_t n = static_cast<size_t>(shape.dims[1]) * shape.dims[3];
+    std::vector<libane_f16_t> in(n), out(n);
+    for (size_t i = 0; i < n; ++i)
+        in[i] = f16(static_cast<float>((int(i % 17) - 8) * 0.5f));
+
+    auto st = libane_execute(h, in.data(), out.data(), shape);
+    REQUIRE(st == LIBANE_OK);
+
+    for (size_t i = 0; i < std::min<size_t>(n, 512); ++i) {
+        CHECK(std::abs(f32(out[i]) - f32(in[i])) < 0.05f);
+    }
+
+    libane_release(h);
+}
+
+TEST_CASE("libane_execute2 logical_and lowering path returns 0/1 mask", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+
+    auto h = libane_compile(LIBANE_OP_LOGICAL_AND, shape, nullptr, 0);
+    if (!h) { WARN("ANE compile failed — skipping: " << libane_last_error()); return; }
+    REQUIRE(h != nullptr);
+
+    const size_t n = static_cast<size_t>(shape.dims[1]) * shape.dims[3];
+    std::vector<libane_f16_t> a(n), b(n), out(n);
+    std::vector<float> expected(n);
+    for (size_t i = 0; i < n; ++i) {
+        float av = (i % 3 == 0) ? 0.0f : ((i % 2 == 0) ? 2.0f : -1.0f);
+        float bv = (i % 5 == 0) ? 0.0f : 4.0f;
+        a[i] = f16(av);
+        b[i] = f16(bv);
+        expected[i] = ((av != 0.0f) && (bv != 0.0f)) ? 1.0f : 0.0f;
+    }
+
+    auto st = libane_execute2(h, a.data(), b.data(), out.data(), shape);
+    REQUIRE(st == LIBANE_OK);
+
+    for (size_t i = 0; i < std::min<size_t>(n, 1024); ++i) {
+        CHECK(std::abs(f32(out[i]) - expected[i]) < 0.05f);
+    }
+
+    libane_release(h);
+}
+
 /* ── libane_matmul_f16 ──────────────────────────────────────────────────── */
 
 TEST_CASE("libane_matmul_f16 identity matrix", "[api][matmul]") {

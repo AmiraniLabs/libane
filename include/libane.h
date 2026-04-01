@@ -51,6 +51,9 @@ typedef enum {
     LIBANE_OP_SILU       = 9,
     LIBANE_OP_RMSNORM    = 10,
     LIBANE_OP_LAYERNORM  = 11,
+    LIBANE_OP_AVG_POOL   = 12,
+    LIBANE_OP_MAX_POOL   = 13,
+    LIBANE_OP_LOGICAL_AND= 14,
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */
