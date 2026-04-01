@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -74,6 +75,31 @@ def mil_program(body: str, inputs_sig: str, output: str) -> str:
         f"    }} -> ({output});\n"
         f"}}"
     )
+
+
+def mil_program_with_build_info(
+    body: str,
+    inputs_sig: str,
+    output: str,
+    build_info_fields: dict[str, str],
+) -> str:
+    """Build MIL text with an explicit buildInfo dictionary."""
+    items = ", ".join(f'{{"{k}", "{v}"}}' for k, v in build_info_fields.items())
+    build_info = f'[buildInfo = dict<string, string>({{{items}}})]'
+    return (
+        f"program(1.3)\n"
+        f"{build_info}\n"
+        f"{{\n"
+        f"    func main<ios18>({inputs_sig}) {{\n"
+        f"{body}\n"
+        f"    }} -> ({output});\n"
+        f"}}"
+    )
+
+
+def _mil_ops_from_text(text: str) -> list[str]:
+    """Extract ordered MIL op names from textual Program form."""
+    return re.findall(r"=\s*([a-zA-Z_][a-zA-Z0-9_]*)\(", text)
 
 
 def _sig1(C: int = _C, S: int = _S) -> str:
@@ -1743,6 +1769,639 @@ def scan_gap_ops(C: int = _C, S: int = _S) -> list[ProbeResult]:
     return results
 
 
+def scan_signature_sweep(C: int = _C, S: int = _S) -> list[ProbeResult]:
+    """
+    Automated signature sweep for known gap ops.
+
+    For each op:
+    - Validate canonical front-end constructability via coremltools MIL builder.
+    - Sweep ANE compile forms across variant signatures, wrappers, and buildInfo variants.
+    """
+    print("── Signature sweep ───────────────────────────────────────────────")
+    n = C * S
+    x = np.linspace(-1.0, 1.0, n, dtype=np.float32).astype(np.float16)
+    x2 = np.linspace(1.0, -1.0, n, dtype=np.float32).astype(np.float16)
+    b1 = (np.arange(n) % 2 == 0)
+    b2 = (np.arange(n) % 3 == 0)
+
+    build_infos = {
+        "default": _BUILD_INFO_FIELDS,
+        "coremltools_8_legacy": {
+            "coremlc-component-MIL": "3508.0.0",
+            "coremlc-version": "3503.2.0",
+            "coremltools-component-milinternal": "",
+            "coremltools-version": "8.0",
+        },
+        "coremltools_7_legacy": {
+            "coremlc-component-MIL": "3400.0.0",
+            "coremlc-version": "3400.0.0",
+            "coremltools-component-milinternal": "",
+            "coremltools-version": "7.0",
+        },
+    }
+
+    # Canonical front-end checks (coremltools builder only).
+    cmt_status: dict[str, str] = {}
+    try:
+        import coremltools as ct
+        from coremltools.converters.mil.mil import Builder as mb, types
+
+        def _cmt_ok(fn) -> str:
+            try:
+                _ = fn()
+                return "PASS"
+            except Exception as e:  # pragma: no cover - environment-specific
+                return f"FAIL: {e}"
+
+        cmt_status["logical_and"] = _cmt_ok(lambda: str(
+            mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, b: mb.cast(
+                x=mb.logical_and(
+                    x=mb.cast(x=a, dtype="bool"),
+                    y=mb.cast(x=b, dtype="bool"),
+                ),
+                dtype="fp16",
+            ))
+        ))
+        cmt_status["logical_or"] = _cmt_ok(lambda: str(
+            mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, b: mb.cast(
+                x=mb.logical_or(
+                    x=mb.cast(x=a, dtype="bool"),
+                    y=mb.cast(x=b, dtype="bool"),
+                ),
+                dtype="fp16",
+            ))
+        ))
+        cmt_status["logical_xor"] = _cmt_ok(lambda: str(
+            mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, b: mb.cast(
+                x=mb.logical_xor(
+                    x=mb.cast(x=a, dtype="bool"),
+                    y=mb.cast(x=b, dtype="bool"),
+                ),
+                dtype="fp16",
+            ))
+        ))
+        cmt_status["reduce_prod"] = _cmt_ok(lambda: str(
+            mb.program(
+                input_specs=[mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16)],
+                opset_version=ct.target.iOS18,
+            )(lambda a: mb.reduce_prod(
+                x=a, axes=mb.const(val=np.array([3], dtype=np.int32)), keep_dims=True
+            ))
+        ))
+        cmt_status["avg_pool"] = _cmt_ok(lambda: str(
+            mb.program(
+                input_specs=[mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16)],
+                opset_version=ct.target.iOS18,
+            )(lambda a: mb.avg_pool(x=a, kernel_sizes=[1, 1], strides=[1, 1], pad_type="valid"))
+        ))
+        cmt_status["max_pool"] = _cmt_ok(lambda: str(
+            mb.program(
+                input_specs=[mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16)],
+                opset_version=ct.target.iOS18,
+            )(lambda a: mb.max_pool(x=a, kernel_sizes=[1, 1], strides=[1, 1], pad_type="valid"))
+        ))
+        cmt_status["gather"] = _cmt_ok(lambda: str(
+            mb.program(
+                input_specs=[mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16)],
+                opset_version=ct.target.iOS18,
+            )(lambda a: mb.gather(x=a, indices=mb.const(val=np.arange(S, dtype=np.int32)), axis=3))
+        ))
+        cmt_status["scatter"] = _cmt_ok(lambda: str(
+            mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, u: mb.scatter(
+                data=a,
+                indices=mb.const(val=np.zeros((1, C, 1, S), dtype=np.int32)),
+                updates=u,
+                axis=3,
+                mode="update",
+            ))
+        ))
+        cmt_status["scatter_nd"] = _cmt_ok(lambda: str(
+            mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, u: mb.scatter_nd(
+                data=a,
+                indices=mb.const(val=np.zeros((1, C, 1, S, 1), dtype=np.int32)),
+                updates=u,
+                mode="update",
+            ))
+        ))
+        cmt_status["scatter_along_axis"] = _cmt_ok(lambda: str(
+            mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, u: mb.scatter_along_axis(
+                data=a,
+                indices=mb.const(val=np.zeros((1, C, 1, S), dtype=np.int32)),
+                updates=u,
+                axis=3,
+                mode="update",
+            ))
+        ))
+    except Exception as e:  # pragma: no cover - environment-specific
+        for op in (
+            "logical_and", "logical_or", "logical_xor", "reduce_prod",
+            "avg_pool", "max_pool", "gather", "scatter", "scatter_nd",
+            "scatter_along_axis",
+        ):
+            cmt_status[op] = f"UNAVAILABLE: {e}"
+
+    variants: list[tuple[str, str, str, list[np.ndarray], int]] = []
+    # name, base_op, mil_body, inputs, output_numel
+    for op in ("logical_and", "logical_or", "logical_xor"):
+        variants.append((
+            f"{op}/fp16_cast_bool",
+            op,
+            (
+                f'        tensor<bool, [1,{C},1,{S}]> ba = cast(x=a_input0, dtype=string("bool"))[name=string("ba")];\n'
+                f'        tensor<bool, [1,{C},1,{S}]> bb = cast(x=a_input1, dtype=string("bool"))[name=string("bb")];\n'
+                f'        tensor<bool, [1,{C},1,{S}]> r = {op}(x=ba, y=bb)[name=string("r")];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = cast(x=r, dtype=string("fp16"))[name=string("z_output0")];'
+            ),
+            [x, x2], n
+        ))
+        variants.append((
+            f"{op}/bool_inputs",
+            op,
+            (
+                f'        tensor<bool, [1,{C},1,{S}]> r = {op}(x=a_input0, y=a_input1)[name=string("r")];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = cast(x=r, dtype=string("fp16"))[name=string("z_output0")];'
+            ),
+            [b1, b2], n
+        ))
+    for opname in ("reduce_prod", "reduce_product"):
+        for axis in (-1, 1):
+            variants.append((
+                f"{opname}/axis{axis}",
+                "reduce_prod",
+                (
+                    f'        tensor<int32, [1]> ax = const()[name=string("ax"), val=tensor<int32, [1]>([{axis}])];\n'
+                    '        bool kd = const()[name=string("kd"), val=bool(true)];\n'
+                    f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                    f'{opname}(x=a_input0, axes=ax, keep_dims=kd)[name=string("z_output0")];'
+                ),
+                [np.linspace(0.95, 1.05, n, dtype=np.float32).astype(np.float16)], n
+            ))
+    variants.extend([
+        (
+            "avg_pool/basic", "avg_pool",
+            (
+                '        tensor<int32, [2]> ks = const()[name=string("ks"), val=tensor<int32, [2]>([1,1])];\n'
+                '        tensor<int32, [2]> st = const()[name=string("st"), val=tensor<int32, [2]>([1,1])];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                'avg_pool(x=a_input0, kernel_sizes=ks, strides=st, pad_type=string("valid"), '
+                'exclude_padding_from_average=bool(true))[name=string("z_output0")];'
+            ),
+            [x], n
+        ),
+        (
+            "max_pool/basic", "max_pool",
+            (
+                '        tensor<int32, [2]> ks = const()[name=string("ks"), val=tensor<int32, [2]>([1,1])];\n'
+                '        tensor<int32, [2]> st = const()[name=string("st"), val=tensor<int32, [2]>([1,1])];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                'max_pool(x=a_input0, kernel_sizes=ks, strides=st, pad_type=string("valid"))'
+                '[name=string("z_output0")];'
+            ),
+            [x], n
+        ),
+        (
+            "gather/axis3", "gather",
+            (
+                f'        tensor<int32, [{S}]> idx = const()[name=string("idx"), val=tensor<int32, [{S}]>('
+                f'[{",".join(str(i) for i in range(S))}])];\n'
+                '        int32 ax = const()[name=string("ax"), val=int32(3)];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = gather(x=a_input0, indices=idx, axis=ax)'
+                '[name=string("z_output0")];'
+            ),
+            [x], n
+        ),
+        (
+            "scatter/basic", "scatter",
+            (
+                f'        tensor<int32, [1,{C},1,{S}]> idx = const()[name=string("idx"), val=tensor<int32, [1,{C},1,{S}]>(0)];\n'
+                '        int32 ax = const()[name=string("ax"), val=int32(3)];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                'scatter(x=a_input0, indices=idx, updates=a_input1, axis=ax)[name=string("z_output0")];'
+            ),
+            [x, x2], n
+        ),
+        (
+            "scatter_nd/basic", "scatter_nd",
+            (
+                f'        tensor<int32, [1,{C},1,{S},1]> idx = const()[name=string("idx"), val=tensor<int32, [1,{C},1,{S},1]>(0)];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                'scatter_nd(x=a_input0, indices=idx, updates=a_input1)[name=string("z_output0")];'
+            ),
+            [x, x2], n
+        ),
+        (
+            "scatter_along_axis/basic", "scatter_along_axis",
+            (
+                f'        tensor<int32, [1,{C},1,{S}]> idx = const()[name=string("idx"), val=tensor<int32, [1,{C},1,{S}]>(0)];\n'
+                '        int32 ax = const()[name=string("ax"), val=int32(3)];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                'scatter_along_axis(x=a_input0, indices=idx, updates=a_input1, axis=ax)[name=string("z_output0")];'
+            ),
+            [x, x2], n
+        ),
+    ])
+
+    wrapper_exprs = {
+        "none": "{x}",
+        "relu": "relu(x={x})",
+        "add": "add(x={x}, y={x})",
+        "mul": "mul(x={x}, y={x})",
+    }
+
+    results: list[ProbeResult] = []
+    for vname, op, base_body, inputs, out_numel in variants:
+        for wrap_name, wrap_expr in wrapper_exprs.items():
+            if wrap_name == "none":
+                body = base_body
+            else:
+                body = (
+                    f'        tensor<fp16, [1,{C},1,{S}]> pre = '
+                    f'{wrap_expr.format(x="a_input0")}[name=string("pre")];\n'
+                    + base_body.replace("a_input0", "pre", 1).replace("z_output0", "mid_out")
+                    + "\n"
+                    + f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                    + f'{wrap_expr.format(x="mid_out")}[name=string("z_output0")];'
+                )
+
+            sig = f"tensor<fp16, [1,{C},1,{S}]> a_input0"
+            if len(inputs) == 2:
+                if isinstance(inputs[1], np.ndarray) and inputs[1].dtype == np.bool_:
+                    sig = (
+                        f"tensor<fp16, [1,{C},1,{S}]> a_input0, "
+                        f"tensor<bool, [1,{C},1,{S}]> a_input1"
+                    )
+                else:
+                    sig = (
+                        f"tensor<fp16, [1,{C},1,{S}]> a_input0, "
+                        f"tensor<fp16, [1,{C},1,{S}]> a_input1"
+                    )
+
+            for build_tag, build_info in build_infos.items():
+                mil = mil_program_with_build_info(body, sig, "z_output0", build_info)
+                r = probe_custom(
+                    f"sigsweep/{vname}/wrap={wrap_name}/build={build_tag}",
+                    mil,
+                    inputs,
+                    out_numel,
+                    expected=None,
+                    atol=0.0,
+                )
+                cmt = cmt_status.get(op, "N/A")
+                r.note = f"coremltools_signature={cmt}"
+                if not r.compiled and not r.failure_kind:
+                    r.failure_kind = "compile_reject"
+                results.append(r)
+
+    return results
+
+
+def scan_coreml_differential(C: int = _C, S: int = _S) -> list[ProbeResult]:
+    """
+    Differential scan between coremltools MIL construction/conversion and libane ANE compile.
+
+    For each gap op candidate:
+    - Build canonical program via coremltools MIL builder.
+    - Record frontend and converted (mlprogram/neuralnetwork) MIL op traces.
+    - Compile equivalent hand-authored MIL through libane.
+    """
+    print("── CoreML differential ───────────────────────────────────────────")
+    n = C * S
+    x = np.linspace(-1.0, 1.0, n, dtype=np.float32).astype(np.float16)
+    x2 = np.linspace(1.0, -1.0, n, dtype=np.float32).astype(np.float16)
+
+    cases = [
+        {
+            "name": "logical_and",
+            "sig": _sig2(C, S),
+            "body": (
+                f'        tensor<bool, [1,{C},1,{S}]> ba = cast(x=a_input0, dtype=string("bool"))[name=string("ba")];\n'
+                f'        tensor<bool, [1,{C},1,{S}]> bb = cast(x=a_input1, dtype=string("bool"))[name=string("bb")];\n'
+                f'        tensor<bool, [1,{C},1,{S}]> r = logical_and(x=ba, y=bb)[name=string("r")];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = cast(x=r, dtype=string("fp16"))[name=string("z_output0")];'
+            ),
+            "inputs": [x, x2],
+            "out_numel": n,
+        },
+        {
+            "name": "logical_or",
+            "sig": _sig2(C, S),
+            "body": (
+                f'        tensor<bool, [1,{C},1,{S}]> ba = cast(x=a_input0, dtype=string("bool"))[name=string("ba")];\n'
+                f'        tensor<bool, [1,{C},1,{S}]> bb = cast(x=a_input1, dtype=string("bool"))[name=string("bb")];\n'
+                f'        tensor<bool, [1,{C},1,{S}]> r = logical_or(x=ba, y=bb)[name=string("r")];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = cast(x=r, dtype=string("fp16"))[name=string("z_output0")];'
+            ),
+            "inputs": [x, x2],
+            "out_numel": n,
+        },
+        {
+            "name": "logical_xor",
+            "sig": _sig2(C, S),
+            "body": (
+                f'        tensor<bool, [1,{C},1,{S}]> ba = cast(x=a_input0, dtype=string("bool"))[name=string("ba")];\n'
+                f'        tensor<bool, [1,{C},1,{S}]> bb = cast(x=a_input1, dtype=string("bool"))[name=string("bb")];\n'
+                f'        tensor<bool, [1,{C},1,{S}]> r = logical_xor(x=ba, y=bb)[name=string("r")];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = cast(x=r, dtype=string("fp16"))[name=string("z_output0")];'
+            ),
+            "inputs": [x, x2],
+            "out_numel": n,
+        },
+        {
+            "name": "reduce_prod",
+            "sig": _sig1(C, S),
+            "body": (
+                '        tensor<int32, [1]> ax = const()[name=string("ax"), val=tensor<int32, [1]>([3])];\n'
+                '        bool kd = const()[name=string("kd"), val=bool(true)];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                'reduce_prod(x=a_input0, axes=ax, keep_dims=kd)[name=string("z_output0")];'
+            ),
+            "inputs": [np.linspace(0.95, 1.05, n, dtype=np.float32).astype(np.float16)],
+            "out_numel": n,
+        },
+        {
+            "name": "avg_pool",
+            "sig": _sig1(C, S),
+            "body": (
+                '        tensor<int32, [2]> ks = const()[name=string("ks"), val=tensor<int32, [2]>([1,1])];\n'
+                '        tensor<int32, [2]> st = const()[name=string("st"), val=tensor<int32, [2]>([1,1])];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                'avg_pool(x=a_input0, kernel_sizes=ks, strides=st, pad_type=string("valid"), '
+                'exclude_padding_from_average=bool(true))[name=string("z_output0")];'
+            ),
+            "inputs": [x],
+            "out_numel": n,
+        },
+        {
+            "name": "max_pool",
+            "sig": _sig1(C, S),
+            "body": (
+                '        tensor<int32, [2]> ks = const()[name=string("ks"), val=tensor<int32, [2]>([1,1])];\n'
+                '        tensor<int32, [2]> st = const()[name=string("st"), val=tensor<int32, [2]>([1,1])];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                'max_pool(x=a_input0, kernel_sizes=ks, strides=st, pad_type=string("valid"))'
+                '[name=string("z_output0")];'
+            ),
+            "inputs": [x],
+            "out_numel": n,
+        },
+        {
+            "name": "gather",
+            "sig": _sig1(C, S),
+            "body": (
+                f'        tensor<int32, [{S}]> idx = const()[name=string("idx"), val=tensor<int32, [{S}]>('
+                f'[{",".join(str(i) for i in range(S))}])];\n'
+                '        int32 ax = const()[name=string("ax"), val=int32(3)];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = gather(x=a_input0, indices=idx, axis=ax)'
+                '[name=string("z_output0")];'
+            ),
+            "inputs": [x],
+            "out_numel": n,
+        },
+        {
+            "name": "scatter",
+            "sig": _sig2(C, S),
+            "body": (
+                f'        tensor<int32, [1,{C},1,{S}]> idx = const()[name=string("idx"), val=tensor<int32, [1,{C},1,{S}]>(0)];\n'
+                '        int32 ax = const()[name=string("ax"), val=int32(3)];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                'scatter(x=a_input0, indices=idx, updates=a_input1, axis=ax)[name=string("z_output0")];'
+            ),
+            "inputs": [x, x2],
+            "out_numel": n,
+        },
+        {
+            "name": "scatter_nd",
+            "sig": _sig2(C, S),
+            "body": (
+                f'        tensor<int32, [1,{C},1,{S},1]> idx = const()[name=string("idx"), val=tensor<int32, [1,{C},1,{S},1]>(0)];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                'scatter_nd(x=a_input0, indices=idx, updates=a_input1)[name=string("z_output0")];'
+            ),
+            "inputs": [x, x2],
+            "out_numel": n,
+        },
+        {
+            "name": "scatter_along_axis",
+            "sig": _sig2(C, S),
+            "body": (
+                f'        tensor<int32, [1,{C},1,{S}]> idx = const()[name=string("idx"), val=tensor<int32, [1,{C},1,{S}]>(0)];\n'
+                '        int32 ax = const()[name=string("ax"), val=int32(3)];\n'
+                f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+                'scatter_along_axis(x=a_input0, indices=idx, updates=a_input1, axis=ax)[name=string("z_output0")];'
+            ),
+            "inputs": [x, x2],
+            "out_numel": n,
+        },
+    ]
+
+    cmt_info: dict[str, dict[str, object]] = {c["name"]: {} for c in cases}
+    try:
+        import coremltools as ct
+        from coremltools.converters.mil.mil import Builder as mb, types
+
+        idx = np.arange(S, dtype=np.int32)
+        zeros_idx = np.zeros((1, C, 1, S), dtype=np.int32)
+        zeros_idx_nd = np.zeros((1, C, 1, S, 1), dtype=np.int32)
+
+        builders = {
+            "logical_and": lambda: mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, b: mb.cast(
+                x=mb.logical_and(
+                    x=mb.cast(x=a, dtype="bool"),
+                    y=mb.cast(x=b, dtype="bool"),
+                ),
+                dtype="fp16",
+            )),
+            "logical_or": lambda: mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, b: mb.cast(
+                x=mb.logical_or(
+                    x=mb.cast(x=a, dtype="bool"),
+                    y=mb.cast(x=b, dtype="bool"),
+                ),
+                dtype="fp16",
+            )),
+            "logical_xor": lambda: mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, b: mb.cast(
+                x=mb.logical_xor(
+                    x=mb.cast(x=a, dtype="bool"),
+                    y=mb.cast(x=b, dtype="bool"),
+                ),
+                dtype="fp16",
+            )),
+            "reduce_prod": lambda: mb.program(
+                input_specs=[mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16)],
+                opset_version=ct.target.iOS18,
+            )(lambda a: mb.reduce_prod(
+                x=a,
+                axes=mb.const(val=np.array([3], dtype=np.int32)),
+                keep_dims=True,
+            )),
+            "avg_pool": lambda: mb.program(
+                input_specs=[mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16)],
+                opset_version=ct.target.iOS18,
+            )(lambda a: mb.avg_pool(
+                x=a, kernel_sizes=[1, 1], strides=[1, 1], pad_type="valid"
+            )),
+            "max_pool": lambda: mb.program(
+                input_specs=[mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16)],
+                opset_version=ct.target.iOS18,
+            )(lambda a: mb.max_pool(
+                x=a, kernel_sizes=[1, 1], strides=[1, 1], pad_type="valid"
+            )),
+            "gather": lambda: mb.program(
+                input_specs=[mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16)],
+                opset_version=ct.target.iOS18,
+            )(lambda a: mb.gather(x=a, indices=mb.const(val=idx), axis=3)),
+            "scatter": lambda: mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, u: mb.scatter(
+                data=a, indices=mb.const(val=zeros_idx), updates=u, axis=3, mode="update"
+            )),
+            "scatter_nd": lambda: mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, u: mb.scatter_nd(
+                data=a, indices=mb.const(val=zeros_idx_nd), updates=u, mode="update"
+            )),
+            "scatter_along_axis": lambda: mb.program(
+                input_specs=[
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                    mb.TensorSpec(shape=(1, C, 1, S), dtype=types.fp16),
+                ],
+                opset_version=ct.target.iOS18,
+            )(lambda a, u: mb.scatter_along_axis(
+                data=a, indices=mb.const(val=zeros_idx), updates=u, axis=3, mode="update"
+            )),
+        }
+
+        for case in cases:
+            name = case["name"]
+            info: dict[str, object] = {}
+            try:
+                frontend_prog = builders[name]()
+                frontend_txt = str(frontend_prog)
+                info["frontend_status"] = "PASS"
+                info["frontend_ops"] = _mil_ops_from_text(frontend_txt)
+            except Exception as e:
+                info["frontend_status"] = f"FAIL: {e}"
+                info["frontend_ops"] = []
+                cmt_info[name] = info
+                continue
+
+            try:
+                mlp = ct.convert(
+                    frontend_prog,
+                    convert_to="mlprogram",
+                    minimum_deployment_target=ct.target.iOS18,
+                    skip_model_load=True,
+                )
+                lowered = str(getattr(mlp, "_mil_program", ""))
+                info["mlprogram_status"] = "PASS"
+                info["mlprogram_ops"] = _mil_ops_from_text(lowered)
+            except Exception as e:
+                info["mlprogram_status"] = f"FAIL: {e}"
+                info["mlprogram_ops"] = []
+
+            # At iOS18 target, CoreML conversion path is ML Program; NN backend is
+            # not comparable and rejected by coremltools by design.
+            info["neuralnetwork_status"] = "SKIPPED: not applicable at iOS18 target"
+            info["neuralnetwork_ops"] = []
+
+            cmt_info[name] = info
+    except Exception as e:  # pragma: no cover - environment-specific
+        for case in cases:
+            cmt_info[case["name"]] = {
+                "frontend_status": f"UNAVAILABLE: {e}",
+                "frontend_ops": [],
+                "mlprogram_status": f"UNAVAILABLE: {e}",
+                "mlprogram_ops": [],
+                "neuralnetwork_status": f"UNAVAILABLE: {e}",
+                "neuralnetwork_ops": [],
+            }
+
+    results: list[ProbeResult] = []
+    for case in cases:
+        op = case["name"]
+        mil = mil_program(case["body"], case["sig"], "z_output0")
+        r = probe_custom(
+            f"differential/{op}",
+            mil,
+            case["inputs"],
+            case["out_numel"],
+            expected=None,
+            atol=0.0,
+        )
+        detail = {
+            "coremltools": cmt_info.get(op, {}),
+            "libane_source_ops": _mil_ops_from_text(mil),
+            "libane_build_info": _BUILD_INFO_FIELDS,
+        }
+        r.note = json.dumps(detail, separators=(",", ":"))
+        if not r.compiled and not r.failure_kind:
+            r.failure_kind = "compile_reject"
+        results.append(r)
+
+    return results
+
+
 def scan_all() -> list[ProbeResult]:
     """Run all scans and return combined results."""
     all_results: list[ProbeResult] = []
@@ -1921,6 +2580,10 @@ def _cli() -> None:
                         help="Run wrapper->intermediate compile dependency matrix")
     parser.add_argument("--gap-ops", action="store_true",
                         help="Probe pending gap ops (logical/pool/scatter/gather/reduce_prod)")
+    parser.add_argument("--sig-sweep", action="store_true",
+                        help="Run automated signature+wrapper+buildInfo sweep for gap ops")
+    parser.add_argument("--differential", action="store_true",
+                        help="Run coremltools-vs-libane MIL differential for gap ops")
     parser.add_argument("--sin-cos-sweep", action="store_true",
                         help="Run sin/cos input-range sweep")
     parser.add_argument("--all",        action="store_true",
@@ -1942,7 +2605,8 @@ def _cli() -> None:
     run_all = args.all or not any([
         args.unary, args.binary, args.reductions, args.composite,
         args.intermediate, args.explore, args.params, args.params_all,
-        args.round_semantics, args.dep_matrix, args.gap_ops, args.sin_cos_sweep,
+        args.round_semantics, args.dep_matrix, args.gap_ops, args.sig_sweep,
+        args.differential, args.sin_cos_sweep,
     ])
 
     all_results: list[ProbeResult] = []
@@ -1971,6 +2635,10 @@ def _cli() -> None:
         all_results += scan_dependency_matrix()
     if args.gap_ops:
         all_results += scan_gap_ops()
+    if args.sig_sweep:
+        all_results += scan_signature_sweep()
+    if args.differential:
+        all_results += scan_coreml_differential()
     if args.sin_cos_sweep:
         all_results += scan_sin_cos_ranges()
 
