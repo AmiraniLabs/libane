@@ -1,7 +1,6 @@
 #include "compile_cache.hpp"
 #include <cstring>
 #include <functional>
-#include <fstream>
 #include <filesystem>
 
 namespace libane {
@@ -37,10 +36,10 @@ std::shared_ptr<CacheEntry> CompileCache::get(const CacheKey& key) {
     std::shared_lock lock(mutex_);
     auto it = map_.find(key);
     if (it == map_.end()) {
-        ++stats_.misses;
+        misses_.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
-    ++stats_.hits;
+    hits_.fetch_add(1, std::memory_order_relaxed);
 
     // Promote to front of LRU (needs write access — upgrade lock)
     lock.unlock();
@@ -85,7 +84,7 @@ void CompileCache::evict_lru_locked() {
     current_bytes_ -= victim->size_bytes;
     map_.erase(victim->key);
     lru_.pop_back();
-    ++stats_.evictions;
+    evictions_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void CompileCache::flush() {
@@ -106,8 +105,11 @@ size_t CompileCache::size() const {
 }
 
 CompileCache::Stats CompileCache::stats() const {
-    std::shared_lock lock(mutex_);
-    return stats_;
+    Stats snapshot;
+    snapshot.hits = hits_.load(std::memory_order_relaxed);
+    snapshot.misses = misses_.load(std::memory_order_relaxed);
+    snapshot.evictions = evictions_.load(std::memory_order_relaxed);
+    return snapshot;
 }
 
 void CompileCache::enable_disk_cache(const std::string& directory) {
