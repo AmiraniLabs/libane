@@ -30,6 +30,8 @@ LOGICAL_XOR: int
 REDUCE_PROD: int
 SCATTER: int
 GATHER: int
+SCATTER_ND: int
+SCATTER_ALONG_AXIS: int
 
 # ── Log level constants ───────────────────────────────────────────────────────
 

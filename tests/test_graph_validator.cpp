@@ -244,6 +244,26 @@ TEST_CASE("scatter: missing mask weights fails", "[validator][weights]") {
     REQUIRE_FALSE(r.ok());
 }
 
+TEST_CASE("scatter_nd: static-mask weights and matching shapes pass", "[validator][weights]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(64, 128));
+    TensorId u = g.add_input("u", S(64, 128));
+    auto mask = fp16_ones(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_SCATTER_ND, {a, u}, S(64, 128), mask.data(), mask.size() * 2);
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("scatter_along_axis: static-mask weights and matching shapes pass", "[validator][weights]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(64, 128));
+    TensorId u = g.add_input("u", S(64, 128));
+    auto mask = fp16_ones(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_SCATTER_ALONG_AXIS, {a, u}, S(64, 128), mask.data(), mask.size() * 2);
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
 TEST_CASE("gather(static): mask weights and matching shapes pass", "[validator][weights]") {
     AneGraph g;
     TensorId x = g.add_input("x", S(64, 128));

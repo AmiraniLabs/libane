@@ -112,6 +112,8 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
             in_shape.channels, in_shape.seq, in_var, out_var);
 
     case LIBANE_OP_SCATTER:
+    case LIBANE_OP_SCATTER_ND:
+    case LIBANE_OP_SCATTER_ALONG_AXIS:
         return mil::MilBuilder::scatter_static_mask_fragment(
             out_shape.channels, out_shape.seq,
             in_var, tensor_var(node.inputs[1]), out_var, node.weight_file);

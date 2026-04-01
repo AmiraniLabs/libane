@@ -649,6 +649,8 @@ For multi-output graphs, call set_output_shapes() first::
     m.attr("REDUCE_PROD") = static_cast<int>(LIBANE_OP_REDUCE_PROD);
     m.attr("SCATTER")   = static_cast<int>(LIBANE_OP_SCATTER);
     m.attr("GATHER")    = static_cast<int>(LIBANE_OP_GATHER);
+    m.attr("SCATTER_ND") = static_cast<int>(LIBANE_OP_SCATTER_ND);
+    m.attr("SCATTER_ALONG_AXIS") = static_cast<int>(LIBANE_OP_SCATTER_ALONG_AXIS);
 
     /* ── Log level constants ──────────────────────────────────────────── */
     m.attr("LOG_SILENT") = static_cast<int>(LIBANE_LOG_SILENT);

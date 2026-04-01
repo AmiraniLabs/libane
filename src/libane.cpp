@@ -232,6 +232,12 @@ libane_handle_t libane_compile(libane_op_t op,
             case LIBANE_OP_SCATTER:
                 set_error("SCATTER not supported via libane_compile — use graph API with static mask weights");
                 return nullptr;
+            case LIBANE_OP_SCATTER_ND:
+                set_error("SCATTER_ND not supported via libane_compile — use graph API with static mask weights");
+                return nullptr;
+            case LIBANE_OP_SCATTER_ALONG_AXIS:
+                set_error("SCATTER_ALONG_AXIS not supported via libane_compile — use graph API with static mask weights");
+                return nullptr;
             case LIBANE_OP_GATHER:
                 set_error("GATHER not supported via libane_compile — use graph API (static or dynamic mask)");
                 return nullptr;

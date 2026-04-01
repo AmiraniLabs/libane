@@ -271,24 +271,26 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
             break;
         }
 
-        case LIBANE_OP_SCATTER: {
+        case LIBANE_OP_SCATTER:
+        case LIBANE_OP_SCATTER_ND:
+        case LIBANE_OP_SCATTER_ALONG_AXIS: {
             if (n.inputs.size() != 2) {
-                err("scatter requires exactly two inputs (base, updates), got " +
+                err("scatter-like op requires exactly two inputs (base, updates), got " +
                     std::to_string(n.inputs.size()));
                 break;
             }
             if (n.weights.empty()) {
-                err("scatter requires static mask weights [1,C,1,S]");
+                err("scatter-like op requires static mask weights [1,C,1,S]");
                 break;
             }
             const auto& a = g.tensor(n.inputs[0]).shape;
             const auto& b = g.tensor(n.inputs[1]).shape;
             if (!(a == b && a == out_t.shape)) {
-                err("scatter requires input/output shapes to match exactly");
+                err("scatter-like op requires input/output shapes to match exactly");
             }
             size_t expected = out_t.shape.bytes();
             if (n.weights.size() != expected) {
-                err("scatter mask size mismatch: expected " + std::to_string(expected) +
+                err("scatter-like mask size mismatch: expected " + std::to_string(expected) +
                     " bytes ([1,C,1,S] fp16), got " + std::to_string(n.weights.size()));
             }
             break;

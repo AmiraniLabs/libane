@@ -2626,6 +2626,28 @@ def scan_lowered_support(C: int = 64, S: int = 512) -> list[ProbeResult]:
             weights=mask,
         )
     )
+    results.append(
+        _run_case(
+            "lowered/scatter_nd_static_mask",
+            _op_code("SCATTER_ND", 20),
+            [base, upd],
+            expected=exp_sc,
+            atol=0.05,
+            note="lowering=base*(1-mask)+updates*mask with static fp16 mask weights",
+            weights=mask,
+        )
+    )
+    results.append(
+        _run_case(
+            "lowered/scatter_along_axis_static_mask",
+            _op_code("SCATTER_ALONG_AXIS", 21),
+            [base, upd],
+            expected=exp_sc,
+            atol=0.05,
+            note="lowering=base*(1-mask)+updates*mask with static fp16 mask weights",
+            weights=mask,
+        )
+    )
 
     # Gather(static): out = x * static_mask_weights
     gx = np.linspace(-1.0, 1.0, n, dtype=np.float32)
@@ -2844,8 +2866,10 @@ def _print_scatter_gather_matrix(results: list[ProbeResult]) -> None:
         return "PASS" if any(vals) else "FAIL"
 
     rows = [
-        ("scatter", _raw_for("scatter"), _lowered_for("scatter")),
-        ("gather", _raw_for("gather"), _lowered_for("gather")),
+        ("scatter", _raw_for("differential/scatter"), _lowered_for("lowered/scatter_static_mask")),
+        ("scatter_nd", _raw_for("differential/scatter_nd"), _lowered_for("lowered/scatter_nd_static_mask")),
+        ("scatter_along_axis", _raw_for("differential/scatter_along_axis"), _lowered_for("lowered/scatter_along_axis_static_mask")),
+        ("gather", _raw_for("differential/gather"), _lowered_for("lowered/gather")),
     ]
     if all(raw == "n/a" and low == "n/a" for _, raw, low in rows):
         return
@@ -2872,8 +2896,8 @@ def export_json(results: list[ProbeResult], path: str) -> None:
 
     chip = _chip_info()
 
-    def _matrix_val(op: str, field: str) -> Optional[bool]:
-        vals = [getattr(r, field) for r in results if getattr(r, field) is not None and op in r.name]
+    def _matrix_val(pattern: str, field: str) -> Optional[bool]:
+        vals = [getattr(r, field) for r in results if getattr(r, field) is not None and pattern in r.name]
         if not vals:
             return None
         return bool(any(vals))
@@ -2890,12 +2914,20 @@ def export_json(results: list[ProbeResult], path: str) -> None:
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "scatter_gather_matrix": {
             "scatter": {
-                "raw_acceptance": _matrix_val("scatter", "raw_acceptance"),
-                "lowered_support": _matrix_val("scatter", "libane_lowered_support"),
+                "raw_acceptance": _matrix_val("differential/scatter", "raw_acceptance"),
+                "lowered_support": _matrix_val("lowered/scatter_static_mask", "libane_lowered_support"),
+            },
+            "scatter_nd": {
+                "raw_acceptance": _matrix_val("differential/scatter_nd", "raw_acceptance"),
+                "lowered_support": _matrix_val("lowered/scatter_nd_static_mask", "libane_lowered_support"),
+            },
+            "scatter_along_axis": {
+                "raw_acceptance": _matrix_val("differential/scatter_along_axis", "raw_acceptance"),
+                "lowered_support": _matrix_val("lowered/scatter_along_axis_static_mask", "libane_lowered_support"),
             },
             "gather": {
-                "raw_acceptance": _matrix_val("gather", "raw_acceptance"),
-                "lowered_support": _matrix_val("gather", "libane_lowered_support"),
+                "raw_acceptance": _matrix_val("differential/gather", "raw_acceptance"),
+                "lowered_support": _matrix_val("lowered/gather", "libane_lowered_support"),
             },
         },
         "results": [
