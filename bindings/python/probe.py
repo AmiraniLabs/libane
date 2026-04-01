@@ -1486,6 +1486,180 @@ def scan_sin_cos_ranges(C: int = _C, S: int = _S) -> list[ProbeResult]:
     return results
 
 
+def scan_tan_asin_acos_boundaries(C: int = 32, S: int = 256) -> list[ProbeResult]:
+    """
+    Boundary-focused range sweeps for lowered tan/asin/acos.
+
+    These execute through libane graph lowering (not raw standalone MIL).
+    """
+    print("── Tan/Asin/Acos boundary sweep ──────────────────────────────────")
+    n = C * S
+
+    try:
+        import ane
+    except ImportError as e:
+        return [
+            ProbeResult(
+                name="sweep/import",
+                compiled=False,
+                passed=None,
+                max_err=None,
+                atol=0.0,
+                compile_ms=0.0,
+                eval_ms=None,
+                error=f"ane module not available: {e}",
+                failure_kind="compile_reject",
+                raw_acceptance=None,
+                libane_lowered_support=False,
+            )
+        ]
+
+    def _op_code(name: str, fallback: int) -> int:
+        return int(getattr(ane, name, fallback))
+
+    def _run_unary(
+        name: str,
+        op_code: int,
+        x: np.ndarray,
+        expected: np.ndarray,
+        atol: float,
+        note: str,
+    ) -> ProbeResult:
+        t0 = time.perf_counter()
+        try:
+            g = ane.Graph()
+            tid = g.add_input("in0", [1, C, 1, S])
+            out = g.add_op(op_code, [tid], [1, C, 1, S])
+            g.mark_output(out)
+            cg = g.compile()
+            compile_ms = (time.perf_counter() - t0) * 1000.0
+        except Exception as e:
+            compile_ms = (time.perf_counter() - t0) * 1000.0
+            return ProbeResult(
+                name=name,
+                compiled=False,
+                passed=None,
+                max_err=None,
+                atol=atol,
+                compile_ms=compile_ms,
+                eval_ms=None,
+                error=str(e),
+                failure_kind="compile_reject",
+                note=note,
+                raw_acceptance=None,
+                libane_lowered_support=False,
+            )
+
+        t1 = time.perf_counter()
+        try:
+            out_arr = np.asarray(cg(x.reshape(1, C, 1, S).astype(np.float16)), dtype=np.float16).reshape(-1)
+            eval_ms = (time.perf_counter() - t1) * 1000.0
+        except Exception as e:
+            eval_ms = (time.perf_counter() - t1) * 1000.0
+            return ProbeResult(
+                name=name,
+                compiled=True,
+                passed=False,
+                max_err=None,
+                atol=atol,
+                compile_ms=compile_ms,
+                eval_ms=eval_ms,
+                error=str(e),
+                failure_kind="runtime_reject",
+                note=note,
+                raw_acceptance=None,
+                libane_lowered_support=False,
+            )
+
+        passed, max_err = check(name, out_arr, expected, atol)
+        return ProbeResult(
+            name=name,
+            compiled=True,
+            passed=passed,
+            max_err=max_err,
+            atol=atol,
+            compile_ms=compile_ms,
+            eval_ms=eval_ms,
+            failure_kind=None if passed else "numeric_mismatch",
+            note=note,
+            raw_acceptance=None,
+            libane_lowered_support=passed,
+        )
+
+    def _append_op_sweep(
+        out: list[ProbeResult],
+        op_name: str,
+        op_code: int,
+        ref_fn: Callable[[np.ndarray], np.ndarray],
+        bands: list[tuple[str, float, float, float]],
+    ) -> None:
+        op_rows: list[ProbeResult] = []
+        for label, lo, hi, atol in bands:
+            x = np.linspace(lo, hi, n, dtype=np.float32)
+            expected = ref_fn(x).astype(np.float32)
+            row = _run_unary(
+                name=f"sweep/{op_name} band={label} [{lo:g},{hi:g}]",
+                op_code=op_code,
+                x=x,
+                expected=expected,
+                atol=atol,
+                note=f"range=[{lo:g},{hi:g}]",
+            )
+            op_rows.append(row)
+            out.append(row)
+
+        passed_rows = [r for r in op_rows if r.passed is True and r.max_err is not None]
+        if passed_rows:
+            errs = np.array([float(r.max_err) for r in passed_rows], dtype=np.float64)
+            envelope_note = (
+                f"bands_passed={len(passed_rows)}/{len(op_rows)}; "
+                f"max_err={errs.max():.6f}; mean_err={errs.mean():.6f}; p95_err={np.percentile(errs,95):.6f}"
+            )
+            out.append(
+                ProbeResult(
+                    name=f"sweep/{op_name} envelope",
+                    compiled=True,
+                    passed=True,
+                    max_err=float(errs.max()),
+                    atol=float(max(r.atol for r in passed_rows)),
+                    compile_ms=0.0,
+                    eval_ms=0.0,
+                    note=envelope_note,
+                    raw_acceptance=None,
+                    libane_lowered_support=True,
+                )
+            )
+
+    results: list[ProbeResult] = []
+
+    tan_bands = [
+        ("core", -1.2, 1.2, 0.25),
+        ("neg_pre_pole", -1.56, -1.45, 0.8),
+        ("neg_post_pole", -1.69, -1.58, 0.8),
+        ("pos_pre_pole", 1.45, 1.56, 0.8),
+        ("pos_post_pole", 1.58, 1.69, 0.8),
+    ]
+    asin_bands = [
+        ("interior", -0.95, 0.95, 0.3),
+        ("near_neg1", -0.999, -0.95, 0.5),
+        ("near_pos1", 0.95, 0.999, 0.5),
+        ("endpoint_neg1", -1.0, -0.9995, 0.8),
+        ("endpoint_pos1", 0.9995, 1.0, 0.8),
+    ]
+    acos_bands = [
+        ("interior", -0.95, 0.95, 0.3),
+        ("near_neg1", -0.999, -0.95, 0.5),
+        ("near_pos1", 0.95, 0.999, 0.5),
+        ("endpoint_neg1", -1.0, -0.9995, 0.8),
+        ("endpoint_pos1", 0.9995, 1.0, 0.8),
+    ]
+
+    _append_op_sweep(results, "tan", _op_code("TAN", 26), np.tan, tan_bands)
+    _append_op_sweep(results, "asin", _op_code("ASIN", 27), np.arcsin, asin_bands)
+    _append_op_sweep(results, "acos", _op_code("ACOS", 28), np.arccos, acos_bands)
+    return results
+
+
 def scan_round_semantics(C: int = 16, S: int = 64) -> list[ProbeResult]:
     """
     Characterize ANE round() tie-breaking behavior on exact fp16 half-way inputs.
@@ -3091,6 +3265,8 @@ def _cli() -> None:
                         help="Prototype static one-hot scatter decomposition using supported primitives")
     parser.add_argument("--sin-cos-sweep", action="store_true",
                         help="Run sin/cos input-range sweep")
+    parser.add_argument("--trig-boundary-sweep", action="store_true",
+                        help="Run boundary-focused tan/asin/acos lowered sweeps")
     parser.add_argument("--all",        action="store_true",
                         help="Run all scans (unary+binary+reductions+composite)")
     parser.add_argument("--export",     metavar="FILE",
@@ -3111,7 +3287,8 @@ def _cli() -> None:
         args.unary, args.binary, args.reductions, args.composite,
         args.intermediate, args.explore, args.params, args.params_all,
         args.round_semantics, args.dep_matrix, args.gap_ops, args.sig_sweep,
-        args.differential, args.lowered_support, args.scatter_lowering_proto, args.sin_cos_sweep,
+        args.differential, args.lowered_support, args.scatter_lowering_proto,
+        args.sin_cos_sweep, args.trig_boundary_sweep,
     ])
 
     all_results: list[ProbeResult] = []
@@ -3150,6 +3327,8 @@ def _cli() -> None:
         all_results += scan_scatter_lowering_proto()
     if args.sin_cos_sweep:
         all_results += scan_sin_cos_ranges()
+    if args.trig_boundary_sweep:
+        all_results += scan_tan_asin_acos_boundaries()
 
     print_report(all_results)
 
