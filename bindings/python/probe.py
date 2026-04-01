@@ -1,842 +1,1897 @@
 """
-probe — ANE op discovery harness for libane.
+ane.probe — ANE op probe harness for libane.
 
-Exposes every op class supported by the Apple Neural Engine as a
-first-class Python probe, enabling:
+Systematically tests MIL ops for:
+  1. Compilation success on the local ANE
+  2. Numerical correctness vs CPU reference
+  3. Compound/intermediate op discovery
+  4. Parameter space exploration
+  5. Cross-shape behavior
 
-  1. Compound / intermediate op discovery (ops that only compile as
-     sub-nodes of a larger graph, not as standalone).
-  2. Parameter space exploration (epsilon, axis, exponent, …).
-  3. Cross-generation comparison (M1–M4) via JSON export with chip metadata.
-  4. Dtype combination testing.
-  5. Crowdsourced research — results are JSON-exportable with full
-     chip/OS/libane version metadata so runs from many machines can be
-     aggregated.
+Usage::
 
-Quick start::
+    from ane import probe
 
-    import probe
-    r = probe.probe_unary("relu")
-    print(r)                       # ProbeResult(op='relu', status='ok', …)
-    probe.scan_all()               # run everything
-    probe.export_json("results.json")
+    # Scan all known unary ops
+    report = probe.scan_unary()
+    probe.print_report(report)
 
-CLI::
+    # Discover ops that only work as intermediates
+    report = probe.scan_intermediate()
 
-    ane-probe --all --export results.json
+    # Try unknown op names (fuzzing)
+    report = probe.explore_names(probe.CANDIDATE_NAMES)
+
+    # Export for crowdsourced ANE research
+    probe.export_json(report, "results.json")
+
+    # CLI: python -m ane.probe [--unary] [--binary] [--composite] [--export FILE]
 """
+
 from __future__ import annotations
 
 import json
-import math
-import os
 import platform
-import subprocess
 import sys
-import textwrap
-from dataclasses import dataclass, field
-from typing import Any
+import time
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 import numpy as np
 
-try:
-    import ane as _ane
-except ImportError as _e:  # pragma: no cover
-    raise ImportError(
-        "libane Python extension not found — install with: pip install libane"
-    ) from _e
+# ── MIL program builder ───────────────────────────────────────────────────────
 
-# ── Build-info header required by every MIL program ──────────────────────────
+# Standard build-info header required by the ANE compiler.
+# These version strings match what maderix/ANE and ironmill use.
+_BUILD_INFO = (
+    '[buildInfo = dict<string, string>({'
+    '{"coremlc-component-MIL", "3510.2.1"}, '
+    '{"coremlc-version", "3505.4.1"}, '
+    '{"coremltools-component-milinternal", ""}, '
+    '{"coremltools-version", "9.0"}'
+    '})]'
+)
+_BUILD_INFO_FIELDS = {
+    "coremlc-component-MIL": "3510.2.1",
+    "coremlc-version": "3505.4.1",
+    "coremltools-component-milinternal": "",
+    "coremltools-version": "9.0",
+}
 
-_BUILD_INFO = textwrap.dedent("""\
-    buildInfo {
-       coremlc-version: "7.0.0"
-       coremltools-version: "7.0.0"
-       mlmodel-version: "7"
-       model-name: "probe"
-    }
-    """)
+_C = 32   # default probe tensor channels
+_S = 32   # default probe tensor seq length
+_N = _C * _S  # total elements
 
-# ── MIL program templates ─────────────────────────────────────────────────────
 
-def mil_program(body: str, *, inputs: str = "x: fp16[1,32,1,32]",
-                outputs: str = "fp16[1,32,1,32]") -> str:
-    """Wrap *body* in a complete MIL program."""
+def mil_program(body: str, inputs_sig: str, output: str) -> str:
+    """Build a complete MIL 1.3 program from a body fragment."""
     return (
-        _BUILD_INFO
-        + f"func main({inputs}) -> ({outputs}) {{\n"
-        + body
-        + "}\n"
+        f"program(1.3)\n"
+        f"{_BUILD_INFO}\n"
+        f"{{\n"
+        f"    func main<ios18>({inputs_sig}) {{\n"
+        f"{body}\n"
+        f"    }} -> ({output});\n"
+        f"}}"
     )
 
 
-def _sig1(shape: str = "1,32,1,32") -> tuple[str, str]:
-    """Single fp16 input/output signature with *shape*."""
-    return f"x: fp16[{shape}]", f"fp16[{shape}]"
+def _sig1(C: int = _C, S: int = _S) -> str:
+    """MIL signature for one [1,C,1,S] fp16 input."""
+    return f"tensor<fp16, [1,{C},1,{S}]> a_input0"
 
 
-def _sig2(shape: str = "1,32,1,32") -> tuple[str, str]:
-    """Two fp16 inputs, one output."""
-    return f"a: fp16[{shape}], b: fp16[{shape}]", f"fp16[{shape}]"
-
-
-def _sig3(in_shape: str, out_shape: str) -> tuple[str, str]:
-    return f"x: fp16[{in_shape}]", f"fp16[{out_shape}]"
-
-
-def _body1(op_name: str, params: str = "", var: str = "x") -> str:
-    """Unary op body: v = op_name(x=var, …); return v"""
-    sep = ", " if params else ""
-    return f"  %v = {op_name}(x={var}{sep}{params}) -> (fp16);\n  return (%v);\n"
-
-
-def _body2(op_name: str, params: str = "") -> str:
-    """Binary op body: v = op_name(x=a, y=b, …); return v"""
-    sep = ", " if params else ""
-    return f"  %v = {op_name}(x=a, y=b{sep}{params}) -> (fp16);\n  return (%v);\n"
-
-
-def _body_cmp(op_name: str) -> str:
-    """Comparison op (bool output) body — cast result back to fp16."""
+def _sig2(C: int = _C, S: int = _S) -> str:
+    """MIL signature for two [1,C,1,S] fp16 inputs."""
     return (
-        "  %b = {op}(x=a, y=b) -> (bool);\n"
-        "  %v = cast(x=%b, dtype=\"fp16\") -> (fp16);\n"
-        "  return (%v);\n"
-    ).format(op=op_name)
-
-
-def _reduction_body(op_name: str, axes: str = "[3]") -> str:
-    """Reduction op body."""
-    return (
-        f"  %v = {op_name}(x=x, axes={axes}, keep_dims=true) -> (fp16);\n"
-        "  return (%v);\n"
+        f"tensor<fp16, [1,{C},1,{S}]> a_input0, "
+        f"tensor<fp16, [1,{C},1,{S}]> a_input1"
     )
 
 
-# ── ProbeResult ───────────────────────────────────────────────────────────────
+def _sig3(C: int = _C, S: int = _S) -> str:
+    """MIL signature for three [1,C,1,S] fp16 inputs."""
+    return (
+        f"tensor<fp16, [1,{C},1,{S}]> a_input0, "
+        f"tensor<fp16, [1,{C},1,{S}]> a_input1, "
+        f"tensor<fp16, [1,{C},1,{S}]> a_input2"
+    )
+
+
+def _body1(op: str, extra_args: str = "", C: int = _C, S: int = _S) -> str:
+    """MIL body for a single unary op."""
+    args = f"x=a_input0{extra_args}"
+    return (
+        f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+        f'{op}({args})[name=string("z_output0")];'
+    )
+
+
+def _body2(op: str, extra_args: str = "", C: int = _C, S: int = _S) -> str:
+    """MIL body for a binary op on two fp16 inputs."""
+    args = f"x=a_input0, y=a_input1{extra_args}"
+    return (
+        f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+        f'{op}({args})[name=string("z_output0")];'
+    )
+
+
+def _body_cmp(op: str, C: int = _C, S: int = _S) -> str:
+    """MIL body for a comparison op: returns fp16 cast of bool result."""
+    return (
+        f'        tensor<bool, [1,{C},1,{S}]> cmp = '
+        f'{op}(x=a_input0, y=a_input1)[name=string("cmp")];\n'
+        f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+        f'cast(x=cmp, dtype=string("fp16"))[name=string("z_output0")];'
+    )
+
+
+# ── Result types ──────────────────────────────────────────────────────────────
 
 @dataclass
 class ProbeResult:
-    """Result of a single probe run."""
-    op: str
-    variant: str = ""
-    compiles: bool = False
-    executes: bool = False
-    correct: bool | None = None
-    error: str = ""
-    max_err: float | None = None
-    params: dict[str, Any] = field(default_factory=dict)
+    """Result of probing one MIL op or pattern."""
+    name: str
+    compiled: bool
+    passed: Optional[bool]   # None if compile failed or no reference
+    max_err: Optional[float]
+    atol: float
+    compile_ms: float
+    eval_ms: Optional[float]
+    error: Optional[str] = None
+    expected_compile_fail: bool = False
+    expected_eval_fail: bool = False
+    note: Optional[str] = None
+    failure_kind: Optional[str] = None
 
     @property
     def status(self) -> str:
-        if not self.compiles:
-            return "no_compile"
-        if not self.executes:
-            return "no_execute"
-        if self.correct is False:
-            return "wrong"
-        if self.correct is True:
-            return "ok"
-        return "compiled"  # executed not attempted
+        if not self.compiled and self.expected_compile_fail:
+            return "XFAIL_COMPILE"
+        if self.passed is False and self.expected_eval_fail:
+            return "XFAIL_EVAL"
+        if self.failure_kind == "compile_reject":
+            return "COMPILE_REJECT"
+        if self.failure_kind == "runtime_reject":
+            return "RUNTIME_REJECT"
+        if self.failure_kind == "semantic_mismatch":
+            return "SEMANTIC_MISMATCH"
+        if self.failure_kind == "numeric_mismatch":
+            return "NUMERIC_MISMATCH"
+        if not self.compiled:
+            return "COMPILE_FAIL"
+        if self.passed is None:
+            return "COMPILE_ONLY"
+        return "PASS" if self.passed else "EVAL_FAIL"
 
-    def __str__(self) -> str:
-        tag = f"[{self.variant}]" if self.variant else ""
-        err = f" max_err={self.max_err:.4g}" if self.max_err is not None else ""
-        return f"ProbeResult(op={self.op!r}{tag}, status={self.status!r}{err})"
+    @property
+    def support_level(self) -> str:
+        if self.compiled and self.passed is True:
+            return "EVAL_VERIFIED"
+        if self.compiled and self.passed is None:
+            return "COMPILE_ONLY"
+        return "UNSUPPORTED"
 
 
-def _numel(shape: tuple[int, ...]) -> int:
-    n = 1
-    for d in shape:
-        n *= d
-    return n
+# ── Numerical checking ────────────────────────────────────────────────────────
+
+def _erf_approx(x: np.ndarray) -> np.ndarray:
+    """Abramowitz & Stegun polynomial approximation for erf (same as ironmill)."""
+    sign = np.sign(x)
+    ax = np.abs(x.astype(np.float32))
+    t = 1.0 / (1.0 + 0.3275911 * ax)
+    poly = t * (0.254829592 + t * (-0.284496736
+                + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))))
+    return (sign * (1.0 - poly * np.exp(-ax * ax))).astype(np.float32)
 
 
-def check(actual: np.ndarray, expected: np.ndarray, atol: float = 0.02) -> tuple[bool, float]:
-    """Compare fp16 actual against fp32 expected.  Returns (ok, max_abs_err)."""
-    a16 = actual.astype(np.float32).ravel()
+def check(name: str,
+          actual: np.ndarray,
+          expected: np.ndarray,
+          atol: float) -> tuple[bool, float]:
+    """
+    Compare f16 actual vs f32 expected. Returns (passed, max_err).
+    Prints a one-line result to stdout.
+    """
+    a32 = actual.astype(np.float32).ravel()
     e32 = np.asarray(expected, dtype=np.float32).ravel()
-    if a16.shape != e32.shape:
+
+    if a32.shape != e32.shape:
+        print(f"    ❌ {name}: shape mismatch ({a32.shape} vs {e32.shape})")
         return False, float("inf")
-    err = float(np.max(np.abs(a16 - e32)))
-    return err <= atol, err
+
+    errs = np.abs(a32 - e32)
+    max_err = float(errs.max())
+    fail_idx = np.argmax(errs)
+
+    if max_err > atol:
+        print(
+            f"    ❌ {name}: FAIL at [{fail_idx}] "
+            f"got={a32[fail_idx]:.4f} exp={e32[fail_idx]:.4f} "
+            f"(max_err={max_err:.6f}, atol={atol})"
+        )
+        return False, max_err
+
+    print(f"    ✅ {name}: PASS (max_err={max_err:.6f}, atol={atol})")
+    return True, max_err
 
 
-# ── Core probe primitive ──────────────────────────────────────────────────────
+# ── Core probe function ───────────────────────────────────────────────────────
 
 def probe_custom(
-    op: str,
-    mil: str,
+    name: str,
+    mil_text: str,
     inputs: list[np.ndarray],
-    out_numel: list[int],
-    *,
-    expected: list[np.ndarray] | None = None,
-    variant: str = "",
-    params: dict[str, Any] | None = None,
-    atol: float = 0.02,
+    output_numel: int,
+    expected: Optional[np.ndarray] = None,
+    atol: float = 0.1,
+    weights: Optional[dict] = None,
 ) -> ProbeResult:
     """
-    Compile *mil* and optionally execute it, returning a ProbeResult.
+    Compile and optionally evaluate an arbitrary MIL program.
 
     Args:
-        op:        Op name for the result label.
-        mil:       Complete MIL program text.
-        inputs:    Input arrays (converted to fp16 internally).
-        out_numel: Number of fp16 elements for each output.
-        expected:  If provided, compare outputs against these fp32 reference arrays.
-        variant:   Optional sub-label (e.g. an epsilon value).
-        params:    Arbitrary parameter dict stored on the result.
-        atol:      Absolute tolerance for correctness check.
+        name:         Human-readable name for reporting.
+        mil_text:     Complete MIL program text.
+        inputs:       List of fp16 input arrays.
+        output_numel: Number of fp16 elements in the output.
+        expected:     CPU reference output (f32). If None, only compilation is tested.
+        atol:         Absolute tolerance for numerical comparison.
+        weights:      Optional dict of {filename: np.float16 array} for weight files.
+
+    Returns:
+        ProbeResult
     """
-    r = ProbeResult(op=op, variant=variant, params=params or {})
-
     try:
-        prog = _ane.compile_mil(mil)
-        r.compiles = True
-    except Exception as exc:
-        r.error = str(exc)
-        return r
+        import ane
+    except ImportError as e:
+        return ProbeResult(
+            name=name, compiled=False, passed=None, max_err=None,
+            atol=atol, compile_ms=0.0, eval_ms=None,
+            error=f"ane module not available: {e}",
+            failure_kind="compile_reject",
+        )
 
-    if not inputs:
-        return r
-
+    t0 = time.perf_counter()
     try:
-        outputs = prog.run(inputs, out_numel)
-        r.executes = True
-    except Exception as exc:
-        r.error = str(exc)
-        return r
+        if weights:
+            prog = ane.compile_mil_with_weights(mil_text, weights)
+        else:
+            prog = ane.compile_mil(mil_text)
+        compile_ms = (time.perf_counter() - t0) * 1000.0
+    except RuntimeError as e:
+        compile_ms = (time.perf_counter() - t0) * 1000.0
+        return ProbeResult(
+            name=name, compiled=False, passed=None, max_err=None,
+            atol=atol, compile_ms=compile_ms, eval_ms=None,
+            error=str(e),
+            failure_kind="compile_reject",
+        )
 
-    if expected is not None:
-        ok_list, errs = [], []
-        for out, exp in zip(outputs, expected):
-            ok, err = check(out, exp, atol=atol)
-            ok_list.append(ok)
-            errs.append(err)
-        r.correct = all(ok_list)
-        r.max_err = max(errs)
+    if expected is None:
+        return ProbeResult(
+            name=name, compiled=True, passed=None, max_err=None,
+            atol=atol, compile_ms=compile_ms, eval_ms=None,
+        )
 
-    return r
+    t1 = time.perf_counter()
+    try:
+        (out,) = prog.run(inputs, [output_numel])
+        eval_ms = (time.perf_counter() - t1) * 1000.0
+    except RuntimeError as e:
+        eval_ms = (time.perf_counter() - t1) * 1000.0
+        return ProbeResult(
+            name=name, compiled=True, passed=False, max_err=None,
+            atol=atol, compile_ms=compile_ms, eval_ms=eval_ms,
+            error=str(e),
+            failure_kind="runtime_reject",
+        )
+
+    passed, max_err = check(name, out, expected, atol)
+    return ProbeResult(
+        name=name, compiled=True, passed=passed, max_err=max_err,
+        atol=atol, compile_ms=compile_ms, eval_ms=eval_ms,
+        failure_kind=None if passed else "numeric_mismatch",
+    )
 
 
-# ── Op descriptor tables ──────────────────────────────────────────────────────
+# ── Unary op descriptors ──────────────────────────────────────────────────────
+#
+# Each entry: (mil_body_fn, input_fn, expected_fn, atol)
+# mil_body_fn: str — the body fragment (already complete)
+# input_fn: () -> np.ndarray (f32, will be cast to f16)
+# expected_fn: (x_f32) -> np.ndarray (f32 reference)
 
-# shape used throughout: [1, C, 1, S] = [1, 32, 1, 32]
-_SHAPE = (1, 32, 1, 32)
-_N = _numel(_SHAPE)  # 1024 elements
+def _linspace(lo: float, hi: float) -> np.ndarray:
+    return np.linspace(lo, hi, _N, dtype=np.float32)
 
-_UNARY_OPS: dict[str, dict] = {
-    # activation
-    "relu":          {"params": ""},
-    "relu6":         {"params": ""},
-    "leaky_relu":    {"params": "alpha=0.01"},
-    "elu":           {"params": "alpha=1.0"},
-    "selu":          {"params": ""},
-    "celu":          {"params": "alpha=1.0"},
-    "gelu":          {"params": ""},
-    "silu":          {"params": ""},
-    "swish":         {"params": ""},
-    "sigmoid":       {"params": ""},
-    "tanh":          {"params": ""},
-    "softplus":      {"params": ""},
-    "softsign":      {"params": ""},
-    "hard_sigmoid":  {"params": ""},
-    "hard_swish":    {"params": ""},
-    "mish":          {"params": ""},
-    # elementwise math
-    "abs":           {"params": ""},
-    "sign":          {"params": ""},
-    "floor":         {"params": ""},
-    "ceil":          {"params": ""},
-    "round":         {"params": ""},
-    "exp":           {"params": ""},
-    "exp2":          {"params": ""},
-    "log":           {"params": ""},
-    "rsqrt":         {"params": "epsilon=0.0"},
-    "sqrt":          {"params": ""},
-    "inverse":       {"params": "epsilon=0.0"},
-    "square":        {"params": ""},
-    "erf":           {"params": ""},
-    "erfinv":        {"params": ""},
-    "asin":          {"params": ""},
-    "acos":          {"params": ""},
-    "atan":          {"params": ""},
-    "sin":           {"params": ""},
-    "cos":           {"params": ""},
-    "tan":           {"params": ""},
-    "sinh":          {"params": ""},
-    "cosh":          {"params": ""},
-    "clip":          {"params": "alpha=-1.0, beta=1.0"},
-    "threshold":     {"params": "alpha=0.0, beta=0.0"},
+
+def _small_pos() -> np.ndarray:
+    return (_linspace(0.0, 1.0) + 0.01).astype(np.float32)
+
+
+def _safe_nonzero() -> np.ndarray:
+    """Values in (-10, 10) avoiding 0."""
+    x = _linspace(-5.0, 5.0)
+    x[np.abs(x) < 0.5] = 0.6
+    return x
+
+
+def _round_half_away_from_zero(x: np.ndarray) -> np.ndarray:
+    """Reference round-half-away-from-zero semantics."""
+    x32 = np.asarray(x, dtype=np.float32)
+    return np.where(x32 >= 0.0, np.floor(x32 + 0.5), np.ceil(x32 - 0.5)).astype(np.float32)
+
+
+_UNARY_OPS: dict[str, tuple[str, Callable, Callable, float]] = {
+    # (body, input_gen, expected_fn, atol)
+    "relu": (
+        _body1("relu"),
+        lambda: _linspace(-5.0, 5.0),
+        lambda x: np.maximum(x, 0.0),
+        0.01,
+    ),
+    "abs": (
+        _body1("abs"),
+        lambda: _linspace(-5.0, 5.0),
+        np.abs,
+        0.01,
+    ),
+    "neg": (
+        _body1("neg"),
+        lambda: _linspace(-5.0, 5.0),
+        lambda x: -x,
+        0.01,
+    ),
+    "sign": (
+        _body1("sign"),
+        lambda: np.where(
+            np.abs(_linspace(-5.0, 5.0)) < 0.05, 0.1, _linspace(-5.0, 5.0)
+        ).astype(np.float32),
+        lambda x: np.where(x > 0, 1.0, np.where(x < 0, -1.0, 0.0)).astype(np.float32),
+        0.01,
+    ),
+    "sqrt": (
+        _body1("sqrt"),
+        lambda: _linspace(0.1, 10.0),
+        np.sqrt,
+        0.05,
+    ),
+    "exp": (
+        _body1("exp"),
+        lambda: _linspace(-5.0, 5.0) * 0.5,
+        np.exp,
+        0.5,
+    ),
+    "exp2": (
+        _body1("exp2"),
+        lambda: _linspace(-5.0, 5.0),
+        lambda x: np.power(2.0, x),
+        0.5,
+    ),
+    "log": (
+        # ANE requires epsilon parameter for log
+        (
+            '        fp16 eps = const()[name=string("eps"), val=fp16(0x1.0cp-17)];\n'
+            '        tensor<fp16, [1,32,1,32]> z_output0 = '
+            'log(x=a_input0, epsilon=eps)[name=string("z_output0")];'
+        ),
+        lambda: _linspace(0.1, 10.0),
+        np.log,
+        0.1,
+    ),
+    "sqrt": (
+        _body1("sqrt"),
+        lambda: _linspace(0.1, 10.0),
+        np.sqrt,
+        0.05,
+    ),
+    "rsqrt": (
+        # ANE requires epsilon parameter
+        (
+            '        fp16 eps = const()[name=string("eps"), val=fp16(0x1.0cp-17)];\n'
+            '        tensor<fp16, [1,32,1,32]> z_output0 = '
+            'rsqrt(x=a_input0, epsilon=eps)[name=string("z_output0")];'
+        ),
+        lambda: _linspace(0.1, 10.0),
+        lambda x: 1.0 / np.sqrt(x),
+        0.05,
+    ),
+    "inverse": (
+        # ANE requires epsilon parameter
+        (
+            '        fp16 eps = const()[name=string("eps"), val=fp16(0x1.0cp-17)];\n'
+            '        tensor<fp16, [1,32,1,32]> z_output0 = '
+            'inverse(x=a_input0, epsilon=eps)[name=string("z_output0")];'
+        ),
+        _safe_nonzero,
+        lambda x: 1.0 / x,
+        0.5,
+    ),
+    "square": (
+        _body1("square"),
+        lambda: _linspace(-3.0, 3.0),
+        lambda x: x * x,
+        0.1,
+    ),
+    "sigmoid": (
+        _body1("sigmoid"),
+        lambda: _linspace(-5.0, 5.0),
+        lambda x: 1.0 / (1.0 + np.exp(-x)),
+        0.015,
+    ),
+    "tanh": (
+        _body1("tanh"),
+        lambda: _linspace(-3.0, 3.0),
+        np.tanh,
+        0.01,
+    ),
+    "erf": (
+        _body1("erf"),
+        lambda: _linspace(-2.0, 2.0),
+        _erf_approx,
+        0.02,
+    ),
+    "silu": (
+        _body1("silu"),
+        lambda: _linspace(-5.0, 5.0),
+        lambda x: x / (1.0 + np.exp(-x)),
+        0.02,
+    ),
+    "gelu_tanh": (
+        _body1("gelu_tanh"),
+        lambda: _linspace(-3.0, 3.0),
+        lambda x: 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3))),
+        0.05,
+    ),
+    "softsign": (
+        _body1("softsign"),
+        lambda: _linspace(-5.0, 5.0),
+        lambda x: x / (1.0 + np.abs(x)),
+        0.01,
+    ),
+    "softplus": (
+        _body1("softplus"),
+        lambda: _linspace(-5.0, 5.0),
+        lambda x: np.log1p(np.exp(np.clip(x, -80, 80))),
+        0.05,
+    ),
+    "ceil": (
+        _body1("ceil"),
+        lambda: _linspace(-5.0, 5.0) * 3,
+        lambda x: np.ceil(np.array(x, dtype=np.float16).astype(np.float32)),
+        0.01,
+    ),
+    "floor": (
+        _body1("floor"),
+        lambda: _linspace(-5.0, 5.0) * 3,
+        lambda x: np.floor(np.array(x, dtype=np.float16).astype(np.float32)),
+        0.01,
+    ),
+    "round": (
+        _body1("round"),
+        lambda: _linspace(-5.0, 5.0) * 3,
+        _round_half_away_from_zero,
+        0.01,
+    ),
+    "sin": (
+        _body1("sin"),
+        lambda: _linspace(-3.0, 3.0),
+        np.sin,
+        0.01,
+    ),
+    "cos": (
+        _body1("cos"),
+        lambda: _linspace(-3.0, 3.0),
+        np.cos,
+        0.01,
+    ),
+    "tan": (
+        _body1("tan"),
+        lambda: _linspace(-1.2, 1.2),
+        np.tan,
+        0.01,
+    ),
+    "asin": (
+        _body1("asin"),
+        lambda: _linspace(-0.9, 0.9),
+        np.arcsin,
+        0.01,
+    ),
+    "acos": (
+        _body1("acos"),
+        lambda: _linspace(-0.9, 0.9),
+        np.arccos,
+        0.02,
+    ),
+    "atan": (
+        _body1("atan"),
+        lambda: _linspace(-5.0, 5.0),
+        np.arctan,
+        0.05,
+    ),
+    "sinh": (
+        _body1("sinh"),
+        lambda: _linspace(-2.0, 2.0),
+        np.sinh,
+        0.05,
+    ),
+    "cosh": (
+        _body1("cosh"),
+        lambda: _linspace(-2.0, 2.0),
+        np.cosh,
+        0.05,
+    ),
+    "identity": (
+        _body1("identity"),
+        lambda: _linspace(-5.0, 5.0),
+        lambda x: x,
+        0.02,
+    ),
 }
 
-_BINARY_OPS: dict[str, dict] = {
-    "add":           {"kind": "binary"},
-    "mul":           {"kind": "binary"},
-    "sub":           {"kind": "binary"},
-    "real_div":      {"kind": "binary"},
-    "maximum":       {"kind": "binary"},
-    "minimum":       {"kind": "binary"},
-    "pow":           {"kind": "binary"},
-    "floor_div":     {"kind": "binary"},
+# Known semantic divergence list. Keep empty unless a concrete known mismatch
+# is intentionally tolerated for a scan.
+_UNARY_EXPECTED_EVAL_FAILS: dict[str, str] = {}
+
+
+# ── Binary op descriptors ─────────────────────────────────────────────────────
+
+def _pair_ab() -> tuple[np.ndarray, np.ndarray]:
+    a = _linspace(-5.0, 5.0)
+    b = _linspace(0.5, 5.5)  # non-zero for div ops
+    return a, b
+
+
+_BINARY_OPS: dict[str, tuple[str, Callable, Callable, float]] = {
+    "add": (
+        _body2("add"),
+        _pair_ab,
+        lambda a, b: a + b,
+        0.05,
+    ),
+    "sub": (
+        _body2("sub"),
+        _pair_ab,
+        lambda a, b: a - b,
+        0.15,
+    ),
+    "mul": (
+        _body2("mul"),
+        lambda: (_linspace(-2.0, 2.0), _linspace(-2.0, 2.0)),
+        lambda a, b: a * b,
+        0.5,
+    ),
+    "maximum": (
+        _body2("maximum"),
+        _pair_ab,
+        lambda a, b: np.maximum(a, b),
+        0.05,
+    ),
+    "minimum": (
+        _body2("minimum"),
+        _pair_ab,
+        lambda a, b: np.minimum(a, b),
+        0.05,
+    ),
+    "real_div": (
+        _body2("real_div"),
+        _pair_ab,
+        lambda a, b: a / b,
+        0.5,
+    ),
+    "floor_div": (
+        _body2("floor_div"),
+        lambda: (_linspace(1.0, 50.0), np.full(_N, 7.0, dtype=np.float32)),
+        lambda a, b: np.floor(a / b),
+        1.0,
+    ),
+    "mod": (
+        _body2("mod"),
+        lambda: (_linspace(1.0, 50.0), np.full(_N, 7.0, dtype=np.float32)),
+        lambda a, b: a - np.floor(a / b) * b,
+        1.0,
+    ),
 }
 
-_COMPARISON_OPS: list[str] = [
-    "equal", "not_equal", "less", "less_equal", "greater", "greater_equal",
-]
+# Comparison ops: output is bool cast to fp16
+_COMPARISON_OPS: dict[str, tuple[str, Callable, Callable, float]] = {
+    "greater": (
+        _body_cmp("greater"),
+        lambda: (
+            np.array([i % 7 for i in range(_N)], dtype=np.float32),
+            np.full(_N, 3.0, dtype=np.float32),
+        ),
+        lambda a, b: (a > b).astype(np.float32),
+        0.01,
+    ),
+    "greater_equal": (
+        _body_cmp("greater_equal"),
+        lambda: (
+            np.array([i % 7 for i in range(_N)], dtype=np.float32),
+            np.full(_N, 3.0, dtype=np.float32),
+        ),
+        lambda a, b: (a >= b).astype(np.float32),
+        0.01,
+    ),
+    "less": (
+        _body_cmp("less"),
+        lambda: (
+            np.array([i % 7 for i in range(_N)], dtype=np.float32),
+            np.full(_N, 3.0, dtype=np.float32),
+        ),
+        lambda a, b: (a < b).astype(np.float32),
+        0.01,
+    ),
+    "less_equal": (
+        _body_cmp("less_equal"),
+        lambda: (
+            np.array([i % 7 for i in range(_N)], dtype=np.float32),
+            np.full(_N, 3.0, dtype=np.float32),
+        ),
+        lambda a, b: (a <= b).astype(np.float32),
+        0.01,
+    ),
+    "equal": (
+        _body_cmp("equal"),
+        lambda: (
+            np.array([i % 5 for i in range(_N)], dtype=np.float32),
+            np.full(_N, 2.0, dtype=np.float32),
+        ),
+        lambda a, b: (np.abs(a - b) < 1e-6).astype(np.float32),
+        0.01,
+    ),
+    "not_equal": (
+        _body_cmp("not_equal"),
+        lambda: (
+            np.array([i % 5 for i in range(_N)], dtype=np.float32),
+            np.full(_N, 2.0, dtype=np.float32),
+        ),
+        lambda a, b: (np.abs(a - b) > 1e-6).astype(np.float32),
+        0.01,
+    ),
+}
 
-# ── Unary probe ───────────────────────────────────────────────────────────────
 
-def probe_unary(op_name: str, *, shape: tuple[int, ...] = _SHAPE,
-                params: str | None = None) -> ProbeResult:
-    """Probe a unary elementwise op."""
+# ── Reduction op builders ─────────────────────────────────────────────────────
+
+def _reduction_body(op: str, axis: int = -1, C: int = _C, S: int = _S) -> str:
+    """Build a reduction body: reduce then tile back to full [1,C,1,S] for eval."""
+    rax_val = str(axis)
+    if axis == -1:
+        reduced_shape = f"[1,{C},1,1]"
+        tile_val = f"[1,1,1,{S}]"
+    else:  # axis == 1
+        reduced_shape = f"[1,1,1,{S}]"
+        tile_val = f"[1,{C},1,1]"
+    return (
+        f'        tensor<int32, [1]> rax = const()[name=string("rax"), '
+        f'val=tensor<int32, [1]>([{rax_val}])];\n'
+        f'        bool kd = const()[name=string("kd"), val=bool(true)];\n'
+        f'        tensor<fp16, {reduced_shape}> red = '
+        f'{op}(x=a_input0, axes=rax, keep_dims=kd)[name=string("red")];\n'
+        f'        tensor<int32, [4]> rep = const()[name=string("rep"), '
+        f'val=tensor<int32, [4]>({tile_val})];\n'
+        f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+        f'tile(x=red, reps=rep)[name=string("z_output0")];'
+    )
+
+
+# ── Generic probe functions ───────────────────────────────────────────────────
+
+def probe_unary(
+    op_name: str,
+    *,
+    body: Optional[str] = None,
+    input_fn: Optional[Callable] = None,
+    expected_fn: Optional[Callable] = None,
+    atol: float = 0.1,
+    C: int = _C,
+    S: int = _S,
+) -> ProbeResult:
+    """
+    Probe a unary MIL op. Looks up defaults in _UNARY_OPS if not provided.
+
+    Args:
+        op_name:     MIL op name (e.g. "relu"). Used as the result name.
+        body:        MIL body fragment. Defaults to lookup in _UNARY_OPS.
+        input_fn:    Callable returning f32 input array. Defaults to lookup.
+        expected_fn: Callable (x_f32) -> f32 reference. Defaults to lookup.
+        atol:        Absolute tolerance. Defaults to lookup.
+        C, S:        Tensor shape.
+
+    Returns:
+        ProbeResult
+    """
     desc = _UNARY_OPS.get(op_name)
-    if desc is None and params is None:
-        # Treat as unknown — try with no params
-        params_str = ""
-    else:
-        params_str = params if params is not None else (desc or {}).get("params", "")
+    _body = body or (desc[0] if desc else _body1(op_name, C=C, S=S))
+    _inp  = input_fn or (desc[1] if desc else lambda: _linspace(-2.0, 2.0))
+    _ref  = expected_fn or (desc[2] if desc else None)
+    _atol = atol if atol != 0.1 or not desc else desc[3]
 
-    shape_str = ",".join(str(d) for d in shape)
-    ins, outs = _sig1(shape_str)
-    body = _body1(op_name, params_str)
-    mil = mil_program(body, inputs=ins, outputs=outs)
+    x_f32 = _inp().ravel()[:C * S].astype(np.float32)
+    x_f16 = x_f32.astype(np.float16)
+    expected = _ref(x_f32) if _ref else None
 
-    n = _numel(shape)
-    rng = np.random.default_rng(42)
-    x = rng.uniform(0.1, 1.0, n).astype(np.float16).reshape(shape)
-    inp = [x]
-    return probe_custom(op_name, mil, inp, [n])
+    mil = mil_program(_body, _sig1(C, S), "z_output0")
+    return probe_custom(op_name, mil, [x_f16], C * S, expected, _atol)
 
 
-# ── Binary probe ──────────────────────────────────────────────────────────────
+def probe_binary(
+    op_name: str,
+    *,
+    body: Optional[str] = None,
+    input_fn: Optional[Callable] = None,
+    expected_fn: Optional[Callable] = None,
+    atol: float = 0.1,
+    C: int = _C,
+    S: int = _S,
+) -> ProbeResult:
+    """Probe a binary MIL op."""
+    # Check both binary and comparison descriptors
+    desc = _BINARY_OPS.get(op_name) or _COMPARISON_OPS.get(op_name)
+    _body = body or (desc[0] if desc else _body2(op_name, C=C, S=S))
+    _inp  = input_fn or (desc[1] if desc else _pair_ab)
+    _ref  = expected_fn or (desc[2] if desc else None)
+    _atol = atol if atol != 0.1 or not desc else desc[3]
 
-def probe_binary(op_name: str, *, shape: tuple[int, ...] = _SHAPE) -> ProbeResult:
-    """Probe a binary elementwise op."""
-    shape_str = ",".join(str(d) for d in shape)
-    ins, outs = _sig2(shape_str)
-    body = _body2(op_name)
-    mil = mil_program(body, inputs=ins, outputs=outs)
+    ab = _inp()
+    a_f16 = ab[0].ravel()[:C * S].astype(np.float16)
+    b_f16 = ab[1].ravel()[:C * S].astype(np.float16)
+    expected = _ref(ab[0].ravel()[:C * S], ab[1].ravel()[:C * S]) if _ref else None
 
-    n = _numel(shape)
-    rng = np.random.default_rng(42)
-    a = rng.uniform(0.1, 1.0, n).astype(np.float16).reshape(shape)
-    b = rng.uniform(0.1, 1.0, n).astype(np.float16).reshape(shape)
-    return probe_custom(op_name, mil, [a, b], [n])
-
-
-# ── Reduction probe ───────────────────────────────────────────────────────────
-
-def probe_reduction(op_name: str, *, axes: str = "[3]",
-                    shape: tuple[int, ...] = _SHAPE) -> ProbeResult:
-    """Probe a reduction op (keep_dims=true)."""
-    shape_str = ",".join(str(d) for d in shape)
-    ins, _ = _sig1(shape_str)
-    body = _reduction_body(op_name, axes)
-    mil = mil_program(body, inputs=ins, outputs=f"fp16[{shape_str}]")
-
-    n = _numel(shape)
-    rng = np.random.default_rng(42)
-    x = rng.uniform(0.1, 1.0, n).astype(np.float16).reshape(shape)
-    return probe_custom(op_name, mil, [x], [n])
+    mil = mil_program(_body, _sig2(C, S), "z_output0")
+    return probe_custom(op_name, mil, [a_f16, b_f16], C * S, expected, _atol)
 
 
-# ── Composite probes ──────────────────────────────────────────────────────────
+def probe_reduction(
+    op_name: str,
+    *,
+    axis: int = -1,
+    atol: float = 1.0,
+    C: int = _C,
+    S: int = _S,
+) -> ProbeResult:
+    """Probe a reduction op along the specified axis (-1=spatial, 1=channel)."""
+    body = _reduction_body(op_name, axis, C, S)
+    mil = mil_program(body, _sig1(C, S), "z_output0")
 
-def probe_rmsnorm(*, hidden: int = 32, seq: int = 32) -> ProbeResult:
-    """RMSNorm: y = x / sqrt(mean(x^2) + eps) * scale."""
-    rng = np.random.default_rng(42)
-    x = rng.normal(0, 1, (1, hidden, 1, seq)).astype(np.float16)
-    scale = np.ones((hidden,), dtype=np.float16)
-    n = hidden * seq
+    x_f32 = _linspace(-2.0, 2.0)
+    x_f16 = x_f32.astype(np.float16)
 
-    scale_arr = scale.astype(np.float16)
-    scale_blob = scale_arr.tobytes()
-    numel_scale = scale_arr.size
+    # Build CPU reference
+    x_grid = x_f32.reshape(C, S)
+    if axis == -1:
+        if op_name == "reduce_sum":
+            red = x_grid.sum(axis=1, keepdims=True)
+        elif op_name == "reduce_mean":
+            red = x_grid.mean(axis=1, keepdims=True)
+        elif op_name == "reduce_max":
+            red = x_grid.max(axis=1, keepdims=True)
+        elif op_name == "reduce_min":
+            red = x_grid.min(axis=1, keepdims=True)
+        elif op_name == "reduce_l2_norm":
+            red = np.sqrt((x_grid ** 2).sum(axis=1, keepdims=True))
+        elif op_name == "reduce_log_sum_exp":
+            mv = x_grid.max(axis=1, keepdims=True)
+            red = mv + np.log(np.exp(x_grid - mv).sum(axis=1, keepdims=True))
+        else:
+            red = None
+        if red is not None:
+            expected = np.tile(red, (1, S)).ravel()
+        else:
+            expected = None
+    else:  # axis == 1
+        if op_name == "reduce_sum":
+            red = x_grid.sum(axis=0, keepdims=True)
+        elif op_name == "reduce_mean":
+            red = x_grid.mean(axis=0, keepdims=True)
+        elif op_name == "reduce_max":
+            red = x_grid.max(axis=0, keepdims=True)
+        elif op_name == "reduce_min":
+            red = x_grid.min(axis=0, keepdims=True)
+        else:
+            red = None
+        if red is not None:
+            expected = np.tile(red, (C, 1)).ravel()
+        else:
+            expected = None
 
-    mil = (
-        _BUILD_INFO
-        + f"func main(x: fp16[1,{hidden},1,{seq}]) -> (fp16[1,{hidden},1,{seq}]) {{\n"
-        f"  %w = const() -> (fp16[{hidden}]);\n"
-        f"  %v = rms_norm(x=x, weight=%w, epsilon=1e-5) -> (fp16);\n"
-        "  return (%v);\n"
-        "}\n"
-    )
-    try:
-        prog = _ane.compile_mil_with_weights(
-            mil, {"weight.bin": scale_arr.reshape(hidden)})
-        r = ProbeResult("rmsnorm", compiles=True)
-        outs = prog.run([x], [n])
-        r.executes = True
-        return r
-    except Exception as exc:
-        r = ProbeResult("rmsnorm")
-        r.error = str(exc)
-        return r
-
-
-def probe_layer_norm(*, hidden: int = 32, seq: int = 32) -> ProbeResult:
-    """LayerNorm: y = (x - mean) / sqrt(var + eps) * scale + bias."""
-    rng = np.random.default_rng(42)
-    x = rng.normal(0, 1, (1, hidden, 1, seq)).astype(np.float16)
-    scale = np.ones(hidden, dtype=np.float16)
-    bias  = np.zeros(hidden, dtype=np.float16)
-    n = hidden * seq
-
-    mil = (
-        _BUILD_INFO
-        + f"func main(x: fp16[1,{hidden},1,{seq}]) -> (fp16[1,{hidden},1,{seq}]) {{\n"
-        f"  %s = const() -> (fp16[{hidden}]);\n"
-        f"  %b = const() -> (fp16[{hidden}]);\n"
-        f"  %v = layer_norm(x=x, axes=[1], gamma=%s, beta=%b, epsilon=1e-5)"
-        f" -> (fp16);\n"
-        "  return (%v);\n"
-        "}\n"
-    )
-    try:
-        prog = _ane.compile_mil_with_weights(
-            mil, {"scale.bin": scale, "bias.bin": bias})
-        r = ProbeResult("layer_norm", compiles=True)
-        prog.run([x], [n])
-        r.executes = True
-        return r
-    except Exception as exc:
-        r = ProbeResult("layer_norm")
-        r.error = str(exc)
-        return r
+    label = f"{op_name} axis={'spatial' if axis == -1 else 'channel'}"
+    return probe_custom(label, mil, [x_f16], C * S, expected, atol)
 
 
-def probe_softmax(*, channels: int = 32, seq: int = 32) -> ProbeResult:
-    """Softmax over the channel axis."""
-    shape_str = f"1,{channels},1,{seq}"
-    body = "  %v = softmax(x=x, axis=1) -> (fp16);\n  return (%v);\n"
-    mil = mil_program(body, inputs=f"x: fp16[{shape_str}]",
-                      outputs=f"fp16[{shape_str}]")
-    rng = np.random.default_rng(42)
-    x = rng.uniform(-1, 1, (1, channels, 1, seq)).astype(np.float16)
-    n = channels * seq
+# ── Intermediate op discovery ─────────────────────────────────────────────────
 
-    r = probe_custom("softmax", mil, [x], [n])
-    if r.executes:
-        # verify probabilities sum to ~1 along channel axis
-        out = _ane.compile_mil(mil).run([x], [n])[0].reshape(1, channels, 1, seq)
-        sums = out.astype(np.float32).sum(axis=1)
-        err = float(np.max(np.abs(sums - 1.0)))
-        r.correct = err < 0.05
-        r.max_err = err
-    return r
-
-
-def probe_matmul(*, M: int = 64, K: int = 64, N: int = 64) -> ProbeResult:
-    """Matrix multiply via ANE matmul graph op."""
-    rng = np.random.default_rng(42)
-    A = rng.normal(0, 0.1, (M, K)).astype(np.float32)
-    B = rng.normal(0, 0.1, (K, N)).astype(np.float32)
-    try:
-        C = _ane.matmul_f32(A, B)
-        expected = A @ B
-        ok, err = check(C, expected, atol=1.0)  # fp16 matmul has larger error
-        r = ProbeResult("matmul", compiles=True, executes=True,
-                        correct=ok, max_err=err)
-    except Exception as exc:
-        r = ProbeResult("matmul", error=str(exc))
-    return r
-
-
-def probe_concat(*, channels: int = 32, seq: int = 32) -> ProbeResult:
-    """Concat two tensors along axis=1 (channel axis)."""
-    shape_str = f"1,{channels},1,{seq}"
-    out_channels = channels * 2
-    out_str = f"1,{out_channels},1,{seq}"
-    mil = (
-        _BUILD_INFO
-        + f"func main(a: fp16[{shape_str}], b: fp16[{shape_str}])"
-        f" -> (fp16[{out_str}]) {{\n"
-        "  %v = concat(values=(a, b), axis=1) -> (fp16);\n"
-        "  return (%v);\n"
-        "}\n"
-    )
-    rng = np.random.default_rng(42)
-    a = rng.uniform(0, 1, (1, channels, 1, seq)).astype(np.float16)
-    b = rng.uniform(0, 1, (1, channels, 1, seq)).astype(np.float16)
-    n_out = out_channels * seq
-    return probe_custom("concat", mil, [a, b], [n_out])
-
-
-def probe_int8_round_trip(*, channels: int = 32, seq: int = 32) -> ProbeResult:
-    """fp16 → int8 cast → fp16 cast round-trip."""
-    shape_str = f"1,{channels},1,{seq}"
-    mil = (
-        _BUILD_INFO
-        + f"func main(x: fp16[{shape_str}]) -> (fp16[{shape_str}]) {{\n"
-        f"  %i = cast(x=x, dtype=\"int8\") -> (int8);\n"
-        f"  %v = cast(x=%i, dtype=\"fp16\") -> (fp16);\n"
-        "  return (%v);\n"
-        "}\n"
-    )
-    rng = np.random.default_rng(42)
-    x = rng.uniform(-1, 1, (1, channels, 1, seq)).astype(np.float16)
-    n = channels * seq
-    return probe_custom("int8_round_trip", mil, [x], [n])
-
-
-def probe_int8_quant_dequant(*, channels: int = 32, seq: int = 32) -> ProbeResult:
-    """Quantize (scale+zero_point) then dequantize — probes ANE int8 quant path."""
-    shape_str = f"1,{channels},1,{seq}"
-    mil = (
-        _BUILD_INFO
-        + f"func main(x: fp16[{shape_str}]) -> (fp16[{shape_str}]) {{\n"
-        f"  %q = quantize(input=x, zero_point=0, scale=0.01, output_dtype=\"int8\")"
-        f" -> (int8);\n"
-        f"  %v = dequantize(input=%q, zero_point=0, scale=0.01) -> (fp16);\n"
-        "  return (%v);\n"
-        "}\n"
-    )
-    rng = np.random.default_rng(42)
-    x = rng.uniform(-1, 1, (1, channels, 1, seq)).astype(np.float16)
-    n = channels * seq
-    return probe_custom("int8_quant_dequant", mil, [x], [n])
-
-
-# ── Intermediate-only op discovery ───────────────────────────────────────────
-
-def probe_intermediate(op_name: str, *, inner_params: str = "",
-                       shape: tuple[int, ...] = _SHAPE) -> ProbeResult:
+def probe_intermediate(
+    op_name: str,
+    *,
+    op_args: str = "",
+    out_shape: Optional[tuple] = None,
+    C: int = _C,
+    S: int = _S,
+) -> ProbeResult:
     """
-    Wrap *op_name* between two identity-like ops to discover ops that only
-    compile as intermediate nodes (not as standalone programs).
+    Test an op as an intermediate node between two identity ops.
 
-    The wrapper is: relu → op → relu.
+    This discovers ops like reshape/slice/tile that the ANE compiler rejects
+    when standalone but accepts as intermediates in a multi-op graph.
+
+    The pattern is:
+        identity(input) → target_op(...) → identity(output)
+
+    Args:
+        op_name:  MIL op name.
+        op_args:  Additional MIL arguments string (e.g. ' ,axes=...'). Prepend comma.
+        out_shape: Output shape of target_op as [C_out, S_out]. Defaults to same as input.
+        C, S:     Input tensor shape.
+
+    Returns:
+        ProbeResult (no numerical check — compile-only).
     """
-    shape_str = ",".join(str(d) for d in shape)
-    sep = ", " if inner_params else ""
+    oc, os_ = out_shape if out_shape else (C, S)
+
     body = (
-        f"  %pre  = relu(x=x) -> (fp16);\n"
-        f"  %mid  = {op_name}(x=%pre{sep}{inner_params}) -> (fp16);\n"
-        f"  %v    = relu(x=%mid) -> (fp16);\n"
-        "  return (%v);\n"
+        f'        tensor<fp16, [1,{C},1,{S}]> mid0 = '
+        f'identity(x=a_input0)[name=string("mid0")];\n'
+        f'        tensor<fp16, [1,{oc},1,{os_}]> mid1 = '
+        f'{op_name}(x=mid0{op_args})[name=string("mid1")];\n'
+        f'        tensor<fp16, [1,{oc},1,{os_}]> z_output0 = '
+        f'identity(x=mid1)[name=string("z_output0")];'
     )
-    ins, outs = _sig1(shape_str)
-    mil = mil_program(body, inputs=ins, outputs=outs)
+    mil = mil_program(body, _sig1(C, S), "z_output0")
+    return probe_custom(f"{op_name} (intermediate)", mil,
+                        [np.zeros(C * S, dtype=np.float16)], oc * os_)
 
-    n = _numel(shape)
-    rng = np.random.default_rng(42)
-    x = rng.uniform(0.1, 1.0, n).astype(np.float16).reshape(shape)
-    r = probe_custom(op_name, mil, [x], [n], variant="intermediate")
-    return r
+
+# ── Composite pattern probes ──────────────────────────────────────────────────
+
+def probe_rmsnorm() -> ProbeResult:
+    """RMSNorm: x * rsqrt(mean(x²) + eps)."""
+    body = (
+        '        tensor<fp16, [1,32,1,32]> sq = mul(x=a_input0, y=a_input0)[name=string("sq")];\n'
+        '        tensor<int32, [1]> rax = const()[name=string("rax"), val=tensor<int32, [1]>([-1])];\n'
+        '        bool kd = const()[name=string("kd"), val=bool(true)];\n'
+        '        tensor<fp16, [1,32,1,1]> ms = reduce_mean(x=sq, axes=rax, keep_dims=kd)[name=string("ms")];\n'
+        '        fp16 eps = const()[name=string("eps"), val=fp16(0.00001)];\n'
+        '        tensor<fp16, [1,32,1,1]> mse = add(x=ms, y=eps)[name=string("mse")];\n'
+        '        fp16 nhalf = const()[name=string("nhalf"), val=fp16(-0.5)];\n'
+        '        tensor<fp16, [1,32,1,1]> rrms = pow(x=mse, y=nhalf)[name=string("rrms")];\n'
+        '        tensor<fp16, [1,32,1,32]> z_output0 = mul(x=a_input0, y=rrms)[name=string("z_output0")];'
+    )
+    mil = mil_program(body, _sig1(), "z_output0")
+
+    x_f32 = _linspace(-3.0, 3.0)
+    x_f16 = x_f32.astype(np.float16)
+    x_grid = x_f32.reshape(_C, _S)
+    ms = (x_grid ** 2).mean(axis=1, keepdims=True)
+    rrms = 1.0 / np.sqrt(ms + 1e-5)
+    expected = (x_grid * rrms).ravel()
+
+    return probe_custom("RMSNorm", mil, [x_f16], _N, expected, atol=0.1)
+
+
+def probe_layer_norm() -> ProbeResult:
+    """LayerNorm along spatial axis."""
+    body = (
+        '        tensor<int32, [1]> nax = const()[name=string("nax"), val=tensor<int32, [1]>([3])];\n'
+        '        fp16 eps = const()[name=string("eps"), val=fp16(0.00001)];\n'
+        '        tensor<fp16, [1,32,1,32]> z_output0 = '
+        'layer_norm(x=a_input0, axes=nax, epsilon=eps)[name=string("z_output0")];'
+    )
+    mil = mil_program(body, _sig1(), "z_output0")
+
+    x_f32 = _linspace(-3.0, 3.0)
+    x_f16 = x_f32.astype(np.float16)
+    x_grid = x_f32.reshape(_C, _S)
+    mean = x_grid.mean(axis=1, keepdims=True)
+    var = x_grid.var(axis=1, keepdims=True)
+    expected = ((x_grid - mean) / np.sqrt(var + 1e-5)).ravel()
+
+    return probe_custom("layer_norm", mil, [x_f16], _N, expected, atol=0.1)
+
+
+def probe_softmax() -> ProbeResult:
+    """Softmax over spatial axis."""
+    body = (
+        '        int32 ax = const()[name=string("ax"), val=int32(-1)];\n'
+        '        tensor<fp16, [1,32,1,32]> z_output0 = '
+        'softmax(x=a_input0, axis=ax)[name=string("z_output0")];'
+    )
+    mil = mil_program(body, _sig1(), "z_output0")
+
+    x_f32 = _linspace(-2.0, 2.0)
+    x_f16 = x_f32.astype(np.float16)
+    x_grid = x_f32.reshape(_C, _S)
+    mv = x_grid.max(axis=1, keepdims=True)
+    e = np.exp(x_grid - mv)
+    expected = (e / e.sum(axis=1, keepdims=True)).ravel()
+
+    return probe_custom("softmax", mil, [x_f16], _N, expected, atol=0.01)
+
+
+def probe_int8_round_trip() -> ProbeResult:
+    """fp16 → cast int8 → cast fp16: INT8 storage verification."""
+    body = (
+        '        tensor<int8, [1,32,1,32]> q = '
+        'cast(x=a_input0, dtype=string("int8"))[name=string("q")];\n'
+        '        tensor<fp16, [1,32,1,32]> z_output0 = '
+        'cast(x=q, dtype=string("fp16"))[name=string("z_output0")];'
+    )
+    mil = mil_program(body, _sig1(), "z_output0")
+
+    x_f32 = np.array([i % 256 - 128 for i in range(_N)], dtype=np.float32)
+    x_f16 = x_f32.astype(np.float16)
+    expected = np.array([np.int8(int(v)).astype(np.float32) for v in x_f32])
+
+    return probe_custom("INT8 round-trip", mil, [x_f16], _N, expected, atol=1.0)
+
+
+def probe_int8_quant_dequant() -> ProbeResult:
+    """Full affine quantize → dequantize through INT8."""
+    body = (
+        '        fp16 inv_scale = const()[name=string("inv_scale"), val=fp16(10.0)];\n'
+        '        fp16 zp = const()[name=string("zp"), val=fp16(0.0)];\n'
+        '        tensor<fp16, [1,32,1,32]> scaled = mul(x=a_input0, y=inv_scale)[name=string("scaled")];\n'
+        '        tensor<fp16, [1,32,1,32]> shifted = add(x=scaled, y=zp)[name=string("shifted")];\n'
+        '        tensor<fp16, [1,32,1,32]> rounded = round(x=shifted)[name=string("rounded")];\n'
+        '        fp16 lo = const()[name=string("lo"), val=fp16(-128.0)];\n'
+        '        fp16 hi = const()[name=string("hi"), val=fp16(127.0)];\n'
+        '        tensor<fp16, [1,32,1,32]> clamped = clip(x=rounded, alpha=lo, beta=hi)[name=string("clamped")];\n'
+        '        tensor<int8, [1,32,1,32]> quantized = cast(x=clamped, dtype=string("int8"))[name=string("quantized")];\n'
+        '        tensor<fp16, [1,32,1,32]> back = cast(x=quantized, dtype=string("fp16"))[name=string("back")];\n'
+        '        tensor<fp16, [1,32,1,32]> unshifted = sub(x=back, y=zp)[name=string("unshifted")];\n'
+        '        fp16 scale = const()[name=string("scale"), val=fp16(0.1)];\n'
+        '        tensor<fp16, [1,32,1,32]> z_output0 = mul(x=unshifted, y=scale)[name=string("z_output0")];'
+    )
+    mil = mil_program(body, _sig1(), "z_output0")
+
+    x_f32 = _linspace(-12.7, 12.7)
+    x_f16 = x_f32.astype(np.float16)
+    expected = np.array([np.int8(int(np.clip(round(v * 10), -128, 127))) * 0.1
+                         for v in x_f32], dtype=np.float32)
+
+    return probe_custom("INT8 quant→dequant", mil, [x_f16], _N, expected, atol=0.15)
+
+
+def probe_concat() -> ProbeResult:
+    """Concat two [1,32,1,32] tensors along channel axis → [1,64,1,32]."""
+    body = (
+        '        int32 cax = const()[name=string("cax"), val=int32(1)];\n'
+        '        bool cid = const()[name=string("cid"), val=bool(false)];\n'
+        '        tensor<fp16, [1,64,1,32]> z_output0 = '
+        'concat(axis=cax, interleave=cid, values=(a_input0, a_input1))[name=string("z_output0")];'
+    )
+    mil = mil_program(body, _sig2(), "z_output0")
+
+    a_f32 = _linspace(0.0, 5.0)
+    b_f32 = _linspace(-5.0, 0.0)
+    expected = np.concatenate([a_f32, b_f32])
+
+    try:
+        import ane
+    except ImportError as e:
+        return ProbeResult("concat", False, None, None, 0.05, 0.0, None, str(e))
+
+    t0 = time.perf_counter()
+    try:
+        prog = ane.compile_mil(mil)
+        compile_ms = (time.perf_counter() - t0) * 1000.0
+    except RuntimeError as e:
+        compile_ms = (time.perf_counter() - t0) * 1000.0
+        return ProbeResult("concat", False, None, None, 0.05, compile_ms, None, str(e))
+
+    t1 = time.perf_counter()
+    try:
+        (out,) = prog.run(
+            [a_f32.astype(np.float16), b_f32.astype(np.float16)],
+            [64 * _S],
+        )
+        eval_ms = (time.perf_counter() - t1) * 1000.0
+    except RuntimeError as e:
+        eval_ms = (time.perf_counter() - t1) * 1000.0
+        return ProbeResult("concat", True, False, None, 0.05, compile_ms, eval_ms, str(e))
+
+    passed, max_err = check("concat", out, expected, 0.05)
+    return ProbeResult("concat", True, passed, max_err, 0.05, compile_ms, eval_ms)
+
+
+def probe_matmul() -> ProbeResult:
+    """Matmul: identity (I @ B = B) via matmul op on [1,32,32] tensors."""
+    body = (
+        '        bool bF = const()[name=string("bF"), val=bool(false)];\n'
+        '        tensor<fp16, [1,32,32]> z_output0 = '
+        'matmul(x=a_input0, y=a_input1, transpose_x=bF, transpose_y=bF)[name=string("z_output0")];'
+    )
+    sig = (
+        "tensor<fp16, [1,32,32]> a_input0, "
+        "tensor<fp16, [1,32,32]> a_input1"
+    )
+    mil = mil_program(body, sig, "z_output0")
+
+    identity = np.eye(32, dtype=np.float32)
+    b_f32 = np.arange(32 * 32, dtype=np.float32).reshape(32, 32) * 0.01
+
+    try:
+        import ane
+    except ImportError as e:
+        return ProbeResult("matmul", False, None, None, 0.05, 0.0, None, str(e))
+
+    t0 = time.perf_counter()
+    try:
+        prog = ane.compile_mil(mil)
+        compile_ms = (time.perf_counter() - t0) * 1000.0
+    except RuntimeError as e:
+        compile_ms = (time.perf_counter() - t0) * 1000.0
+        return ProbeResult("matmul", False, None, None, 0.05, compile_ms, None, str(e))
+
+    t1 = time.perf_counter()
+    try:
+        (out,) = prog.run(
+            [identity.astype(np.float16), b_f32.astype(np.float16)],
+            [32 * 32],
+        )
+        eval_ms = (time.perf_counter() - t1) * 1000.0
+    except RuntimeError as e:
+        eval_ms = (time.perf_counter() - t1) * 1000.0
+        return ProbeResult("matmul", True, False, None, 0.05, compile_ms, eval_ms, str(e))
+
+    passed, max_err = check("matmul", out, b_f32.ravel(), 0.05)
+    return ProbeResult("matmul", True, passed, max_err, 0.05, compile_ms, eval_ms)
 
 
 # ── Parameter space exploration ───────────────────────────────────────────────
 
-# Epsilon values that are representable as fp16 and span the useful range
-_EPSILON_VALUES: list[float] = [
-    0.0,
-    float(np.float16("5.96e-8")),   # fp16 minimum positive (subnormal)
-    float(np.float16("6.1e-5")),    # fp16 minimum normal
-    float(np.float16("1e-4")),
-    float(np.float16("1e-3")),
-    float(np.float16("0.01")),
-    float(np.float16("0.1")),
-    float(np.float16("0.25")),
-    float(np.float16("0.5")),
-    float(np.float16("1.0")),
+# Pre-defined epsilon values to probe for ops that require an epsilon parameter.
+# ironmill discovered that rsqrt/log/inverse require epsilon; this registry
+# explores which values the ANE compiler accepts and how they affect precision.
+#
+# The value 0x1.0cp-17 ≈ 7.63e-6 is what ironmill found works. We probe a
+# range around it to characterize the full valid domain.
+_EPSILON_VALUES: list[tuple[str, str]] = [
+    # (label, fp16 hex literal)
+    ("eps=0 (no epsilon)",    "fp16(0x0p+0)"),       # expected: rejected by ANE
+    ("eps=min_pos",           "fp16(0x1p-24)"),       # fp16 smallest positive normal
+    ("eps=1e-7",              "fp16(0x1.bp-24)"),
+    ("eps=0x1.0cp-17 (ironmill)", "fp16(0x1.0cp-17)"),  # ironmill's known-working value
+    ("eps=1e-5",              "fp16(0x1.4p-17)"),
+    ("eps=1e-4",              "fp16(0x1.ap-14)"),
+    ("eps=1e-3",              "fp16(0x1.06p-10)"),
+    ("eps=0.01",              "fp16(0x1.47p-7)"),
+    ("eps=0.1",               "fp16(0x1.99p-4)"),
+    ("eps=1.0",               "fp16(0x1p+0)"),        # expected: large numerical error
 ]
 
-# Pre-defined parameter variation registries for interesting ops
-PARAM_SPACES: dict[str, list[dict[str, Any]]] = {
+
+def _eps_body(op_name: str, eps_literal: str, C: int = _C, S: int = _S) -> str:
+    """Build a MIL body for an epsilon-bearing unary op."""
+    return (
+        f'        fp16 eps = const()[name=string("eps"), val={eps_literal}];\n'
+        f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+        f'{op_name}(x=a_input0, epsilon=eps)[name=string("z_output0")];'
+    )
+
+
+# Registry of pre-defined parameter space explorations.
+# Key: op name. Value: list of (label, MIL body) pairs.
+PARAM_SPACES: dict[str, list[tuple[str, str]]] = {
     "rsqrt": [
-        {"params": f"epsilon={e}", "meta": {"epsilon": e}}
-        for e in _EPSILON_VALUES
+        (label, _eps_body("rsqrt", eps_literal))
+        for label, eps_literal in _EPSILON_VALUES
     ],
     "log": [
-        {"params": f"epsilon={e}", "meta": {"epsilon": e}}
-        for e in _EPSILON_VALUES
+        (label, _eps_body("log", eps_literal))
+        for label, eps_literal in _EPSILON_VALUES
     ],
     "inverse": [
-        {"params": f"epsilon={e}", "meta": {"epsilon": e}}
-        for e in _EPSILON_VALUES
+        (label, _eps_body("inverse", eps_literal))
+        for label, eps_literal in _EPSILON_VALUES
     ],
+    # pow: probe scalar vs tensor exponent, and common exponents used in ML
     "pow": [
-        {"params": f"alpha={a}", "meta": {"exponent": a}}
-        for a in [0.5, 1.0, 2.0, 3.0, 4.0]
+        ("pow scalar -0.5 (rsqrt)",
+         '        fp16 sc = const()[name=string("sc"), val=fp16(-0.5)];\n'
+         '        tensor<fp16, [1,32,1,32]> z_output0 = pow(x=a_input0, y=sc)[name=string("z_output0")];'),
+        ("pow scalar 0.5 (sqrt)",
+         '        fp16 sc = const()[name=string("sc"), val=fp16(0.5)];\n'
+         '        tensor<fp16, [1,32,1,32]> z_output0 = pow(x=a_input0, y=sc)[name=string("z_output0")];'),
+        ("pow scalar 2.0 (square)",
+         '        fp16 sc = const()[name=string("sc"), val=fp16(2.0)];\n'
+         '        tensor<fp16, [1,32,1,32]> z_output0 = pow(x=a_input0, y=sc)[name=string("z_output0")];'),
+        ("pow scalar 3.0",
+         '        fp16 sc = const()[name=string("sc"), val=fp16(3.0)];\n'
+         '        tensor<fp16, [1,32,1,32]> z_output0 = pow(x=a_input0, y=sc)[name=string("z_output0")];'),
+        ("pow tensor exponent",
+         '        tensor<fp16, [1,32,1,32]> z_output0 = pow(x=a_input0, y=a_input1)[name=string("z_output0")];'),
     ],
+    # clip: probe different alpha/beta combinations
     "clip": [
-        {"params": f"alpha={lo}, beta={hi}", "meta": {"alpha": lo, "beta": hi}}
-        for lo, hi in [(-1.0, 1.0), (-0.5, 0.5), (0.0, 1.0), (-2.0, 2.0)]
+        ("clip [-1, 1]",
+         '        fp16 lo = const()[name=string("lo"), val=fp16(-1.0)];\n'
+         '        fp16 hi = const()[name=string("hi"), val=fp16(1.0)];\n'
+         '        tensor<fp16, [1,32,1,32]> z_output0 = clip(x=a_input0, alpha=lo, beta=hi)[name=string("z_output0")];'),
+        ("clip [0, 6] (relu6)",
+         '        fp16 lo = const()[name=string("lo"), val=fp16(0.0)];\n'
+         '        fp16 hi = const()[name=string("hi"), val=fp16(6.0)];\n'
+         '        tensor<fp16, [1,32,1,32]> z_output0 = clip(x=a_input0, alpha=lo, beta=hi)[name=string("z_output0")];'),
+        ("clip no alpha (lower unbounded)",
+         '        fp16 hi = const()[name=string("hi"), val=fp16(1.0)];\n'
+         '        tensor<fp16, [1,32,1,32]> z_output0 = clip(x=a_input0, beta=hi)[name=string("z_output0")];'),
+        ("clip no beta (upper unbounded)",
+         '        fp16 lo = const()[name=string("lo"), val=fp16(0.0)];\n'
+         '        tensor<fp16, [1,32,1,32]> z_output0 = clip(x=a_input0, alpha=lo)[name=string("z_output0")];'),
     ],
+    # leaky_relu: probe alpha parameter
     "leaky_relu": [
-        {"params": f"alpha={a}", "meta": {"alpha": a}}
-        for a in [0.01, 0.1, 0.2, 0.5]
+        (f"leaky_relu alpha={a}",
+         f'        fp16 alpha = const()[name=string("alpha"), val=fp16({a})];\n'
+         f'        tensor<fp16, [1,32,1,32]> z_output0 = '
+         f'leaky_relu(x=a_input0, alpha=alpha)[name=string("z_output0")];')
+        for a in ("0.01", "0.1", "0.2", "0.5")
     ],
+    # softmax: probe axis parameter
     "softmax": [
-        {"params": None, "body_override": f"  %v = softmax(x=x, axis={ax}) -> (fp16);\n  return (%v);\n",
-         "meta": {"axis": ax}}
-        for ax in [1, 2, 3]
+        (f"softmax axis={ax}",
+         f'        int32 ax = const()[name=string("ax"), val=int32({ax})];\n'
+         f'        tensor<fp16, [1,32,1,32]> z_output0 = '
+         f'softmax(x=a_input0, axis=ax)[name=string("z_output0")];')
+        for ax in (-1, 1, 3)
     ],
 }
 
 
 def explore_op_params(
     op_name: str,
-    param_variations: list[dict[str, Any]] | None = None,
+    param_variations: Optional[list[str]] = None,
     *,
-    shape: tuple[int, ...] = _SHAPE,
+    C: int = _C,
+    S: int = _S,
 ) -> list[ProbeResult]:
     """
-    Explore the parameter space for *op_name*.
+    Test an op with different optional parameter combinations.
 
-    If *param_variations* is None, uses the pre-defined PARAM_SPACES registry.
-    Each variation is a dict with keys:
-      - ``params``: parameter string to embed in the MIL body (may be None).
-      - ``body_override``: if present, use this as the full body instead.
-      - ``meta``: arbitrary dict stored in ProbeResult.params.
+    If ``param_variations`` is None, uses the pre-defined registry in
+    ``PARAM_SPACES``. The highest-value targets are ``rsqrt``, ``log``, and
+    ``inverse`` — ironmill discovered these require an epsilon parameter but
+    didn't probe which values the ANE compiler accepts.
 
-    Returns one ProbeResult per variation.
+    Args:
+        op_name:          MIL op name (e.g. "rsqrt", "log", "pow").
+        param_variations: List of MIL body strings. If None, uses PARAM_SPACES.
+        C, S:             Tensor shape.
+
+    Returns:
+        List of ProbeResult, one per variation.
+
+    Example::
+
+        # Characterise the epsilon domain for rsqrt
+        results = explore_op_params("rsqrt")
+        print_report(results)
     """
     if param_variations is None:
-        param_variations = PARAM_SPACES.get(op_name)
-        if not param_variations:
-            return [probe_unary(op_name, shape=shape)]
+        if op_name not in PARAM_SPACES:
+            raise ValueError(
+                f"No pre-defined parameter space for '{op_name}'. "
+                f"Available: {list(PARAM_SPACES)}. "
+                f"Pass param_variations=[...] to supply your own."
+            )
+        variations = PARAM_SPACES[op_name]
+    else:
+        variations = [(f"{op_name} (variant {i})", body)
+                      for i, body in enumerate(param_variations)]
 
-    results: list[ProbeResult] = []
-    shape_str = ",".join(str(d) for d in shape)
-    n = _numel(shape)
-    rng = np.random.default_rng(42)
-    x = rng.uniform(0.1, 1.0, n).astype(np.float16).reshape(shape)
-    ins, outs = _sig1(shape_str)
+    # Use positive inputs for rsqrt/log/inverse; general for others
+    if op_name in ("rsqrt", "log", "inverse"):
+        x_f16 = _linspace(0.1, 10.0).astype(np.float16)
+        ref_fns = {
+            "rsqrt":   lambda x: 1.0 / np.sqrt(x),
+            "log":     np.log,
+            "inverse": lambda x: 1.0 / x,
+        }
+        expected_f32 = ref_fns[op_name](_linspace(0.1, 10.0))
+    elif op_name == "pow":
+        x_f16 = _linspace(0.1, 5.0).astype(np.float16)
+        expected_f32 = None  # varies by variant
+    else:
+        x_f16 = _linspace(-2.0, 2.0).astype(np.float16)
+        expected_f32 = None
 
-    for var in param_variations:
-        meta = var.get("meta", {})
-        variant_label = ", ".join(f"{k}={v}" for k, v in meta.items())
-
-        body_override = var.get("body_override")
-        if body_override:
-            body = body_override
+    results = []
+    for label, body in variations:
+        mil = mil_program(body, _sig1(C, S), "z_output0")
+        # For ops with a tensor exponent (pow), pass two inputs
+        if "tensor exponent" in label:
+            exp_f16 = np.full(_N, 2.0, dtype=np.float16)
+            exp_expected = _linspace(0.1, 5.0) ** 2.0
+            results.append(probe_custom(
+                label, mil,
+                [x_f16, exp_f16], C * S,
+                expected_f32 if expected_f32 is not None else exp_expected,
+                atol=0.5,
+            ))
         else:
-            params_str = var.get("params") or ""
-            body = _body1(op_name, params_str)
-
-        mil = mil_program(body, inputs=ins, outputs=outs)
-        r = probe_custom(op_name, mil, [x], [n],
-                         variant=variant_label, params=meta)
-        results.append(r)
-
+            results.append(probe_custom(
+                label, mil, [x_f16], C * S,
+                expected_f32, atol=0.1,
+            ))
     return results
 
 
-def scan_param_spaces() -> dict[str, list[ProbeResult]]:
-    """Run explore_op_params for every op in PARAM_SPACES."""
-    return {op: explore_op_params(op) for op in PARAM_SPACES}
+def scan_param_spaces() -> list[ProbeResult]:
+    """
+    Run all pre-defined parameter space explorations.
+
+    Probes epsilon domains for rsqrt/log/inverse, pow exponent variants,
+    clip bounds, leaky_relu alpha, and softmax axis. Use this to characterise
+    which parameter combinations the local ANE generation accepts.
+    """
+    print("── Parameter space exploration ───────────────────────────────────")
+    results = []
+    for op_name in PARAM_SPACES:
+        print(f"  Exploring {op_name} ({len(PARAM_SPACES[op_name])} variants)...")
+        results += explore_op_params(op_name)
+    return results
 
 
 # ── Op name fuzzing ───────────────────────────────────────────────────────────
 
+# Op names to try when fuzzing for undocumented or generation-specific ops.
+# Drawn from CoreML op taxonomy, ONNX, and common ML framework primitives.
 CANDIDATE_NAMES: list[str] = [
-    # activations not yet tested
-    "prelu", "rrelu", "glu", "tanhshrink", "hardshrink", "softshrink",
-    "log_sigmoid", "hardtanh", "gumbel_softmax",
-    # elementwise
-    "log1p", "log2", "expm1", "reciprocal", "negative", "logical_not",
-    "atan2", "hypot", "xlogy", "i0", "sinc",
-    # normalization variants
-    "group_norm", "instance_norm", "batch_norm",
-    # attention / transformer
-    "scaled_dot_product_attention", "einsum",
-    # linear
-    "linear", "bilinear", "addmm",
-    # conv variants
-    "conv1d", "conv3d", "conv_transpose1d", "conv_transpose2d",
-    # pooling
-    "avg_pool1d", "avg_pool2d", "max_pool1d", "max_pool2d",
-    "adaptive_avg_pool1d", "adaptive_avg_pool2d",
-    # tensor manipulation
-    "squeeze", "unsqueeze", "flatten", "unfold", "roll",
-    "gather", "scatter", "index_select",
-    # type/format
-    "dequantize", "quantize",
-    # miscellaneous MIL ops
-    "tile", "pad", "upsample_bilinear", "upsample_nearest_neighbor",
-    "range_1d", "argsort", "topk",
-    "l2_norm", "lp_normalization",
-    "elu", "celu",
+    # Activations not in _UNARY_OPS
+    "gelu", "gelu_erf", "leaky_relu", "prelu", "elu", "celu", "selu",
+    "hardswish", "hardsigmoid", "hard_sigmoid", "hardtanh", "mish",
+    "swish", "relu6", "crelu", "threshold_relu",
+    # Unary math
+    "log2", "log10", "expm1", "log1p", "cbrt", "lgamma", "digamma",
+    "erfc", "erfinv",
+    # Rounding
+    "trunc", "fix", "clip_by_value",
+    # Trig
+    "atan2", "tan2", "sinc", "cis",
+    # Hyperbolic
+    "tanh_approx", "asinh", "acosh", "atanh",
+    # Shape ops (expected to fail standalone but documented here)
+    "reshape", "flatten", "expand_dims", "squeeze",
+    "transpose", "permute",
+    "tile", "broadcast_to",
+    "slice_by_size", "gather", "scatter",
+    "pad", "reflect_pad", "edge_pad",
+    "depth_to_space", "space_to_depth",
+    "pixel_shuffle",
+    # Normalization
+    "instance_norm", "group_norm", "batch_norm",
+    # Pooling
+    "avg_pool", "max_pool", "global_avg_pool",
+    # Linear algebra
+    "l2_normalize", "normalize",
+    # Misc
+    "where", "cond", "cumsum", "diff",
+    "topk", "sort", "argsort",
+    "one_hot", "embedding",
+    "clip_gradient",
+    "stop_gradient",
+    "is_nan", "is_inf",
+    "nan_to_num",
 ]
 
 
 def explore_names(
-    candidates: list[str] | None = None,
+    candidates: list[str] = CANDIDATE_NAMES,
     *,
-    shape: tuple[int, ...] = _SHAPE,
+    C: int = _C,
+    S: int = _S,
 ) -> list[ProbeResult]:
     """
-    Try each candidate op name as a standalone unary op.
-    Useful for discovering new ops that compile on a given ANE generation.
+    Attempt to compile each candidate op name as a standalone unary op.
+
+    Ops that compile are documented as newly discovered. Many will fail —
+    that's expected. The interesting results are the unexpected successes.
+
+    Args:
+        candidates: List of op names to try.
+        C, S:       Tensor shape.
+
+    Returns:
+        List of ProbeResult, one per candidate.
     """
-    if candidates is None:
-        candidates = CANDIDATE_NAMES
-    return [probe_unary(name, shape=shape) for name in candidates]
-
-
-# ── Batch scan functions ──────────────────────────────────────────────────────
-
-def scan_unary() -> list[ProbeResult]:
-    return [probe_unary(op) for op in _UNARY_OPS]
-
-
-def scan_binary() -> list[ProbeResult]:
-    results = [probe_binary(op) for op in _BINARY_OPS]
-    results += [
-        probe_custom(
-            op,
-            mil_program(
-                _body_cmp(op),
-                inputs=_sig2()[0],
-                outputs=_sig2()[1],
-            ),
-            [
-                np.random.default_rng(42).uniform(0, 1, _N).astype(np.float16).reshape(_SHAPE),
-                np.random.default_rng(43).uniform(0, 1, _N).astype(np.float16).reshape(_SHAPE),
-            ],
-            [_N],
-        )
-        for op in _COMPARISON_OPS
-    ]
+    results = []
+    x_f16 = _linspace(-1.0, 1.0).astype(np.float16)
+    for op_name in candidates:
+        body = _body1(op_name, C=C, S=S)
+        mil = mil_program(body, _sig1(C, S), "z_output0")
+        print(f"  Probing {op_name}...", end=" ", flush=True)
+        r = probe_custom(op_name, mil, [x_f16], C * S)
+        if not r.compiled:
+            print("compile failed")
+        else:
+            print(f"COMPILED (no ref check)")
+        results.append(r)
     return results
 
 
-def scan_reductions() -> list[ProbeResult]:
-    ops = ["reduce_sum", "reduce_mean", "reduce_max", "reduce_min",
-           "reduce_prod", "reduce_l1_norm", "reduce_l2_norm",
-           "reduce_log_sum", "reduce_log_sum_exp", "reduce_sum_square"]
+# ── Scan functions ────────────────────────────────────────────────────────────
+
+def scan_unary(C: int = _C, S: int = _S) -> list[ProbeResult]:
+    """Scan all known unary ops."""
+    print("── Unary ops ─────────────────────────────────────────────────────")
     results = []
-    for op in ops:
-        results.append(probe_reduction(op, axes="[3]"))
+    for op_name in _UNARY_OPS:
+        print(f"  Testing {op_name}...")
+        r = probe_unary(op_name, C=C, S=S)
+        if r.passed is False and op_name in _UNARY_EXPECTED_EVAL_FAILS:
+            r.expected_eval_fail = True
+            r.note = _UNARY_EXPECTED_EVAL_FAILS[op_name]
+            r.failure_kind = "semantic_mismatch"
+        results.append(r)
+    return results
+
+
+def scan_binary(C: int = _C, S: int = _S) -> list[ProbeResult]:
+    """Scan all known binary and comparison ops."""
+    print("── Binary ops ────────────────────────────────────────────────────")
+    results = []
+    for op_name in {**_BINARY_OPS, **_COMPARISON_OPS}:
+        print(f"  Testing {op_name}...")
+        results.append(probe_binary(op_name, C=C, S=S))
+    return results
+
+
+def scan_reductions(C: int = _C, S: int = _S) -> list[ProbeResult]:
+    """Scan reduction ops along both axes."""
+    print("── Reductions ────────────────────────────────────────────────────")
+    ops = ["reduce_sum", "reduce_mean", "reduce_max", "reduce_min",
+           "reduce_l2_norm", "reduce_log_sum_exp"]
+    results = []
+    for op_name in ops:
+        for axis in (-1, 1):
+            if op_name == "reduce_l2_norm" and axis == 1:
+                continue  # skip: only well-defined on spatial axis for now
+            if op_name == "reduce_log_sum_exp" and axis == 1:
+                continue
+            print(f"  Testing {op_name} axis={'spatial' if axis == -1 else 'channel'}...")
+            results.append(probe_reduction(op_name, axis=axis, C=C, S=S))
     return results
 
 
 def scan_composite() -> list[ProbeResult]:
-    return [
-        probe_rmsnorm(),
-        probe_layer_norm(),
-        probe_softmax(),
-        probe_matmul(),
-        probe_concat(),
-        probe_int8_round_trip(),
-        probe_int8_quant_dequant(),
+    """Scan composite patterns used in real inference pipelines."""
+    print("── Composite patterns ────────────────────────────────────────────")
+    fns = [
+        ("RMSNorm",          probe_rmsnorm),
+        ("layer_norm",       probe_layer_norm),
+        ("softmax",          probe_softmax),
+        ("concat",           probe_concat),
+        ("matmul",           probe_matmul),
+        ("INT8 round-trip",  probe_int8_round_trip),
+        ("INT8 quant→dequant", probe_int8_quant_dequant),
     ]
+    results = []
+    for name, fn in fns:
+        print(f"  Testing {name}...")
+        results.append(fn())
+    return results
 
 
-def scan_intermediate() -> list[ProbeResult]:
-    candidates = [
-        "gelu_approx", "silu", "swish", "mish",
-        "prelu", "elu", "celu", "selu",
-        "log_sigmoid", "hard_sigmoid",
-        "rsqrt", "inverse", "square",
-    ]
-    return [probe_intermediate(op) for op in candidates]
+def scan_intermediate(C: int = _C, S: int = _S) -> list[ProbeResult]:
+    """
+    Test ops as intermediate nodes (not standalone).
 
+    These are ops the ANE compiler typically rejects as the sole op but
+    accepts inside a multi-op graph. Includes shape ops (reshape, tile, etc.)
+    that ironmill documents as intermediate-only.
+    """
+    print("── Intermediate-only ops ─────────────────────────────────────────")
 
-def scan_all() -> dict[str, list[ProbeResult]]:
-    """Run all scan categories and return a dict keyed by category."""
-    return {
-        "unary":        scan_unary(),
-        "binary":       scan_binary(),
-        "reductions":   scan_reductions(),
-        "composite":    scan_composite(),
-        "intermediate": scan_intermediate(),
-        "param_spaces": list(
-            r for rs in scan_param_spaces().values() for r in rs
-        ),
+    # Per ironmill + local probes, these are generally non-standalone on ANE:
+    # compile may fail when probed in isolation, while still working as graph
+    # intermediates in larger programs.
+    expected_nonstandalone = {
+        "reshape",
+        "tile",
+        "transpose",
+        "slice_by_index",
+        "expand_dims",
+        "flatten",
+        "cast_fp16_int",
     }
+
+    candidates = [
+        # Shape ops with same-shape variants
+        ("reshape",        ''),
+        ("tile",           ''),
+        ("transpose",      ''),
+        ("slice_by_index", ''),
+        ("expand_dims",    ''),
+        ("squeeze",        ''),
+        ("flatten",        ''),
+        ("cast_fp16_int",  ''),
+    ]
+    results = []
+    for op_name, extra_args in candidates:
+        print(f"  Probing {op_name} (intermediate)...")
+        r = probe_intermediate(op_name, op_args=extra_args, C=C, S=S)
+        if not r.compiled and op_name in expected_nonstandalone:
+            r.expected_compile_fail = True
+            r.note = (
+                "Expected: ANE often rejects this op as standalone probe; "
+                "validated via intermediate usage in graph pipelines."
+            )
+        elif r.compiled and op_name in expected_nonstandalone:
+            r.note = "Compiled as standalone on this hardware/OS (unexpected success)."
+        results.append(r)
+    return results
+
+
+def scan_sin_cos_ranges(C: int = _C, S: int = _S) -> list[ProbeResult]:
+    """
+    Probe sin/cos across multiple input ranges to detect range-dependent behavior.
+    """
+    print("── Sin/Cos range sweep ───────────────────────────────────────────")
+    ranges = [
+        ("small", -3.0, 3.0),
+        ("medium", -32.0, 32.0),
+        ("large", -256.0, 256.0),
+        ("xlarge", -1024.0, 1024.0),
+    ]
+    results: list[ProbeResult] = []
+    for op_name, ref, atol in (("sin", np.sin, 0.05), ("cos", np.cos, 0.05)):
+        for label, lo, hi in ranges:
+            name = f"{op_name} range={label} [{lo:g},{hi:g}]"
+            print(f"  Testing {name}...")
+            r = probe_unary(
+                name,
+                body=_body1(op_name, C=C, S=S),
+                input_fn=lambda lo=lo, hi=hi: _linspace(lo, hi),
+                expected_fn=ref,
+                atol=atol,
+                C=C,
+                S=S,
+            )
+            results.append(r)
+    return results
+
+
+def scan_round_semantics(C: int = 16, S: int = 64) -> list[ProbeResult]:
+    """
+    Characterize ANE round() tie-breaking behavior on exact fp16 half-way inputs.
+
+    Emits one summary ProbeResult plus one ProbeResult per tie input.
+    """
+    print("── Round semantics ────────────────────────────────────────────────")
+    ties = np.array([
+        -8.5, -7.5, -6.5, -5.5, -4.5, -3.5, -2.5, -1.5, -0.5,
+         0.5,  1.5,  2.5,  3.5,  4.5,  5.5,  6.5,  7.5,  8.5,
+    ], dtype=np.float32)
+    n = C * S
+    x = np.zeros(n, dtype=np.float16)
+    x[:len(ties)] = ties.astype(np.float16)
+    for i in range(len(ties), n):
+        x[i] = np.float16((i % 11) - 5)
+
+    mil = mil_program(_body1("round", C=C, S=S), _sig1(C, S), "z_output0")
+
+    results: list[ProbeResult] = []
+    t0 = time.perf_counter()
+    try:
+        import ane
+        prog = ane.compile_mil(mil)
+        compile_ms = (time.perf_counter() - t0) * 1000.0
+    except RuntimeError as e:
+        compile_ms = (time.perf_counter() - t0) * 1000.0
+        results.append(ProbeResult(
+            "round semantics summary", False, None, None, 0.0, compile_ms, None,
+            str(e), failure_kind="compile_reject"
+        ))
+        return results
+
+    t1 = time.perf_counter()
+    try:
+        (out,) = prog.run([x], [n])
+        eval_ms = (time.perf_counter() - t1) * 1000.0
+    except RuntimeError as e:
+        eval_ms = (time.perf_counter() - t1) * 1000.0
+        results.append(ProbeResult(
+            "round semantics summary", True, False, None, 0.0, compile_ms, eval_ms,
+            str(e), failure_kind="runtime_reject"
+        ))
+        return results
+
+    out32 = out.astype(np.float32)
+    even = np.round(x.astype(np.float32))
+    away = _round_half_away_from_zero(x.astype(np.float32))
+    away_matches = 0
+    even_matches = 0
+
+    for i, v in enumerate(ties):
+        ane_v = float(out32[i])
+        even_v = float(even[i])
+        away_v = float(away[i])
+        if np.isclose(ane_v, away_v, atol=0.0):
+            away_matches += 1
+        if np.isclose(ane_v, even_v, atol=0.0):
+            even_matches += 1
+        results.append(ProbeResult(
+            f"round_tie input={v:+.1f}",
+            True,
+            bool(np.isclose(ane_v, away_v, atol=0.0)),
+            float(abs(ane_v - away_v)),
+            0.0,
+            compile_ms if i == 0 else 0.0,
+            eval_ms if i == 0 else 0.0,
+            note=f"ane={ane_v:.1f}, even={even_v:.1f}, away={away_v:.1f}",
+            failure_kind=None if np.isclose(ane_v, away_v, atol=0.0) else "semantic_mismatch",
+        ))
+
+    results.insert(0, ProbeResult(
+        "round semantics summary",
+        True,
+        away_matches == len(ties),
+        float(len(ties) - away_matches),
+        0.0,
+        compile_ms,
+        eval_ms,
+        note=(
+            f"away_matches={away_matches}/{len(ties)}, "
+            f"even_matches={even_matches}/{len(ties)}"
+        ),
+        failure_kind=None if away_matches == len(ties) else "semantic_mismatch",
+    ))
+    return results
+
+
+def scan_dependency_matrix(C: int = 16, S: int = 64) -> list[ProbeResult]:
+    """
+    Compile-only matrix for wrapper -> intermediate target combinations.
+    """
+    print("── Intermediate dependency matrix ─────────────────────────────────")
+
+    wrappers = {
+        "relu": "relu",
+        "add": "add(x={x}, y={x})",
+        "mul": "mul(x={x}, y={x})",
+        "matmul": "matmul(x={x}, y=a_input1, transpose_x=tx, transpose_y=ty)",
+    }
+    targets = [
+        ("reshape", "reshape(x={x}, shape=sh)",
+         '        tensor<int32, [4]> sh = const()[name=string("sh"), val=tensor<int32, [4]>([1,16,1,64])];',
+         "tensor<fp16, [1,16,1,64]>"),
+        ("slice_by_index", "slice_by_index(x={x}, begin=b, end=e, end_mask=em)",
+         '        tensor<int32, [4]> b = const()[name=string("b"), val=tensor<int32, [4]>([0,0,0,0])];\n'
+         '        tensor<int32, [4]> e = const()[name=string("e"), val=tensor<int32, [4]>([1,16,1,64])];\n'
+         '        tensor<bool, [4]> em = const()[name=string("em"), val=tensor<bool, [4]>([false,false,false,false])];',
+         "tensor<fp16, [1,16,1,64]>"),
+        ("tile", "tile(x={x}, reps=rp)",
+         '        tensor<int32, [4]> rp = const()[name=string("rp"), val=tensor<int32, [4]>([1,1,1,1])];',
+         "tensor<fp16, [1,16,1,64]>"),
+        ("transpose", "transpose(x={x}, perm=pm)",
+         '        tensor<int32, [4]> pm = const()[name=string("pm"), val=tensor<int32, [4]>([0,1,2,3])];',
+         "tensor<fp16, [1,16,1,64]>"),
+        ("expand_dims", "expand_dims(x={x}, axes=ax)",
+         '        tensor<int32, [1]> ax = const()[name=string("ax"), val=tensor<int32, [1]>([0])];',
+         "tensor<fp16, [1,16,1,64]>"),
+        ("flatten", "reshape(x={x}, shape=sh)",
+         '        tensor<int32, [4]> sh = const()[name=string("sh"), val=tensor<int32, [4]>([1,16,1,64])];',
+         "tensor<fp16, [1,16,1,64]>"),
+        ("cast_fp16_int", 'cast(x={x}, dtype=string("int8"))',
+         "", "tensor<int8, [1,16,1,64]>"),
+    ]
+
+    results: list[ProbeResult] = []
+    id64 = np.eye(S, dtype=np.float16).reshape(1, S, 1, S).ravel()
+
+    for w_name, w_expr in wrappers.items():
+        for t_name, t_expr, t_consts, t_ty in targets:
+            extra_sig = ""
+            extra_consts = ""
+            inputs = [np.zeros(C * S, dtype=np.float16)]
+            if w_name == "matmul":
+                extra_sig = ", tensor<fp16, [1,64,1,64]> a_input1"
+                extra_consts = (
+                    '        bool tx = const()[name=string("tx"), val=bool(false)];\n'
+                    '        bool ty = const()[name=string("ty"), val=bool(false)];\n'
+                )
+                inputs = [np.zeros(C * S, dtype=np.float16), id64]
+
+            post_input = "mid1"
+            cast_back = ""
+            if w_name == "matmul" and t_name == "cast_fp16_int":
+                cast_back = (
+                    '        tensor<fp16, [1,16,1,64]> mid1f = '
+                    'cast(x=mid1, dtype=string("fp16"))[name=string("mid1f")];\n'
+                )
+                post_input = "mid1f"
+
+            body = (
+                f"{extra_consts}"
+                f'        tensor<fp16, [1,{C},1,{S}]> mid0 = {w_expr.format(x="a_input0")}[name=string("mid0")];\n'
+                f"{t_consts}\n"
+                f'        {t_ty} mid1 = {t_expr.format(x="mid0")}[name=string("mid1")];\n'
+                f"{cast_back}"
+                f'        tensor<fp16, [1,16,1,64]> z_output0 = '
+                f'{w_expr.format(x=post_input)}[name=string("z_output0")];'
+            )
+            sig = f"tensor<fp16, [1,{C},1,{S}]> a_input0{extra_sig}"
+            mil = mil_program(body, sig, "z_output0")
+
+            t0 = time.perf_counter()
+            try:
+                r = probe_custom(
+                    f"wrapper={w_name} target={t_name}",
+                    mil,
+                    inputs,
+                    16 * 64,
+                    expected=None,
+                    atol=0.0,
+                )
+                if not r.compiled and not r.failure_kind:
+                    r.failure_kind = "compile_reject"
+                results.append(r)
+            except Exception as e:
+                compile_ms = (time.perf_counter() - t0) * 1000.0
+                results.append(ProbeResult(
+                    f"wrapper={w_name} target={t_name}",
+                    False, None, None, 0.0, compile_ms, None,
+                    str(e), failure_kind="compile_reject"
+                ))
+    return results
+
+
+def scan_gap_ops(C: int = _C, S: int = _S) -> list[ProbeResult]:
+    """
+    Probe pending gap ops with strict labeling:
+    - Eval-verified when a trusted CPU reference is available.
+    - Compile-only otherwise.
+    """
+    print("── Gap ops ───────────────────────────────────────────────────────")
+    results: list[ProbeResult] = []
+    n = C * S
+
+    # logical_and / logical_or / logical_xor (Ironmill-equivalent MIL)
+    a = np.array([1.0 if i % 2 == 0 else 0.0 for i in range(n)], dtype=np.float32)
+    b = np.array([1.0 if i % 3 == 0 else 0.0 for i in range(n)], dtype=np.float32)
+    a_f16 = a.astype(np.float16)
+    b_f16 = b.astype(np.float16)
+    logical_specs = [
+        ("logical_and", lambda x, y: np.where((x != 0.0) & (y != 0.0), 1.0, 0.0).astype(np.float32)),
+        ("logical_or",  lambda x, y: np.where((x != 0.0) | (y != 0.0), 1.0, 0.0).astype(np.float32)),
+        ("logical_xor", lambda x, y: np.where((x != 0.0) ^ (y != 0.0), 1.0, 0.0).astype(np.float32)),
+    ]
+    for op, ref_fn in logical_specs:
+        body = (
+            f'        tensor<bool, [1,{C},1,{S}]> ba = cast(x=a_input0, dtype=string("bool"))[name=string("ba")];\n'
+            f'        tensor<bool, [1,{C},1,{S}]> bb = cast(x=a_input1, dtype=string("bool"))[name=string("bb")];\n'
+            f'        tensor<bool, [1,{C},1,{S}]> result = {op}(x=ba, y=bb)[name=string("result")];\n'
+            f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = cast(x=result, dtype=string("fp16"))[name=string("z_output0")];'
+        )
+        mil = mil_program(body, _sig2(C, S), "z_output0")
+        results.append(probe_custom(op, mil, [a_f16, b_f16], n, ref_fn(a, b), atol=0.01))
+
+    # reduce_prod (eval)
+    body_prod = _reduction_body("reduce_prod", axis=-1, C=C, S=S)
+    mil_prod = mil_program(body_prod, _sig1(C, S), "z_output0")
+    x = np.linspace(0.95, 1.05, n, dtype=np.float32)  # avoid overflow/underflow
+    x_f16 = x.astype(np.float16)
+    x_grid = x.reshape(C, S)
+    prod = x_grid.prod(axis=1, keepdims=True)
+    expected_prod = np.tile(prod, (1, S)).ravel()
+    results.append(probe_custom("reduce_prod axis=spatial", mil_prod, [x_f16], n, expected_prod, atol=0.2))
+
+    # avg_pool / max_pool using kernel=[1,1] => identity reference if accepted
+    pool_specs = [
+        ("avg_pool",
+         '        tensor<int32, [2]> ks = const()[name=string("ks"), val=tensor<int32, [2]>([1,1])];\n'
+         '        tensor<int32, [2]> st = const()[name=string("st"), val=tensor<int32, [2]>([1,1])];\n'
+         f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+         'avg_pool(x=a_input0, kernel_sizes=ks, strides=st, pad_type=string("valid"), '
+         'exclude_padding_from_average=bool(true))[name=string("z_output0")];'),
+        ("max_pool",
+         '        tensor<int32, [2]> ks = const()[name=string("ks"), val=tensor<int32, [2]>([1,1])];\n'
+         '        tensor<int32, [2]> st = const()[name=string("st"), val=tensor<int32, [2]>([1,1])];\n'
+         f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+         'max_pool(x=a_input0, kernel_sizes=ks, strides=st, pad_type=string("valid"))'
+         '[name=string("z_output0")];'),
+    ]
+    xp = np.linspace(-2.0, 2.0, n, dtype=np.float32)
+    for name, body in pool_specs:
+        mil = mil_program(body, _sig1(C, S), "z_output0")
+        results.append(probe_custom(name, mil, [xp.astype(np.float16)], n, xp, atol=0.05))
+
+    # gather (attempt eval identity via arange indices on axis=3)
+    gather_body = (
+        f'        tensor<int32, [{S}]> idx = const()[name=string("idx"), val=tensor<int32, [{S}]>('
+        f'[{",".join(str(i) for i in range(S))}])];\n'
+        '        int32 ax = const()[name=string("ax"), val=int32(3)];\n'
+        f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = gather(x=a_input0, indices=idx, axis=ax)'
+        '[name=string("z_output0")];'
+    )
+    xg = np.linspace(-1.0, 1.0, n, dtype=np.float32)
+    results.append(probe_custom(
+        "gather axis=3 identity", mil_program(gather_body, _sig1(C, S), "z_output0"),
+        [xg.astype(np.float16)], n, xg, atol=0.05
+    ))
+
+    # scatter family (compile probes with plausible signatures; no trusted ref yet)
+    scatter_templates = [
+        ("scatter",
+         '        tensor<int32, [1,32,1,32]> idx = const()[name=string("idx"), '
+         'val=tensor<int32, [1,32,1,32]>(0)];\n'
+         '        int32 ax = const()[name=string("ax"), val=int32(3)];\n'
+         f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+         'scatter(x=a_input0, indices=idx, updates=a_input1, axis=ax)[name=string("z_output0")];'),
+        ("scatter_nd",
+         '        tensor<int32, [1,32,1,32,1]> idx = const()[name=string("idx"), '
+         'val=tensor<int32, [1,32,1,32,1]>(0)];\n'
+         f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+         'scatter_nd(x=a_input0, indices=idx, updates=a_input1)[name=string("z_output0")];'),
+        ("scatter_along_axis",
+         '        tensor<int32, [1,32,1,32]> idx = const()[name=string("idx"), '
+         'val=tensor<int32, [1,32,1,32]>(0)];\n'
+         '        int32 ax = const()[name=string("ax"), val=int32(3)];\n'
+         f'        tensor<fp16, [1,{C},1,{S}]> z_output0 = '
+         'scatter_along_axis(x=a_input0, indices=idx, updates=a_input1, axis=ax)[name=string("z_output0")];'),
+    ]
+    xs = np.zeros(n, dtype=np.float16)
+    us = np.ones(n, dtype=np.float16)
+    for name, body in scatter_templates:
+        results.append(probe_custom(
+            name, mil_program(body, _sig2(C, S), "z_output0"),
+            [xs, us], n, expected=None, atol=0.0
+        ))
+
+    return results
+
+
+def scan_all() -> list[ProbeResult]:
+    """Run all scans and return combined results."""
+    all_results: list[ProbeResult] = []
+    all_results += scan_unary()
+    all_results += scan_binary()
+    all_results += scan_reductions()
+    all_results += scan_composite()
+    return all_results
 
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
-def print_report(results: dict[str, list[ProbeResult]] | list[ProbeResult]) -> None:
-    """Print a human-readable summary of *results*."""
-    if isinstance(results, list):
-        results = {"results": results}
+def print_report(results: list[ProbeResult]) -> None:
+    """Print a summary table of probe results."""
+    compile_pass = sum(1 for r in results if r.compiled)
+    eval_pass    = sum(1 for r in results if r.passed)
+    compile_only = sum(1 for r in results if r.compiled and r.passed is None)
+    eval_fail_exp = sum(1 for r in results if r.passed is False and r.expected_eval_fail)
+    eval_fail_unexp = sum(1 for r in results if r.passed is False and not r.expected_eval_fail)
+    compile_fail_exp = sum(1 for r in results if not r.compiled and r.expected_compile_fail)
+    compile_fail_unexp = sum(1 for r in results if not r.compiled and not r.expected_compile_fail)
+    compile_fail = compile_fail_exp + compile_fail_unexp
+    eval_fail = eval_fail_exp + eval_fail_unexp
+    total = len(results)
+    compile_reject = sum(1 for r in results if r.failure_kind == "compile_reject")
+    runtime_reject = sum(1 for r in results if r.failure_kind == "runtime_reject")
+    numeric_mismatch = sum(1 for r in results if r.failure_kind == "numeric_mismatch")
+    semantic_mismatch = sum(1 for r in results if r.failure_kind == "semantic_mismatch")
 
-    for category, rs in results.items():
-        print(f"\n── {category} ({len(rs)} ops) ──")
-        for r in rs:
-            tag = f"[{r.variant}]" if r.variant else ""
-            err = f"  max_err={r.max_err:.4g}" if r.max_err is not None else ""
-            mark = {"ok": "✓", "compiled": "~", "no_compile": "✗",
-                    "no_execute": "!", "wrong": "✗"}.get(r.status, "?")
-            print(f"  {mark} {r.op}{tag:<30} {r.status}{err}")
-            if r.error and r.status == "no_compile":
-                short = r.error[:80]
-                print(f"      {short}")
+    print()
+    print("═" * 67)
+    print("  PROBE RESULTS")
+    print("═" * 67)
+    print(f"  Compiled:          {compile_pass}/{total}")
+    print(f"  Eval verified:     {eval_pass}/{total}")
+    print(f"  Compile-only:      {compile_only}/{total}")
+    print(f"  Supported (strict): {eval_pass}/{total}")
+    if compile_fail_unexp:
+        print(f"  Compile failures: {compile_fail_unexp}")
+    if eval_fail_unexp:
+        print(f"  Eval failures:    {eval_fail_unexp}")
+    if compile_fail_exp:
+        print(f"  Expected compile-fail (XFAIL): {compile_fail_exp}")
+    if eval_fail_exp:
+        print(f"  Expected eval-fail (XFAIL):    {eval_fail_exp}")
+    if compile_reject:
+        print(f"  compile_reject: {compile_reject}")
+    if runtime_reject:
+        print(f"  runtime_reject: {runtime_reject}")
+    if numeric_mismatch:
+        print(f"  numeric_mismatch: {numeric_mismatch}")
+    if semantic_mismatch:
+        print(f"  semantic_mismatch: {semantic_mismatch}")
+    print()
+
+    if compile_fail_unexp:
+        print("  Compile failures:")
+        for r in results:
+            if not r.compiled and not r.expected_compile_fail:
+                msg = f" — {r.error}" if r.error else ""
+                print(f"    • {r.name}{msg}")
+        print()
+
+    if eval_fail_unexp:
+        print("  Eval failures:")
+        for r in results:
+            if r.passed is False and not r.expected_eval_fail:
+                print(f"    • {r.name}  max_err={r.max_err:.4f}  atol={r.atol}")
+        print()
+
+    if compile_fail_exp:
+        print("  Expected compile-fail (XFAIL):")
+        for r in results:
+            if not r.compiled and r.expected_compile_fail:
+                msg = f" — {r.note}" if r.note else ""
+                print(f"    • {r.name}{msg}")
+        print()
+
+    if eval_fail_exp:
+        print("  Expected eval-fail (XFAIL):")
+        for r in results:
+            if r.passed is False and r.expected_eval_fail:
+                msg = f" — {r.note}" if r.note else ""
+                print(
+                    f"    • {r.name}  max_err={r.max_err:.4f}  atol={r.atol}{msg}"
+                )
+        print()
 
 
-def _chip_info() -> dict[str, str]:
-    info: dict[str, str] = {
-        "os": platform.mac_ver()[0],
-        "arch": platform.machine(),
-    }
-    try:
-        out = subprocess.check_output(
-            ["sysctl", "-n", "machdep.cpu.brand_string"],
-            stderr=subprocess.DEVNULL, text=True).strip()
-        info["cpu"] = out
-    except Exception:
-        pass
-    try:
-        out = subprocess.check_output(
-            ["system_profiler", "SPHardwareDataType"],
-            stderr=subprocess.DEVNULL, text=True)
-        for line in out.splitlines():
-            if "Chip" in line or "Model" in line:
-                info.setdefault("chip", line.strip())
-                break
-    except Exception:
-        pass
-    return info
-
-
-def export_json(
-    path: str,
-    results: dict[str, list[ProbeResult]] | list[ProbeResult] | None = None,
-) -> None:
+def export_json(results: list[ProbeResult], path: str) -> None:
     """
-    Export *results* (or run scan_all() if None) to JSON at *path*.
+    Export probe results as JSON for crowdsourced ANE research.
 
-    The JSON includes chip/OS/libane version metadata to enable crowdsourced
-    aggregation across ANE generations.
+    The JSON includes chip generation info, macOS version, libane version,
+    and per-op results. Share at: https://github.com/amirani-labs/libane/discussions
     """
-    if results is None:
-        results = scan_all()
-    if isinstance(results, list):
-        results = {"results": results}
+    try:
+        import ane as _ane
+        libane_version = _ane.version()
+    except Exception:
+        libane_version = "unknown"
 
-    def _ser(r: ProbeResult) -> dict:
-        return {
-            "op": r.op,
-            "variant": r.variant,
-            "status": r.status,
-            "compiles": r.compiles,
-            "executes": r.executes,
-            "correct": r.correct,
-            "max_err": r.max_err,
-            "params": r.params,
-            "error": r.error,
-        }
-
+    chip = _chip_info()
     payload = {
-        "meta": {
-            "libane_version": _ane.version(),
-            "python": sys.version,
-            **_chip_info(),
+        "libane_version": libane_version,
+        "platform": {
+            "os": platform.system(),
+            "os_version": platform.mac_ver()[0] or platform.version(),
+            "machine": platform.machine(),
+            "chip": chip,
         },
-        "results": {
-            cat: [_ser(r) for r in rs]
-            for cat, rs in results.items()
-        },
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "results": [
+            {
+                "name": r.name,
+                "compiled": r.compiled,
+                "passed": r.passed,
+                "max_err": r.max_err,
+                "atol": r.atol,
+                "compile_ms": round(r.compile_ms, 2),
+                "eval_ms": round(r.eval_ms, 2) if r.eval_ms is not None else None,
+                "error": r.error,
+                "expected_compile_fail": r.expected_compile_fail,
+                "expected_eval_fail": r.expected_eval_fail,
+                "failure_kind": r.failure_kind,
+                "status": r.status,
+                "support_level": r.support_level,
+                "eval_verified": bool(r.passed is True),
+                "note": r.note,
+                "mil_build_info": _BUILD_INFO_FIELDS,
+            }
+            for r in results
+        ],
     }
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"Exported {len(results)} results → {path}")
 
-    with open(path, "w") as fh:
-        json.dump(payload, fh, indent=2)
-    print(f"Exported {sum(len(v) for v in results.values())} results → {path}")
+
+def _chip_info() -> str:
+    """Best-effort Apple Silicon chip identification."""
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["sysctl", "-n", "machdep.cpu.brand_string"], text=True
+        ).strip()
+        return out
+    except Exception:
+        return platform.processor() or "unknown"
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -844,53 +1899,86 @@ def export_json(
 def _cli() -> None:
     import argparse
 
-    p = argparse.ArgumentParser(
-        prog="ane-probe",
-        description="ANE op discovery harness — libane probe module",
+    parser = argparse.ArgumentParser(
+        prog="python -m ane.probe",
+        description="ANE op probe harness — test MIL ops on the local ANE.",
     )
-    p.add_argument("--unary",        action="store_true", help="Scan unary ops")
-    p.add_argument("--binary",       action="store_true", help="Scan binary ops")
-    p.add_argument("--reductions",   action="store_true", help="Scan reduction ops")
-    p.add_argument("--composite",    action="store_true", help="Scan composite ops")
-    p.add_argument("--intermediate", action="store_true", help="Scan intermediate-only ops")
-    p.add_argument("--explore",      action="store_true",
-                   help="Fuzz candidate op names")
-    p.add_argument("--params",       metavar="OP",
-                   help="Explore parameter space for OP (e.g. rsqrt)")
-    p.add_argument("--all",          action="store_true", help="Run all scans")
-    p.add_argument("--export",       metavar="FILE",
-                   help="Export results to JSON file")
-    args = p.parse_args()
+    parser.add_argument("--unary",      action="store_true", help="Scan unary ops")
+    parser.add_argument("--binary",     action="store_true", help="Scan binary/comparison ops")
+    parser.add_argument("--reductions", action="store_true", help="Scan reduction ops")
+    parser.add_argument("--composite",  action="store_true", help="Scan composite patterns")
+    parser.add_argument("--intermediate", action="store_true",
+                        help="Discover intermediate-only ops")
+    parser.add_argument("--explore",    action="store_true",
+                        help="Fuzz unknown op names")
+    parser.add_argument("--params",     action="append", metavar="OP",
+                        help="Explore parameter variants for OP (repeatable: rsqrt/log/inverse/...)")
+    parser.add_argument("--params-all", action="store_true",
+                        help="Run all pre-defined parameter space explorations")
+    parser.add_argument("--round-semantics", action="store_true",
+                        help="Characterize round() tie-breaking semantics on fp16 half-way values")
+    parser.add_argument("--dep-matrix", action="store_true",
+                        help="Run wrapper->intermediate compile dependency matrix")
+    parser.add_argument("--gap-ops", action="store_true",
+                        help="Probe pending gap ops (logical/pool/scatter/gather/reduce_prod)")
+    parser.add_argument("--sin-cos-sweep", action="store_true",
+                        help="Run sin/cos input-range sweep")
+    parser.add_argument("--all",        action="store_true",
+                        help="Run all scans (unary+binary+reductions+composite)")
+    parser.add_argument("--export",     metavar="FILE",
+                        help="Export results to JSON file")
+    args = parser.parse_args()
 
-    if not any([args.unary, args.binary, args.reductions, args.composite,
-                args.intermediate, args.explore, args.params, args.all]):
-        p.print_help()
-        return
+    try:
+        import ane as _ane
+        if not _ane.available():
+            print("ANE not available on this machine. Exiting.")
+            sys.exit(1)
+        print(f"libane {_ane.version()} — ANE available ({_chip_info()})\n")
+    except ImportError:
+        print("Error: ane module not found. Build with: pip install -e bindings/python/")
+        sys.exit(1)
 
-    if not _ane.available():
-        print("WARNING: ANE not available on this machine — compile-only probes will run.")
+    run_all = args.all or not any([
+        args.unary, args.binary, args.reductions, args.composite,
+        args.intermediate, args.explore, args.params, args.params_all,
+        args.round_semantics, args.dep_matrix, args.gap_ops, args.sin_cos_sweep,
+    ])
 
-    collected: dict[str, list[ProbeResult]] = {}
+    all_results: list[ProbeResult] = []
 
-    if args.all:
-        collected = scan_all()
-    else:
-        if args.unary:
-            collected["unary"] = scan_unary()
-        if args.binary:
-            collected["binary"] = scan_binary()
-        if args.reductions:
-            collected["reductions"] = scan_reductions()
-        if args.composite:
-            collected["composite"] = scan_composite()
-        if args.intermediate:
-            collected["intermediate"] = scan_intermediate()
-        if args.explore:
-            collected["name_fuzz"] = explore_names()
-        if args.params:
-            collected[f"params_{args.params}"] = explore_op_params(args.params)
+    if run_all or args.unary:
+        all_results += scan_unary()
+    if run_all or args.binary:
+        all_results += scan_binary()
+    if run_all or args.reductions:
+        all_results += scan_reductions()
+    if run_all or args.composite:
+        all_results += scan_composite()
+    if args.intermediate:
+        all_results += scan_intermediate()
+    if args.explore:
+        all_results += explore_names()
+    if args.params:
+        for op_name in args.params:
+            print(f"── Parameter exploration ({op_name}) ─────────────────────────────")
+            all_results += explore_op_params(op_name)
+    if args.params_all:
+        all_results += scan_param_spaces()
+    if args.round_semantics:
+        all_results += scan_round_semantics()
+    if args.dep_matrix:
+        all_results += scan_dependency_matrix()
+    if args.gap_ops:
+        all_results += scan_gap_ops()
+    if args.sin_cos_sweep:
+        all_results += scan_sin_cos_ranges()
 
-    print_report(collected)
+    print_report(all_results)
 
     if args.export:
-        export_json(args.export, collected)
+        export_json(all_results, args.export)
+
+
+if __name__ == "__main__":
+    _cli()
