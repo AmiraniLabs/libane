@@ -278,6 +278,25 @@ public:
                                            const std::string& mask_file = "mask.bin");
 
     /**
+     * Static-mask gather lowering.
+     *
+     * Semantics:
+     *   out = x * mask
+     * where mask is a compile-time fp16 tensor [1,C,1,S] stored as weights.
+     */
+    static MilProgram gather_static_mask(int C, int SP,
+                                          const std::string& mask_file = "mask.bin");
+
+    /**
+     * Dynamic-mask gather lowering.
+     *
+     * Semantics:
+     *   out = x * mask
+     * where mask is provided at runtime as a second input [1,C,1,S].
+     */
+    static MilProgram gather_dynamic_mask(int C, int SP);
+
+    /**
      * Elementwise add. No weights.
      */
     static MilProgram add(int C, int SP);
@@ -400,6 +419,16 @@ public:
                                                      const std::string& updates_var,
                                                      const std::string& out_var,
                                                      const std::string& mask_file = "mask.bin");
+
+    static MilFragment gather_static_mask_fragment(int C, int SP,
+                                                    const std::string& in_var,
+                                                    const std::string& out_var,
+                                                    const std::string& mask_file = "mask.bin");
+
+    static MilFragment gather_dynamic_mask_fragment(int C, int SP,
+                                                     const std::string& in_var,
+                                                     const std::string& mask_var,
+                                                     const std::string& out_var);
 
     static MilFragment transpose_fragment(int C, int SP,
                                            const std::string& in_var,

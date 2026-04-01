@@ -116,6 +116,16 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
             out_shape.channels, out_shape.seq,
             in_var, tensor_var(node.inputs[1]), out_var, node.weight_file);
 
+    case LIBANE_OP_GATHER:
+        if (node.inputs.size() == 1) {
+            return mil::MilBuilder::gather_static_mask_fragment(
+                out_shape.channels, out_shape.seq,
+                in_var, out_var, node.weight_file);
+        }
+        return mil::MilBuilder::gather_dynamic_mask_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
     default:
         throw std::runtime_error(
             "node_to_fragment: unsupported op " + std::to_string(node.op));

@@ -244,6 +244,44 @@ TEST_CASE("scatter: missing mask weights fails", "[validator][weights]") {
     REQUIRE_FALSE(r.ok());
 }
 
+TEST_CASE("gather(static): mask weights and matching shapes pass", "[validator][weights]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    auto mask = fp16_ones(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x}, S(64, 128), mask.data(), mask.size() * 2);
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("gather(dynamic): two inputs with matching shapes pass", "[validator][weights]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId m = g.add_input("m", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x, m}, S(64, 128));
+    g.mark_output(o);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("gather(static): missing mask weights fails", "[validator][weights]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x}, S(64, 128));
+    g.mark_output(o);
+    auto r = GraphValidator::validate(g);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("gather(dynamic): weights provided fails", "[validator][weights]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId m = g.add_input("m", S(64, 128));
+    auto w = fp16_ones(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x, m}, S(64, 128), w.data(), w.size() * 2);
+    g.mark_output(o);
+    auto r = GraphValidator::validate(g);
+    REQUIRE_FALSE(r.ok());
+}
+
 TEST_CASE("transpose: no weights passes", "[validator][weights]") {
     // transpose [1,C,1,S] -> [1,S,1,C]: output channels = input seq, output seq = input channels
     auto r = validate_single(LIBANE_OP_TRANSPOSE, S(512, 128), S(128, 512), 0);

@@ -609,6 +609,49 @@ MilProgram MilBuilder::scatter_static_mask(int C, int SP,
     return p;
 }
 
+MilProgram MilBuilder::gather_static_mask(int C, int SP,
+                                           const std::string& mask_file) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string mref = tt + "(BLOBFILE(path=string(\"@model_path/weights/" + mask_file +
+                       "\"), offset=uint64(" + std::to_string(WeightBlob::kWeightDictOffset) + ")))";
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x) {\n";
+    t += "        " + tt + " m = const()[name=string(\"m\"), val=" + mref + "];\n";
+    t += "        " + tt + " out = mul(x=x, y=m)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = mask_file;
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+MilProgram MilBuilder::gather_dynamic_mask(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x, " + tt + " mask) {\n";
+    t += "        " + tt + " out = mul(x=x, y=mask)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
 /* ── add ─────────────────────────────────────────────────────────────────── */
 
 MilProgram MilBuilder::add(int C, int SP) {
@@ -1233,6 +1276,53 @@ MilFragment MilBuilder::scatter_static_mask_fragment(int C, int SP,
     f.side_input_name = updates_var;
     f.output_name     = out_var;
     f.weight_file     = mask_file;
+    f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::gather_static_mask_fragment(int C, int SP,
+                                                     const std::string& in_var,
+                                                     const std::string& out_var,
+                                                     const std::string& mask_file) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string mref = tt + "(BLOBFILE(path=string(\"@model_path/weights/" + mask_file +
+                       "\"), offset=uint64(" + std::to_string(WeightBlob::kWeightDictOffset) + ")))";
+
+    std::string body;
+    body += "        " + tt + " " + p + "m = const()[name=string(\"" + p + "m\"), val=" + mref + "];\n";
+    body += "        " + tt + " " + out_var + " = mul(x=" + in_var + ", y=" + p + "m)[name=string(\"" + p + "out\")];\n";
+
+    MilFragment f;
+    f.body         = std::move(body);
+    f.input_name   = in_var;
+    f.output_name  = out_var;
+    f.weight_file  = mask_file;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::gather_dynamic_mask_fragment(int C, int SP,
+                                                      const std::string& in_var,
+                                                      const std::string& mask_var,
+                                                      const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+
+    std::string body;
+    body += "        " + tt + " " + out_var + " = mul(x=" + in_var + ", y=" + mask_var + ")[name=string(\"" + p + "out\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = in_var;
+    f.side_input_name = mask_var;
+    f.output_name     = out_var;
     f.output_shape    = shape;
     return f;
 }

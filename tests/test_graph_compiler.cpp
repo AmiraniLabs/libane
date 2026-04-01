@@ -253,6 +253,32 @@ TEST_CASE("build_plan: scatter static-mask node supported", "[compiler][fusion]"
     CHECK(plan.groups[0].output == o);
 }
 
+TEST_CASE("build_plan: gather static-mask node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    auto mask = fp16_weights(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x}, S(64, 128), mask.data(), mask.size());
+    g.mark_output(o);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 1);
+    CHECK(plan.groups[0].output == o);
+}
+
+TEST_CASE("build_plan: gather dynamic-mask node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId m = g.add_input("m", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x, m}, S(64, 128));
+    g.mark_output(o);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 1);
+    CHECK(plan.groups[0].output == o);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * 4. Layernorm weight splitting
  * ═══════════════════════════════════════════════════════════════════════════ */

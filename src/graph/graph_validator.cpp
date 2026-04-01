@@ -294,6 +294,41 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
             break;
         }
 
+        case LIBANE_OP_GATHER: {
+            if (n.inputs.size() == 1) {
+                // Static gather mask provided as compile-time weights.
+                if (n.weights.empty()) {
+                    err("gather(static) requires mask weights [1,C,1,S]");
+                    break;
+                }
+                const auto& in = g.tensor(n.inputs[0]).shape;
+                if (!(in == out_t.shape))
+                    err("gather(static) requires input/output shapes to match exactly");
+                size_t expected = out_t.shape.bytes();
+                if (n.weights.size() != expected) {
+                    err("gather(static) mask size mismatch: expected " + std::to_string(expected) +
+                        " bytes ([1,C,1,S] fp16), got " + std::to_string(n.weights.size()));
+                }
+                break;
+            }
+
+            if (n.inputs.size() == 2) {
+                // Dynamic gather mask provided as second runtime input.
+                if (!n.weights.empty())
+                    err("gather(dynamic) is weight-free; provide mask as second input");
+                const auto& x = g.tensor(n.inputs[0]).shape;
+                const auto& m = g.tensor(n.inputs[1]).shape;
+                if (!(x == m && x == out_t.shape)) {
+                    err("gather(dynamic) requires x/mask/output shapes to match exactly");
+                }
+                break;
+            }
+
+            err("gather supports exactly one input (static mask) or two inputs (dynamic mask), got " +
+                std::to_string(n.inputs.size()));
+            break;
+        }
+
         case LIBANE_OP_ADD:
         case LIBANE_OP_MUL:
         case LIBANE_OP_LOGICAL_AND:

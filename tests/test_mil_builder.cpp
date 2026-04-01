@@ -325,6 +325,27 @@ TEST_CASE("MilBuilder::scatter_static_mask lowers to mask blend", "[mil][build]"
     CHECK(prog.output_shape == (TensorShape{1, 8, 1, 64}));
 }
 
+TEST_CASE("MilBuilder::gather_static_mask lowers to x*mask", "[mil][build]") {
+    auto prog = MilBuilder::gather_static_mask(8, 64, "gmask.bin");
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("BLOBFILE(path=string(\"@model_path/weights/gmask.bin\")"));
+    CHECK_THAT(prog.text, ContainsSubstring("mul(x=x, y=m)"));
+    CHECK(prog.weight_name == "gmask.bin");
+    CHECK(prog.input_shape  == (TensorShape{1, 8, 1, 64}));
+    CHECK(prog.output_shape == (TensorShape{1, 8, 1, 64}));
+}
+
+TEST_CASE("MilBuilder::gather_dynamic_mask lowers to x*mask", "[mil][build]") {
+    auto prog = MilBuilder::gather_dynamic_mask(8, 64);
+    REQUIRE_FALSE(prog.text.empty());
+    CHECK_THAT(prog.text, ContainsSubstring("func main<ios18>("));
+    CHECK_THAT(prog.text, ContainsSubstring("x, tensor<fp16, [1, 8, 1, 64]> mask"));
+    CHECK_THAT(prog.text, ContainsSubstring("mul(x=x, y=mask)"));
+    CHECK(prog.weight_name.empty());
+    CHECK(prog.input_shape  == (TensorShape{1, 8, 1, 64}));
+    CHECK(prog.output_shape == (TensorShape{1, 8, 1, 64}));
+}
+
 /* ── MilBuilder — rmsnorm ────────────────────────────────────────────────── */
 
 TEST_CASE("MilBuilder::rmsnorm uses reduce_sum + pow path", "[mil][build]") {

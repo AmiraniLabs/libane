@@ -2627,6 +2627,39 @@ def scan_lowered_support(C: int = 64, S: int = 512) -> list[ProbeResult]:
         )
     )
 
+    # Gather(static): out = x * static_mask_weights
+    gx = np.linspace(-1.0, 1.0, n, dtype=np.float32)
+    gmask = np.zeros((n,), dtype=np.float16)
+    for c in range(C):
+        idx = (5 * c + 1) % S
+        gmask[c * S + idx] = np.float16(1.0)
+    exp_gs = gx * gmask.astype(np.float32)
+    results.append(
+        _run_case(
+            "lowered/gather_static_mask",
+            _op_code("GATHER", 19),
+            [gx],
+            expected=exp_gs,
+            atol=0.05,
+            note="lowering=mul(x, static_mask_weights)",
+            weights=gmask,
+        )
+    )
+
+    # Gather(dynamic): out = x * runtime_mask_input
+    gm = np.where((np.arange(n) % 7) == 0, 1.0, 0.0).astype(np.float32)
+    exp_gd = gx * gm
+    results.append(
+        _run_case(
+            "lowered/gather_dynamic_mask",
+            _op_code("GATHER", 19),
+            [gx, gm],
+            expected=exp_gd,
+            atol=0.05,
+            note="lowering=mul(x, runtime_mask_input)",
+        )
+    )
+
     return results
 
 
@@ -2792,6 +2825,37 @@ def print_report(results: list[ProbeResult]) -> None:
                 )
         print()
 
+    _print_scatter_gather_matrix(results)
+
+
+def _print_scatter_gather_matrix(results: list[ProbeResult]) -> None:
+    def _raw_for(op: str) -> str:
+        vals = [r.raw_acceptance for r in results
+                if r.raw_acceptance is not None and op in r.name]
+        if not vals:
+            return "n/a"
+        return "PASS" if any(vals) else "FAIL"
+
+    def _lowered_for(op: str) -> str:
+        vals = [r.libane_lowered_support for r in results
+                if r.libane_lowered_support is not None and op in r.name]
+        if not vals:
+            return "n/a"
+        return "PASS" if any(vals) else "FAIL"
+
+    rows = [
+        ("scatter", _raw_for("scatter"), _lowered_for("scatter")),
+        ("gather", _raw_for("gather"), _lowered_for("gather")),
+    ]
+    if all(raw == "n/a" and low == "n/a" for _, raw, low in rows):
+        return
+
+    print("  Scatter/Gather Matrix:")
+    print("    op       raw_acceptance  lowered_support")
+    for op, raw, low in rows:
+        print(f"    {op:<8} {raw:<15} {low}")
+    print()
+
 
 def export_json(results: list[ProbeResult], path: str) -> None:
     """
@@ -2807,6 +2871,13 @@ def export_json(results: list[ProbeResult], path: str) -> None:
         libane_version = "unknown"
 
     chip = _chip_info()
+
+    def _matrix_val(op: str, field: str) -> Optional[bool]:
+        vals = [getattr(r, field) for r in results if getattr(r, field) is not None and op in r.name]
+        if not vals:
+            return None
+        return bool(any(vals))
+
     payload = {
         "libane_version": libane_version,
         "mil_build_info": _BUILD_INFO_FIELDS,
@@ -2817,6 +2888,16 @@ def export_json(results: list[ProbeResult], path: str) -> None:
             "chip": chip,
         },
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "scatter_gather_matrix": {
+            "scatter": {
+                "raw_acceptance": _matrix_val("scatter", "raw_acceptance"),
+                "lowered_support": _matrix_val("scatter", "libane_lowered_support"),
+            },
+            "gather": {
+                "raw_acceptance": _matrix_val("gather", "raw_acceptance"),
+                "lowered_support": _matrix_val("gather", "libane_lowered_support"),
+            },
+        },
         "results": [
             {
                 "name": r.name,

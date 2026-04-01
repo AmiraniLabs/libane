@@ -232,6 +232,9 @@ libane_handle_t libane_compile(libane_op_t op,
             case LIBANE_OP_SCATTER:
                 set_error("SCATTER not supported via libane_compile — use graph API with static mask weights");
                 return nullptr;
+            case LIBANE_OP_GATHER:
+                set_error("GATHER not supported via libane_compile — use graph API (static or dynamic mask)");
+                return nullptr;
             case LIBANE_OP_LAYER_NORM:
             case LIBANE_OP_LAYERNORM:
                 mil_prog = libane::mil::MilBuilder::layernorm(ms.channels, ms.seq);

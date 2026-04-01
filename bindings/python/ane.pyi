@@ -29,6 +29,7 @@ LOGICAL_OR: int
 LOGICAL_XOR: int
 REDUCE_PROD: int
 SCATTER: int
+GATHER: int
 
 # ── Log level constants ───────────────────────────────────────────────────────
 

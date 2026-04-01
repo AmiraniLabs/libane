@@ -469,3 +469,80 @@ TEST_CASE("T3: static-mask scatter compile + execute", "[integration][tier3][ane
         CHECK(near(to_f32(out_data[lin]), to_f32(upd_data[lin]), 0.0f, 0.1f));
     }
 }
+
+TEST_CASE("T3: static-mask gather compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+
+    AneGraph g;
+    TensorId x = g.add_input("x", S(C, SP));
+    auto mask = scatter_mask_bytes(C, SP);
+    TensorId out = g.add_op(LIBANE_OP_GATHER, {x}, S(C, SP), mask.data(), mask.size());
+    g.mark_output(out);
+
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    std::vector<fp16> x_data(n), out_data(n, to_f16(0.0f));
+    for (size_t i = 0; i < n; ++i)
+        x_data[i] = to_f16(static_cast<float>(i % 53) * 0.25f - 4.0f);
+
+    const void* in_ptrs[1] = {x_data.data()};
+    size_t in_sizes[1] = {x_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_sizes[1] = {out_data.size() * sizeof(fp16)};
+
+    bool ok = GraphExecutor::execute(*cg,
+                                     {in_ptrs[0]},
+                                     {in_sizes[0]},
+                                     {out_ptrs[0]},
+                                     {out_sizes[0]});
+    REQUIRE(ok);
+
+    for (int c = 0; c < C; ++c) {
+        int idx = (7 * c + 3) % SP;
+        size_t lin = static_cast<size_t>(c) * SP + static_cast<size_t>(idx);
+        CHECK(near(to_f32(out_data[lin]), to_f32(x_data[lin]), 0.0f, 0.1f));
+    }
+}
+
+TEST_CASE("T3: dynamic-mask gather compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+
+    AneGraph g;
+    TensorId x = g.add_input("x", S(C, SP));
+    TensorId m = g.add_input("m", S(C, SP));
+    TensorId out = g.add_op(LIBANE_OP_GATHER, {x, m}, S(C, SP));
+    g.mark_output(out);
+
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    std::vector<fp16> x_data(n), m_data(n), out_data(n, to_f16(0.0f));
+    for (size_t i = 0; i < n; ++i) {
+        x_data[i] = to_f16(static_cast<float>(i % 41) * 0.125f - 2.0f);
+        m_data[i] = to_f16((i % 5 == 0) ? 1.0f : 0.0f);
+    }
+
+    const void* in_ptrs[2] = {x_data.data(), m_data.data()};
+    size_t in_sizes[2] = {x_data.size() * sizeof(fp16), m_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_sizes[1] = {out_data.size() * sizeof(fp16)};
+
+    bool ok = GraphExecutor::execute(*cg,
+                                     {in_ptrs[0], in_ptrs[1]},
+                                     {in_sizes[0], in_sizes[1]},
+                                     {out_ptrs[0]},
+                                     {out_sizes[0]});
+    REQUIRE(ok);
+
+    for (size_t i = 0; i < n; ++i) {
+        float expected = to_f32(x_data[i]) * to_f32(m_data[i]);
+        CHECK(near(to_f32(out_data[i]), expected, 0.0f, 0.1f));
+    }
+}
