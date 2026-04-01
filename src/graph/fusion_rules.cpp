@@ -13,8 +13,25 @@ bool FusionRules::op_supported(libane_op_t op) {
     case LIBANE_OP_MATMUL:
     case LIBANE_OP_GELU:
     case LIBANE_OP_SOFTMAX:
+    case LIBANE_OP_AVG_POOL:
+    case LIBANE_OP_MAX_POOL:
     case LIBANE_OP_ADD:
     case LIBANE_OP_MUL:
+    case LIBANE_OP_LOGICAL_AND:
+    case LIBANE_OP_LOGICAL_OR:
+    case LIBANE_OP_LOGICAL_XOR:
+    case LIBANE_OP_REDUCE_PROD:
+    case LIBANE_OP_SCATTER:
+    case LIBANE_OP_SCATTER_ND:
+    case LIBANE_OP_SCATTER_ALONG_AXIS:
+    case LIBANE_OP_GATHER:
+    case LIBANE_OP_NEG:
+    case LIBANE_OP_MOD:
+    case LIBANE_OP_SINH:
+    case LIBANE_OP_COSH:
+    case LIBANE_OP_TAN:
+    case LIBANE_OP_ASIN:
+    case LIBANE_OP_ACOS:
     case LIBANE_OP_SILU:
     case LIBANE_OP_RMSNORM:
     case LIBANE_OP_LAYERNORM:

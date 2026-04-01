@@ -70,6 +70,14 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
         return mil::MilBuilder::softmax_fragment(
             out_shape.channels, out_shape.seq, in_var, out_var);
 
+    case LIBANE_OP_AVG_POOL:
+        return mil::MilBuilder::avg_pool_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_MAX_POOL:
+        return mil::MilBuilder::max_pool_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
     case LIBANE_OP_TRANSPOSE:
         return mil::MilBuilder::transpose_fragment(
             in_shape.channels, in_shape.seq, in_var, out_var);
@@ -83,6 +91,71 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
         return mil::MilBuilder::mul_fragment(
             out_shape.channels, out_shape.seq,
             in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_LOGICAL_AND:
+        return mil::MilBuilder::logical_and_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_LOGICAL_OR:
+        return mil::MilBuilder::logical_or_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_LOGICAL_XOR:
+        return mil::MilBuilder::logical_xor_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_REDUCE_PROD:
+        return mil::MilBuilder::reduce_prod_fragment(
+            in_shape.channels, in_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_SCATTER:
+    case LIBANE_OP_SCATTER_ND:
+    case LIBANE_OP_SCATTER_ALONG_AXIS:
+        return mil::MilBuilder::scatter_static_mask_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var, node.weight_file);
+
+    case LIBANE_OP_GATHER:
+        if (node.inputs.size() == 1) {
+            return mil::MilBuilder::gather_static_mask_fragment(
+                out_shape.channels, out_shape.seq,
+                in_var, out_var, node.weight_file);
+        }
+        return mil::MilBuilder::gather_dynamic_mask_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_NEG:
+        return mil::MilBuilder::neg_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_MOD:
+        return mil::MilBuilder::mod_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_SINH:
+        return mil::MilBuilder::sinh_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_COSH:
+        return mil::MilBuilder::cosh_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_TAN:
+        return mil::MilBuilder::tan_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_ASIN:
+        return mil::MilBuilder::asin_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_ACOS:
+        return mil::MilBuilder::acos_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
 
     default:
         throw std::runtime_error(

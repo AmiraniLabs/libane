@@ -202,6 +202,12 @@ libane_handle_t libane_compile(libane_op_t op,
             case LIBANE_OP_SOFTMAX:
                 mil_prog = libane::mil::MilBuilder::softmax(ms.channels, ms.seq);
                 break;
+            case LIBANE_OP_AVG_POOL:
+                mil_prog = libane::mil::MilBuilder::avg_pool(ms.channels, ms.seq);
+                break;
+            case LIBANE_OP_MAX_POOL:
+                mil_prog = libane::mil::MilBuilder::max_pool(ms.channels, ms.seq);
+                break;
             case LIBANE_OP_GELU:
                 mil_prog = libane::mil::MilBuilder::gelu(ms.channels, ms.seq);
                 break;
@@ -211,6 +217,51 @@ libane_handle_t libane_compile(libane_op_t op,
             case LIBANE_OP_MUL:
                 mil_prog = libane::mil::MilBuilder::mul(ms.channels, ms.seq);
                 break;
+            case LIBANE_OP_LOGICAL_AND:
+                mil_prog = libane::mil::MilBuilder::logical_and(ms.channels, ms.seq);
+                break;
+            case LIBANE_OP_LOGICAL_OR:
+                mil_prog = libane::mil::MilBuilder::logical_or(ms.channels, ms.seq);
+                break;
+            case LIBANE_OP_LOGICAL_XOR:
+                mil_prog = libane::mil::MilBuilder::logical_xor(ms.channels, ms.seq);
+                break;
+            case LIBANE_OP_REDUCE_PROD:
+                set_error("REDUCE_PROD not supported via libane_compile — use graph API with output shape [1,1,1,S]");
+                return nullptr;
+            case LIBANE_OP_SCATTER:
+                set_error("SCATTER not supported via libane_compile — use graph API with static mask weights");
+                return nullptr;
+            case LIBANE_OP_SCATTER_ND:
+                set_error("SCATTER_ND not supported via libane_compile — use graph API with static mask weights");
+                return nullptr;
+            case LIBANE_OP_SCATTER_ALONG_AXIS:
+                set_error("SCATTER_ALONG_AXIS not supported via libane_compile — use graph API with static mask weights");
+                return nullptr;
+            case LIBANE_OP_GATHER:
+                set_error("GATHER not supported via libane_compile — use graph API (static or dynamic mask)");
+                return nullptr;
+            case LIBANE_OP_NEG:
+                set_error("NEG not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_MOD:
+                set_error("MOD not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_SINH:
+                set_error("SINH not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_COSH:
+                set_error("COSH not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_TAN:
+                set_error("TAN not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_ASIN:
+                set_error("ASIN not supported via libane_compile — use graph API");
+                return nullptr;
+            case LIBANE_OP_ACOS:
+                set_error("ACOS not supported via libane_compile — use graph API");
+                return nullptr;
             case LIBANE_OP_LAYER_NORM:
             case LIBANE_OP_LAYERNORM:
                 mil_prog = libane::mil::MilBuilder::layernorm(ms.channels, ms.seq);

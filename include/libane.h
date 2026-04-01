@@ -51,6 +51,23 @@ typedef enum {
     LIBANE_OP_SILU       = 9,
     LIBANE_OP_RMSNORM    = 10,
     LIBANE_OP_LAYERNORM  = 11,
+    LIBANE_OP_AVG_POOL   = 12,
+    LIBANE_OP_MAX_POOL   = 13,
+    LIBANE_OP_LOGICAL_AND= 14,
+    LIBANE_OP_LOGICAL_OR = 15,
+    LIBANE_OP_LOGICAL_XOR= 16,
+    LIBANE_OP_REDUCE_PROD= 17,
+    LIBANE_OP_SCATTER    = 18,
+    LIBANE_OP_GATHER     = 19,
+    LIBANE_OP_SCATTER_ND = 20,
+    LIBANE_OP_SCATTER_ALONG_AXIS = 21,
+    LIBANE_OP_NEG        = 22,
+    LIBANE_OP_MOD        = 23,
+    LIBANE_OP_SINH       = 24,
+    LIBANE_OP_COSH       = 25,
+    LIBANE_OP_TAN        = 26,
+    LIBANE_OP_ASIN       = 27,
+    LIBANE_OP_ACOS       = 28,
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */

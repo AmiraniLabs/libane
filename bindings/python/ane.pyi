@@ -22,6 +22,23 @@ MUL: int
 TRANSPOSE: int
 SILU: int
 RMSNORM: int
+AVG_POOL: int
+MAX_POOL: int
+LOGICAL_AND: int
+LOGICAL_OR: int
+LOGICAL_XOR: int
+REDUCE_PROD: int
+SCATTER: int
+GATHER: int
+SCATTER_ND: int
+SCATTER_ALONG_AXIS: int
+NEG: int
+MOD: int
+SINH: int
+COSH: int
+TAN: int
+ASIN: int
+ACOS: int
 
 # ── Log level constants ───────────────────────────────────────────────────────
 
@@ -38,7 +55,7 @@ def available() -> bool:
     ...
 
 def version() -> str:
-    """libane version string (e.g. '0.7.0')."""
+    """libane version string (e.g. '0.7.1')."""
     ...
 
 def last_error() -> str:
