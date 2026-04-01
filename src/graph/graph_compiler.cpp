@@ -74,6 +74,12 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
         return mil::MilBuilder::transpose_fragment(
             in_shape.channels, in_shape.seq, in_var, out_var);
 
+    case LIBANE_OP_RESHAPE:
+        return mil::MilBuilder::reshape_fragment(
+            in_shape.channels, in_shape.seq,
+            out_shape.channels, out_shape.seq,
+            in_var, out_var);
+
     case LIBANE_OP_ADD:
         return mil::MilBuilder::add_fragment(
             out_shape.channels, out_shape.seq,
@@ -83,6 +89,53 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
         return mil::MilBuilder::mul_fragment(
             out_shape.channels, out_shape.seq,
             in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_SUB:
+        return mil::MilBuilder::sub_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_REAL_DIV:
+        return mil::MilBuilder::real_div_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_SQRT:
+        return mil::MilBuilder::sqrt_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_LOG:
+        return mil::MilBuilder::log_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_RSQRT:
+        return mil::MilBuilder::rsqrt_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_CONCAT: {
+        const auto& side_shape = graph.tensor(node.inputs[1]).shape;
+        return mil::MilBuilder::concat_fragment(
+            in_shape.channels, side_shape.channels, in_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+    }
+
+    case LIBANE_OP_SLICE_BY_INDEX:
+        return mil::MilBuilder::slice_by_index_fragment(
+            in_shape.channels, in_shape.seq,
+            out_shape.channels, out_shape.seq,
+            in_var, out_var);
+
+    case LIBANE_OP_REDUCE_SUM:
+        return mil::MilBuilder::reduce_sum_fragment(
+            in_shape.channels, in_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_REDUCE_MEAN:
+        return mil::MilBuilder::reduce_mean_fragment(
+            in_shape.channels, in_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_REDUCE_MAX:
+        return mil::MilBuilder::reduce_max_fragment(
+            in_shape.channels, in_shape.seq, in_var, out_var);
 
     default:
         throw std::runtime_error(

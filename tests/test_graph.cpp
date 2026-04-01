@@ -106,6 +106,18 @@ TEST_CASE("add_op weight-free node has empty weights and file", "[graph][ir]") {
     CHECK(n.weight_file.empty());
 }
 
+TEST_CASE("reshape op supports shape remap with same numel", "[graph][ir]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", shape(512, 128)); // numel = 65536
+    TensorId y = g.add_op(LIBANE_OP_RESHAPE, {x}, shape(1024, 64)); // same numel
+
+    const auto& n = g.node(0);
+    CHECK(n.op == LIBANE_OP_RESHAPE);
+    CHECK(n.weights.empty());
+    CHECK(g.tensor(y).shape.channels == 1024);
+    CHECK(g.tensor(y).shape.seq == 64);
+}
+
 TEST_CASE("add_op output tensor has correct producer", "[graph][ir]") {
     AneGraph g;
     TensorId x = g.add_input("x", shape(512, 128));
@@ -248,6 +260,141 @@ TEST_CASE("binary op records two inputs", "[graph][ir]") {
     CHECK(n.inputs[0] == a);
     CHECK(n.inputs[1] == b);
     CHECK(n.output == c);
+}
+
+TEST_CASE("sub op records two inputs", "[graph][ir]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", shape(512, 128));
+    TensorId b = g.add_input("b", shape(512, 128));
+    TensorId c = g.add_op(LIBANE_OP_SUB, {a, b}, shape(512, 128));
+
+    const auto& n = g.node(0);
+    REQUIRE(n.inputs.size() == 2);
+    CHECK(n.inputs[0] == a);
+    CHECK(n.inputs[1] == b);
+    CHECK(n.op == LIBANE_OP_SUB);
+    CHECK(n.output == c);
+}
+
+TEST_CASE("real_div op records two inputs", "[graph][ir]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", shape(512, 128));
+    TensorId b = g.add_input("b", shape(512, 128));
+    TensorId c = g.add_op(LIBANE_OP_REAL_DIV, {a, b}, shape(512, 128));
+
+    const auto& n = g.node(0);
+    REQUIRE(n.inputs.size() == 2);
+    CHECK(n.inputs[0] == a);
+    CHECK(n.inputs[1] == b);
+    CHECK(n.op == LIBANE_OP_REAL_DIV);
+    CHECK(n.output == c);
+}
+
+TEST_CASE("concat op records two inputs and output shape", "[graph][ir]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", shape(256, 128));
+    TensorId b = g.add_input("b", shape(512, 128));
+
+    TensorId c = g.add_op(LIBANE_OP_CONCAT, {a, b}, shape(768, 128));
+
+    const auto& n = g.node(0);
+    REQUIRE(n.inputs.size() == 2);
+    CHECK(n.inputs[0] == a);
+    CHECK(n.inputs[1] == b);
+    CHECK(n.op == LIBANE_OP_CONCAT);
+    CHECK(g.tensor(c).shape.channels == 768);
+    CHECK(g.tensor(c).shape.seq == 128);
+}
+
+TEST_CASE("slice_by_index op records one input and sliced shape", "[graph][ir]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", shape(512, 128));
+    TensorId y = g.add_op(LIBANE_OP_SLICE_BY_INDEX, {x}, shape(256, 64));
+
+    const auto& n = g.node(0);
+    REQUIRE(n.inputs.size() == 1);
+    CHECK(n.inputs[0] == x);
+    CHECK(n.op == LIBANE_OP_SLICE_BY_INDEX);
+    CHECK(g.tensor(y).shape.channels == 256);
+    CHECK(g.tensor(y).shape.seq == 64);
+}
+
+TEST_CASE("reduce_sum op records one input and reduced shape", "[graph][ir]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", shape(512, 128));
+    TensorId y = g.add_op(LIBANE_OP_REDUCE_SUM, {x}, shape(1, 128));
+
+    const auto& n = g.node(0);
+    REQUIRE(n.inputs.size() == 1);
+    CHECK(n.inputs[0] == x);
+    CHECK(n.op == LIBANE_OP_REDUCE_SUM);
+    CHECK(g.tensor(y).shape.channels == 1);
+    CHECK(g.tensor(y).shape.seq == 128);
+}
+
+TEST_CASE("reduce_mean op records one input and reduced shape", "[graph][ir]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", shape(512, 128));
+    TensorId y = g.add_op(LIBANE_OP_REDUCE_MEAN, {x}, shape(1, 128));
+
+    const auto& n = g.node(0);
+    REQUIRE(n.inputs.size() == 1);
+    CHECK(n.inputs[0] == x);
+    CHECK(n.op == LIBANE_OP_REDUCE_MEAN);
+    CHECK(g.tensor(y).shape.channels == 1);
+    CHECK(g.tensor(y).shape.seq == 128);
+}
+
+TEST_CASE("reduce_max op records one input and reduced shape", "[graph][ir]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", shape(512, 128));
+    TensorId y = g.add_op(LIBANE_OP_REDUCE_MAX, {x}, shape(1, 128));
+
+    const auto& n = g.node(0);
+    REQUIRE(n.inputs.size() == 1);
+    CHECK(n.inputs[0] == x);
+    CHECK(n.op == LIBANE_OP_REDUCE_MAX);
+    CHECK(g.tensor(y).shape.channels == 1);
+    CHECK(g.tensor(y).shape.seq == 128);
+}
+
+TEST_CASE("sqrt op records one input and same shape", "[graph][ir]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", shape(512, 128));
+    TensorId y = g.add_op(LIBANE_OP_SQRT, {x}, shape(512, 128));
+
+    const auto& n = g.node(0);
+    REQUIRE(n.inputs.size() == 1);
+    CHECK(n.inputs[0] == x);
+    CHECK(n.op == LIBANE_OP_SQRT);
+    CHECK(g.tensor(y).shape.channels == 512);
+    CHECK(g.tensor(y).shape.seq == 128);
+}
+
+TEST_CASE("log op records one input and same shape", "[graph][ir]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", shape(512, 128));
+    TensorId y = g.add_op(LIBANE_OP_LOG, {x}, shape(512, 128));
+
+    const auto& n = g.node(0);
+    REQUIRE(n.inputs.size() == 1);
+    CHECK(n.inputs[0] == x);
+    CHECK(n.op == LIBANE_OP_LOG);
+    CHECK(g.tensor(y).shape.channels == 512);
+    CHECK(g.tensor(y).shape.seq == 128);
+}
+
+TEST_CASE("rsqrt op records one input and same shape", "[graph][ir]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", shape(512, 128));
+    TensorId y = g.add_op(LIBANE_OP_RSQRT, {x}, shape(512, 128));
+
+    const auto& n = g.node(0);
+    REQUIRE(n.inputs.size() == 1);
+    CHECK(n.inputs[0] == x);
+    CHECK(n.op == LIBANE_OP_RSQRT);
+    CHECK(g.tensor(y).shape.channels == 512);
+    CHECK(g.tensor(y).shape.seq == 128);
 }
 
 /* ── Empty graph invariants ──────────────────────────────────────────────── */

@@ -1,5 +1,5 @@
 /**
- * Python bindings for libane v0.7.0.
+ * Python bindings for libane v0.7.1.
  *
  * PyPI package: ane · Install: pip install ane
  * Requires: pybind11, numpy
@@ -100,9 +100,16 @@ static py::array py_matmul(py::array A_in, py::array B_in) {
 
 /* ── matmul (fp32) ───────────────────────────────────────────────────────── */
 
-static py::array_t<float> py_matmul_f32(py::array_t<float> A, py::array_t<float> B) {
-    require_2d(A, "A");
-    require_2d(B, "B");
+static py::array_t<float> py_matmul_f32(py::array A_in, py::array B_in) {
+    require_2d(A_in, "A");
+    require_2d(B_in, "B");
+
+    py::module_ np = py::module_::import("numpy");
+    py::array A = np.attr("ascontiguousarray")(
+        np.attr("asarray")(A_in, "dtype"_a="float32"));
+    py::array B = np.attr("ascontiguousarray")(
+        np.attr("asarray")(B_in, "dtype"_a="float32"));
+
     auto abuf = A.request();
     auto bbuf = B.request();
     int M = static_cast<int>(abuf.shape[0]);
@@ -366,6 +373,114 @@ private:
     std::vector<std::vector<int>>     out_shapes_;
 };
 
+/* ── CompiledMil class ───────────────────────────────────────────────────── */
+
+class PyMilProgram {
+public:
+    explicit PyMilProgram(libane_mil_handle_t h) : h_(h) {}
+    ~PyMilProgram() { libane_mil_release(h_); }
+
+    PyMilProgram(const PyMilProgram&)            = delete;
+    PyMilProgram& operator=(const PyMilProgram&) = delete;
+
+    py::list run(const std::vector<py::array>& inputs_raw,
+                 const std::vector<size_t>&    out_numel) {
+        py::module_ np = py::module_::import("numpy");
+
+        std::vector<py::array>       inputs;
+        std::vector<py::buffer_info> in_bufs;
+        inputs.reserve(inputs_raw.size());
+        for (auto& a : inputs_raw)
+            inputs.push_back(np.attr("ascontiguousarray")(
+                np.attr("asarray")(a, "dtype"_a="float16")));
+        for (auto& a : inputs)
+            in_bufs.push_back(a.request());
+
+        std::vector<const void*> in_ptrs;
+        std::vector<size_t>      in_bytes;
+        for (auto& buf : in_bufs) {
+            in_ptrs.push_back(buf.ptr);
+            in_bytes.push_back(static_cast<size_t>(buf.size) * buf.itemsize);
+        }
+
+        std::vector<py::array> out_arrays;
+        std::vector<void*>     out_ptrs;
+        std::vector<size_t>    out_bytes;
+        for (auto n : out_numel) {
+            out_arrays.emplace_back(
+                np.attr("empty")(static_cast<py::ssize_t>(n), "dtype"_a="float16"));
+            auto ob = out_arrays.back().request();
+            out_ptrs.push_back(ob.ptr);
+            out_bytes.push_back(n * sizeof(uint16_t));
+        }
+
+        libane_status_t st = libane_mil_execute(
+            h_,
+            in_ptrs.empty()  ? nullptr : in_ptrs.data(),
+            in_bytes.empty() ? nullptr : in_bytes.data(),
+            in_ptrs.size(),
+            out_ptrs.empty()  ? nullptr : out_ptrs.data(),
+            out_bytes.empty() ? nullptr : out_bytes.data(),
+            out_ptrs.size());
+
+        if (st != LIBANE_OK)
+            throw std::runtime_error(
+                std::string("mil execute failed: ") + libane_last_error());
+
+        py::list result;
+        for (auto& a : out_arrays) result.append(a);
+        return result;
+    }
+
+private:
+    libane_mil_handle_t h_;
+};
+
+static PyMilProgram* py_compile_mil(const std::string& mil_text) {
+    auto h = libane_mil_compile(mil_text.c_str(), nullptr, nullptr, nullptr, 0);
+    if (!h)
+        throw std::runtime_error(
+            std::string("compile_mil failed: ") + libane_last_error());
+    return new PyMilProgram(h);
+}
+
+static PyMilProgram* py_compile_mil_with_weights(const std::string& mil_text,
+                                                   py::dict           weights_dict) {
+    py::module_ np = py::module_::import("numpy");
+
+    std::vector<std::string>     names_str;
+    std::vector<py::array>       w_arrays;
+    std::vector<py::buffer_info> w_bufs;
+
+    for (auto& item : weights_dict) {
+        names_str.push_back(py::str(item.first).cast<std::string>());
+        w_arrays.push_back(np.attr("ascontiguousarray")(
+            np.attr("asarray")(item.second, "dtype"_a="float16")));
+    }
+    for (auto& a : w_arrays) w_bufs.push_back(a.request());
+
+    std::vector<const char*> name_ptrs;
+    std::vector<const void*> data_ptrs;
+    std::vector<size_t>      size_vals;
+    for (auto& s : names_str) name_ptrs.push_back(s.c_str());
+    for (auto& b : w_bufs) {
+        data_ptrs.push_back(b.ptr);
+        size_vals.push_back(static_cast<size_t>(b.size) * b.itemsize);
+    }
+
+    auto h = libane_mil_compile(
+        mil_text.c_str(),
+        name_ptrs.empty() ? nullptr : name_ptrs.data(),
+        data_ptrs.empty() ? nullptr : data_ptrs.data(),
+        size_vals.empty() ? nullptr : size_vals.data(),
+        name_ptrs.size());
+
+    if (!h)
+        throw std::runtime_error(
+            std::string("compile_mil failed: ") + libane_last_error());
+    return new PyMilProgram(h);
+}
+
 /* ── Graph.compile() ─────────────────────────────────────────────────────── */
 
 static PyCompiledGraph* py_compile(PyGraph& g) {
@@ -380,7 +495,7 @@ static PyCompiledGraph* py_compile(PyGraph& g) {
 
 PYBIND11_MODULE(ane, m) {
     m.doc() = R"(
-ane — Apple Neural Engine Python bindings (libane v0.7.0)
+ane — Apple Neural Engine Python bindings (libane v0.7.1)
 Amirani Labs
 
 ANE-accelerated ML operations with automatic CPU fallback.
@@ -468,6 +583,81 @@ For multi-output graphs, call set_output_shapes() first::
              py::arg("shapes"),
              "Set expected output shapes (list of shape lists) for multi-output graphs.");
 
+    /* ── CompiledMil / compile_mil ───────────────────────────────────── */
+    py::class_<PyMilProgram>(m, "CompiledMil", R"(
+Compiled raw MIL program. Call .run() to execute.
+
+Example — probe relu::
+
+    import ane
+    import numpy as np
+
+    mil = '''
+    program(1.3)
+    [buildInfo = dict<string, string>({"coremlc-component-MIL", "3510.2.1"},
+     {"coremlc-version", "3505.4.1"}, {"coremltools-component-milinternal", ""},
+     {"coremltools-version", "9.0"})]
+    {
+        func main<ios18>(tensor<fp16, [1,32,1,32]> a_input0) {
+            tensor<fp16, [1,32,1,32]> z_output0 =
+                relu(x=a_input0)[name=string("z_output0")];
+        } -> (z_output0);
+    }
+    '''
+    prog  = ane.compile_mil(mil)
+    x     = np.random.randn(32, 32).astype(np.float16)
+    (out,) = prog.run([x], [32 * 32])
+
+Use ane.probe for a higher-level interface.
+)")
+        .def("run", &PyMilProgram::run,
+             py::arg("inputs"), py::arg("output_sizes"),
+             R"(Execute the MIL program.
+
+Args:
+    inputs:       List of numpy arrays (any dtype; converted to float16).
+    output_sizes: List of output sizes in fp16 ELEMENTS (not bytes).
+
+Returns:
+    List of np.float16 ndarrays, one per output.
+
+Raises:
+    RuntimeError on ANE dispatch failure.
+)");
+
+    m.def("compile_mil", &py_compile_mil,
+          py::arg("mil_text"),
+          py::return_value_policy::take_ownership,
+          R"(Compile a raw MIL program (no external weights).
+
+Args:
+    mil_text: UTF-8 MIL source text.
+
+Returns:
+    CompiledMil handle ready for .run().
+
+Raises:
+    RuntimeError if ANE is unavailable or compilation fails.
+    Use ane.last_error() for details.
+)");
+
+    m.def("compile_mil_with_weights", &py_compile_mil_with_weights,
+          py::arg("mil_text"), py::arg("weights"),
+          py::return_value_policy::take_ownership,
+          R"(Compile a raw MIL program with external weight files.
+
+Args:
+    mil_text: UTF-8 MIL source text.
+    weights:  Dict mapping filename (str) → np.float16 array.
+              Filenames must match the file() references in the MIL.
+
+Returns:
+    CompiledMil handle ready for .run().
+
+Raises:
+    RuntimeError if ANE is unavailable or compilation fails.
+)");
+
     /* ── Op constants ─────────────────────────────────────────────────── */
     m.attr("MATMUL")    = static_cast<int>(LIBANE_OP_MATMUL);
     m.attr("LAYER_NORM")= static_cast<int>(LIBANE_OP_LAYER_NORM);
@@ -476,7 +666,18 @@ For multi-output graphs, call set_output_shapes() first::
     m.attr("SOFTMAX")   = static_cast<int>(LIBANE_OP_SOFTMAX);
     m.attr("ADD")       = static_cast<int>(LIBANE_OP_ADD);
     m.attr("MUL")       = static_cast<int>(LIBANE_OP_MUL);
+    m.attr("SUB")       = static_cast<int>(LIBANE_OP_SUB);
+    m.attr("REAL_DIV")  = static_cast<int>(LIBANE_OP_REAL_DIV);
+    m.attr("SQRT")      = static_cast<int>(LIBANE_OP_SQRT);
+    m.attr("LOG")       = static_cast<int>(LIBANE_OP_LOG);
+    m.attr("RSQRT")     = static_cast<int>(LIBANE_OP_RSQRT);
     m.attr("TRANSPOSE") = static_cast<int>(LIBANE_OP_TRANSPOSE);
+    m.attr("RESHAPE")   = static_cast<int>(LIBANE_OP_RESHAPE);
+    m.attr("CONCAT")    = static_cast<int>(LIBANE_OP_CONCAT);
+    m.attr("SLICE_BY_INDEX") = static_cast<int>(LIBANE_OP_SLICE_BY_INDEX);
+    m.attr("REDUCE_SUM") = static_cast<int>(LIBANE_OP_REDUCE_SUM);
+    m.attr("REDUCE_MEAN") = static_cast<int>(LIBANE_OP_REDUCE_MEAN);
+    m.attr("REDUCE_MAX") = static_cast<int>(LIBANE_OP_REDUCE_MAX);
     m.attr("SILU")      = static_cast<int>(LIBANE_OP_SILU);
     m.attr("RMSNORM")   = static_cast<int>(LIBANE_OP_RMSNORM);
 

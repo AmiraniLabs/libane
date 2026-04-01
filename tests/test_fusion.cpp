@@ -132,6 +132,92 @@ TEST_CASE("mul_fragment: two inputs, side_input_name set", "[fragment]") {
     CHECK(has(f.body, "gated = mul(x=chain, y=gate)"));
 }
 
+TEST_CASE("sub_fragment: two inputs, side_input_name set", "[fragment]") {
+    auto f = MilBuilder::sub_fragment(512, 128, "lhs", "rhs", "diff");
+    CHECK(f.side_input_name == "rhs");
+    CHECK(has(f.body, "diff = sub(x=lhs, y=rhs)"));
+}
+
+TEST_CASE("real_div_fragment: two inputs, side_input_name set", "[fragment]") {
+    auto f = MilBuilder::real_div_fragment(512, 128, "num", "den", "quo");
+    CHECK(f.side_input_name == "den");
+    CHECK(has(f.body, "quo = real_div(x=num, y=den)"));
+}
+
+TEST_CASE("sqrt_fragment: one input, no side input", "[fragment]") {
+    auto f = MilBuilder::sqrt_fragment(512, 128, "x", "rt");
+    CHECK(f.input_name == "x");
+    CHECK(f.side_input_name.empty());
+    CHECK(has(f.body, "rt = sqrt(x=x)"));
+}
+
+TEST_CASE("log_fragment: emits epsilon const and unary log", "[fragment]") {
+    auto f = MilBuilder::log_fragment(512, 128, "x", "lg");
+    CHECK(f.input_name == "x");
+    CHECK(f.side_input_name.empty());
+    CHECK(has(f.body, "lg_eps = const()"));
+    CHECK(has(f.body, "fp16(0x1.0cp-17)"));
+    CHECK(has(f.body, "lg = log(epsilon=lg_eps, x=x)"));
+}
+
+TEST_CASE("rsqrt_fragment: emits epsilon const and unary rsqrt", "[fragment]") {
+    auto f = MilBuilder::rsqrt_fragment(512, 128, "x", "rr");
+    CHECK(f.input_name == "x");
+    CHECK(f.side_input_name.empty());
+    CHECK(has(f.body, "rr_eps = const()"));
+    CHECK(has(f.body, "fp16(0x1.0cp-17)"));
+    CHECK(has(f.body, "rr = rsqrt(epsilon=rr_eps, x=x)"));
+}
+
+TEST_CASE("concat_fragment: axis and interleave const params emitted", "[fragment]") {
+    auto f = MilBuilder::concat_fragment(256, 512, 128, "lhs", "rhs", "cat");
+    CHECK(f.input_name == "lhs");
+    CHECK(f.side_input_name == "rhs");
+    CHECK(f.output_shape == S(768, 128));
+    CHECK(has(f.body, "cat_ax = const()"));
+    CHECK(has(f.body, "val=int32(1)"));
+    CHECK(has(f.body, "cat_id = const()"));
+    CHECK(has(f.body, "val=bool(false)"));
+    CHECK(has(f.body, "cat = concat(axis=cat_ax, interleave=cat_id, values=(lhs, rhs))"));
+}
+
+TEST_CASE("slice_by_index_fragment: begin/end/strides const params emitted", "[fragment]") {
+    auto f = MilBuilder::slice_by_index_fragment(512, 128, 256, 64, "x", "sl");
+    CHECK(f.input_name == "x");
+    CHECK(f.side_input_name.empty());
+    CHECK(f.output_shape == S(256, 64));
+    CHECK(has(f.body, "sl_bg = const()"));
+    CHECK(has(f.body, "val=tensor<int32, [4]>([0,0,0,0])"));
+    CHECK(has(f.body, "sl_ed = const()"));
+    CHECK(has(f.body, "val=tensor<int32, [4]>([1,256,1,64])"));
+    CHECK(has(f.body, "sl_st = const()"));
+    CHECK(has(f.body, "slice_by_index(begin=sl_bg, end=sl_ed, strides=sl_st, x=x)"));
+}
+
+TEST_CASE("reduce_sum_fragment: axis+keep_dims const params emitted", "[fragment]") {
+    auto f = MilBuilder::reduce_sum_fragment(512, 128, "x", "rs");
+    CHECK(f.input_name == "x");
+    CHECK(f.side_input_name.empty());
+    CHECK(f.output_shape == S(1, 128));
+    CHECK(has(f.body, "rs_ax = const()"));
+    CHECK(has(f.body, "val=tensor<int32, [1]>([1])"));
+    CHECK(has(f.body, "rs_kd = const()"));
+    CHECK(has(f.body, "val=bool(true)"));
+    CHECK(has(f.body, "rs = reduce_sum(x=x, axes=rs_ax, keep_dims=rs_kd)"));
+}
+
+TEST_CASE("reduce_mean_fragment: axis+keep_dims const params emitted", "[fragment]") {
+    auto f = MilBuilder::reduce_mean_fragment(512, 128, "x", "rm");
+    CHECK(f.output_shape == S(1, 128));
+    CHECK(has(f.body, "rm = reduce_mean(x=x, axes=rm_ax, keep_dims=rm_kd)"));
+}
+
+TEST_CASE("reduce_max_fragment: axis+keep_dims const params emitted", "[fragment]") {
+    auto f = MilBuilder::reduce_max_fragment(512, 128, "x", "rmax");
+    CHECK(f.output_shape == S(1, 128));
+    CHECK(has(f.body, "rmax = reduce_max(x=x, axes=rmax_ax, keep_dims=rmax_kd)"));
+}
+
 TEST_CASE("transpose_fragment: shape swap, no weights", "[fragment]") {
     auto f = MilBuilder::transpose_fragment(512, 128, "x", "xt");
     CHECK(f.output_shape.channels == 128);
@@ -139,6 +225,21 @@ TEST_CASE("transpose_fragment: shape swap, no weights", "[fragment]") {
     CHECK(f.weight_file.empty());
     CHECK(has(f.body, "xt_perm"));
     CHECK(has(f.body, "xt = transpose(perm=xt_perm, x=x)"));
+}
+
+TEST_CASE("reshape_fragment: emits shape const and reshape op", "[fragment]") {
+    auto f = MilBuilder::reshape_fragment(512, 128, 1024, 64, "x", "xr");
+    CHECK(f.weight_file.empty());
+    CHECK(f.output_shape == S(1024, 64));
+    CHECK(has(f.body, "xr_shape"));
+    CHECK(has(f.body, "val=tensor<int32, [4]>([1,1024,1,64])"));
+    CHECK(has(f.body, "xr = reshape(shape=xr_shape, x=x)"));
+}
+
+TEST_CASE("reshape_fragment: mismatched numel throws", "[fragment]") {
+    CHECK_THROWS_AS(
+        MilBuilder::reshape_fragment(512, 128, 1024, 128, "x", "bad"),
+        std::invalid_argument);
 }
 
 /* ── Prefix collision: two gelu fragments must not share var names ────────── */
@@ -201,6 +302,67 @@ TEST_CASE("build_fused: matmul -> gelu chain", "[fused]") {
 
     CHECK(prog.output_shape == S(2048, 128));
     CHECK(prog.all_weight_names.size() == 1);
+}
+
+TEST_CASE("build_fused: matmul -> reshape -> gelu chain", "[fused]") {
+    auto f0 = MilBuilder::matmul_fragment (512, 256, 128, "x",  "h",  "w0.bin");
+    auto f1 = MilBuilder::reshape_fragment(256, 128, 1024, 32,  "h",  "r");
+    auto f2 = MilBuilder::gelu_fragment   (1024, 32,            "r",  "out");
+    auto prog = MilBuilder::build_fused("x", S(512, 128), {f0, f1, f2});
+
+    CHECK(has(prog.text, "r = reshape(shape=r_shape, x=h)"));
+    CHECK(has(prog.text, "out_gelu"));
+    CHECK(has(prog.text, "} -> (out)"));
+    CHECK(prog.output_shape == S(1024, 32));
+}
+
+TEST_CASE("build_fused: matmul -> concat chain", "[fused]") {
+    auto f0 = MilBuilder::matmul_fragment(512, 256, 128, "x", "proj", "w0.bin");
+    auto f1 = MilBuilder::concat_fragment(256, 128, 128, "proj", "side", "out");
+    std::vector<FusedInput> inputs = {{"x", S(512, 128)}, {"side", S(128, 128)}};
+    auto prog = MilBuilder::build_fused(inputs, {f0, f1});
+
+    CHECK(has(prog.text, "out = concat(axis=out_ax, interleave=out_id, values=(proj, side))"));
+    CHECK(has(prog.text, "} -> (out)"));
+    CHECK(prog.output_shape == S(384, 128));
+}
+
+TEST_CASE("build_fused: matmul -> slice_by_index chain", "[fused]") {
+    auto f0 = MilBuilder::matmul_fragment(512, 512, 128, "x", "proj", "w0.bin");
+    auto f1 = MilBuilder::slice_by_index_fragment(512, 128, 256, 64, "proj", "out");
+    auto prog = MilBuilder::build_fused("x", S(512, 128), {f0, f1});
+
+    CHECK(has(prog.text, "out = slice_by_index(begin=out_bg, end=out_ed, strides=out_st, x=proj)"));
+    CHECK(has(prog.text, "} -> (out)"));
+    CHECK(prog.output_shape == S(256, 64));
+}
+
+TEST_CASE("build_fused: matmul -> reduce_sum chain", "[fused]") {
+    auto f0 = MilBuilder::matmul_fragment(512, 512, 128, "x", "proj", "w0.bin");
+    auto f1 = MilBuilder::reduce_sum_fragment(512, 128, "proj", "out");
+    auto prog = MilBuilder::build_fused("x", S(512, 128), {f0, f1});
+
+    CHECK(has(prog.text, "out = reduce_sum(x=proj, axes=out_ax, keep_dims=out_kd)"));
+    CHECK(has(prog.text, "} -> (out)"));
+    CHECK(prog.output_shape == S(1, 128));
+}
+
+TEST_CASE("build_fused: matmul -> reduce_mean chain", "[fused]") {
+    auto f0 = MilBuilder::matmul_fragment(512, 512, 128, "x", "proj", "w0.bin");
+    auto f1 = MilBuilder::reduce_mean_fragment(512, 128, "proj", "out");
+    auto prog = MilBuilder::build_fused("x", S(512, 128), {f0, f1});
+
+    CHECK(has(prog.text, "out = reduce_mean(x=proj, axes=out_ax, keep_dims=out_kd)"));
+    CHECK(prog.output_shape == S(1, 128));
+}
+
+TEST_CASE("build_fused: matmul -> reduce_max chain", "[fused]") {
+    auto f0 = MilBuilder::matmul_fragment(512, 512, 128, "x", "proj", "w0.bin");
+    auto f1 = MilBuilder::reduce_max_fragment(512, 128, "proj", "out");
+    auto prog = MilBuilder::build_fused("x", S(512, 128), {f0, f1});
+
+    CHECK(has(prog.text, "out = reduce_max(x=proj, axes=out_ax, keep_dims=out_kd)"));
+    CHECK(prog.output_shape == S(1, 128));
 }
 
 TEST_CASE("build_fused: matmul -> gelu -> matmul (full FFN op)", "[fused]") {
@@ -448,6 +610,155 @@ TEST_CASE("matmul -> add(+residual) fuses with residual as side input",
     }
     CHECK(has_x);
     CHECK(has_res);
+}
+
+TEST_CASE("matmul -> concat(+side) fuses with side input", "[fusion][groups]") {
+    AneGraph g;
+    TensorId x    = g.add_input("x", S(512, 128));
+    TensorId side = g.add_input("side", S(128, 128));
+
+    auto w = fp16_ones(512 * 256);
+    TensorId proj = g.add_op(LIBANE_OP_MATMUL, {x}, S(256, 128),
+                              w.data(), w.size() * 2);
+    TensorId out  = g.add_op(LIBANE_OP_CONCAT, {proj, side}, S(384, 128));
+    g.mark_output(out);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+    CHECK(groups[0].inputs.size() == 2);
+}
+
+TEST_CASE("matmul -> slice_by_index fuses as linear chain", "[fusion][groups]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(512, 128));
+    auto w = fp16_ones(512 * 512);
+    TensorId proj = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                              w.data(), w.size() * 2);
+    TensorId out = g.add_op(LIBANE_OP_SLICE_BY_INDEX, {proj}, S(256, 64));
+    g.mark_output(out);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+}
+
+TEST_CASE("matmul -> reduce_sum fuses as linear chain", "[fusion][groups]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(512, 128));
+    auto w = fp16_ones(512 * 512);
+    TensorId proj = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                              w.data(), w.size() * 2);
+    TensorId out = g.add_op(LIBANE_OP_REDUCE_SUM, {proj}, S(1, 128));
+    g.mark_output(out);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+}
+
+TEST_CASE("matmul -> reduce_mean fuses as linear chain", "[fusion][groups]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(512, 128));
+    auto w = fp16_ones(512 * 512);
+    TensorId proj = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                              w.data(), w.size() * 2);
+    TensorId out = g.add_op(LIBANE_OP_REDUCE_MEAN, {proj}, S(1, 128));
+    g.mark_output(out);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+}
+
+TEST_CASE("matmul -> reduce_max fuses as linear chain", "[fusion][groups]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(512, 128));
+    auto w = fp16_ones(512 * 512);
+    TensorId proj = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                              w.data(), w.size() * 2);
+    TensorId out = g.add_op(LIBANE_OP_REDUCE_MAX, {proj}, S(1, 128));
+    g.mark_output(out);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+}
+
+TEST_CASE("matmul -> sub(+side) fuses with side input", "[fusion][groups]") {
+    AneGraph g;
+    TensorId x    = g.add_input("x", S(512, 128));
+    TensorId side = g.add_input("side", S(512, 128));
+
+    auto w = fp16_ones(512 * 512);
+    TensorId proj = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                              w.data(), w.size() * 2);
+    TensorId out  = g.add_op(LIBANE_OP_SUB, {proj, side}, S(512, 128));
+    g.mark_output(out);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+    CHECK(groups[0].inputs.size() == 2);
+}
+
+TEST_CASE("matmul -> real_div(+side) fuses with side input", "[fusion][groups]") {
+    AneGraph g;
+    TensorId x    = g.add_input("x", S(512, 128));
+    TensorId side = g.add_input("side", S(512, 128));
+
+    auto w = fp16_ones(512 * 512);
+    TensorId proj = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                              w.data(), w.size() * 2);
+    TensorId out  = g.add_op(LIBANE_OP_REAL_DIV, {proj, side}, S(512, 128));
+    g.mark_output(out);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+    CHECK(groups[0].inputs.size() == 2);
+}
+
+TEST_CASE("matmul -> sqrt fuses as linear chain", "[fusion][groups]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(512, 128));
+    auto w = fp16_ones(512 * 512);
+    TensorId proj = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                              w.data(), w.size() * 2);
+    TensorId out = g.add_op(LIBANE_OP_SQRT, {proj}, S(512, 128));
+    g.mark_output(out);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+}
+
+TEST_CASE("matmul -> log fuses as linear chain", "[fusion][groups]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(512, 128));
+    auto w = fp16_ones(512 * 512);
+    TensorId proj = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                              w.data(), w.size() * 2);
+    TensorId out = g.add_op(LIBANE_OP_LOG, {proj}, S(512, 128));
+    g.mark_output(out);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+}
+
+TEST_CASE("matmul -> rsqrt fuses as linear chain", "[fusion][groups]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(512, 128));
+    auto w = fp16_ones(512 * 512);
+    TensorId proj = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                              w.data(), w.size() * 2);
+    TensorId out = g.add_op(LIBANE_OP_RSQRT, {proj}, S(512, 128));
+    g.mark_output(out);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
 }
 
 TEST_CASE("binary op with intra-group side input is NOT fused", "[fusion][groups]") {

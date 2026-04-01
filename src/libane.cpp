@@ -211,6 +211,21 @@ libane_handle_t libane_compile(libane_op_t op,
             case LIBANE_OP_MUL:
                 mil_prog = libane::mil::MilBuilder::mul(ms.channels, ms.seq);
                 break;
+            case LIBANE_OP_SUB:
+                mil_prog = libane::mil::MilBuilder::sub(ms.channels, ms.seq);
+                break;
+            case LIBANE_OP_REAL_DIV:
+                mil_prog = libane::mil::MilBuilder::real_div(ms.channels, ms.seq);
+                break;
+            case LIBANE_OP_SQRT:
+                mil_prog = libane::mil::MilBuilder::sqrt(ms.channels, ms.seq);
+                break;
+            case LIBANE_OP_LOG:
+                mil_prog = libane::mil::MilBuilder::log(ms.channels, ms.seq);
+                break;
+            case LIBANE_OP_RSQRT:
+                mil_prog = libane::mil::MilBuilder::rsqrt(ms.channels, ms.seq);
+                break;
             case LIBANE_OP_LAYER_NORM:
             case LIBANE_OP_LAYERNORM:
                 mil_prog = libane::mil::MilBuilder::layernorm(ms.channels, ms.seq);
@@ -229,6 +244,24 @@ libane_handle_t libane_compile(libane_op_t op,
                 return nullptr;
             case LIBANE_OP_CAST:
                 set_error("CAST not supported via libane_compile");
+                return nullptr;
+            case LIBANE_OP_RESHAPE:
+                set_error("RESHAPE not supported via libane_compile (use graph API)");
+                return nullptr;
+            case LIBANE_OP_CONCAT:
+                set_error("CONCAT not supported via libane_compile (use graph API)");
+                return nullptr;
+            case LIBANE_OP_SLICE_BY_INDEX:
+                set_error("SLICE_BY_INDEX not supported via libane_compile (use graph API)");
+                return nullptr;
+            case LIBANE_OP_REDUCE_SUM:
+                set_error("REDUCE_SUM not supported via libane_compile (use graph API)");
+                return nullptr;
+            case LIBANE_OP_REDUCE_MEAN:
+                set_error("REDUCE_MEAN not supported via libane_compile (use graph API)");
+                return nullptr;
+            case LIBANE_OP_REDUCE_MAX:
+                set_error("REDUCE_MAX not supported via libane_compile (use graph API)");
                 return nullptr;
             default:
                 set_error("op %d not supported", (int)op);
@@ -341,23 +374,19 @@ libane_status_t libane_execute(libane_handle_t h,
     if (entry.is_ane && entry.backend_handle) {
 #ifdef __APPLE__
         auto* prog = static_cast<libane::runtime::AneProgram*>(entry.backend_handle);
+        auto& pool = libane::global_buffer_pool();
 
-        // Acquire IOSurface-backed buffers
-        auto in_buf  = libane::global_buffer_pool().acquire_with_data(input, numel * 2);
-        auto out_buf = libane::global_buffer_pool().acquire(numel * 2);
+        PooledBuffer in_buf(pool.acquire_with_data(input, numel * 2), pool);
+        PooledBuffer out_buf(pool.acquire(numel * 2), pool);
 
         bool ok = libane::runtime::ane_execute(prog,
                                                in_buf->iosurface(),
                                                out_buf->iosurface());
         if (ok) {
             out_buf->copy_to(output, numel * 2);
-            libane::global_buffer_pool().release(std::move(in_buf));
-            libane::global_buffer_pool().release(std::move(out_buf));
             return LIBANE_OK;
         }
 
-        libane::global_buffer_pool().release(std::move(in_buf));
-        libane::global_buffer_pool().release(std::move(out_buf));
         set_error("ANE execute failed: %s", libane::runtime::ane_last_error());
         return LIBANE_ERR_EXECUTE_FAILED;
 #endif
@@ -387,10 +416,11 @@ libane_status_t libane_execute2(libane_handle_t h,
     if (entry.is_ane && entry.backend_handle) {
 #ifdef __APPLE__
         auto* prog = static_cast<libane::runtime::AneProgram*>(entry.backend_handle);
+        auto& pool = libane::global_buffer_pool();
 
-        auto in0_buf = libane::global_buffer_pool().acquire_with_data(input0, bytes);
-        auto in1_buf = libane::global_buffer_pool().acquire_with_data(input1, bytes);
-        auto out_buf = libane::global_buffer_pool().acquire(bytes);
+        PooledBuffer in0_buf(pool.acquire_with_data(input0, bytes), pool);
+        PooledBuffer in1_buf(pool.acquire_with_data(input1, bytes), pool);
+        PooledBuffer out_buf(pool.acquire(bytes), pool);
 
         bool ok = libane::runtime::ane_execute_multi(
             prog,
@@ -399,15 +429,9 @@ libane_status_t libane_execute2(libane_handle_t h,
 
         if (ok) {
             out_buf->copy_to(output, bytes);
-            libane::global_buffer_pool().release(std::move(in0_buf));
-            libane::global_buffer_pool().release(std::move(in1_buf));
-            libane::global_buffer_pool().release(std::move(out_buf));
             return LIBANE_OK;
         }
 
-        libane::global_buffer_pool().release(std::move(in0_buf));
-        libane::global_buffer_pool().release(std::move(in1_buf));
-        libane::global_buffer_pool().release(std::move(out_buf));
         set_error("ANE execute2 failed: %s", libane::runtime::ane_last_error());
         return LIBANE_ERR_EXECUTE_FAILED;
 #endif
@@ -543,7 +567,9 @@ libane_status_t libane_matmul_f16(const libane_f16_t* A,
                     prog = ane_prog;
                 }
                 entry_ptr = cache().put(std::move(e));
-            } catch (...) {}
+            } catch (const std::exception& ex) {
+                libane_log(LIBANE_LOG_DEBUG, "matmul_f16 ANE compile failed: %s", ex.what());
+            }
         }
 
         if (prog) {
@@ -556,8 +582,9 @@ libane_status_t libane_matmul_f16(const libane_f16_t* A,
             std::vector<libane_f16_t> Y_ane(static_cast<size_t>(M) * N);
             pack_matmul_input_for_ane(A, A_ane.data(), M, K);
 
-            auto in_buf  = libane::global_buffer_pool().acquire_with_data(A_ane.data(), in_bytes);
-            auto out_buf = libane::global_buffer_pool().acquire(out_bytes);
+            auto& pool = libane::global_buffer_pool();
+            PooledBuffer in_buf(pool.acquire_with_data(A_ane.data(), in_bytes), pool);
+            PooledBuffer out_buf(pool.acquire(out_bytes), pool);
 
             bool ok = libane::runtime::ane_execute(prog,
                                                     in_buf->iosurface(),
@@ -565,12 +592,8 @@ libane_status_t libane_matmul_f16(const libane_f16_t* A,
             if (ok) {
                 out_buf->copy_to(Y_ane.data(), out_bytes);
                 unpack_matmul_output_from_ane(Y_ane.data(), C, M, N);
-                libane::global_buffer_pool().release(std::move(in_buf));
-                libane::global_buffer_pool().release(std::move(out_buf));
                 return LIBANE_OK;
             }
-            libane::global_buffer_pool().release(std::move(in_buf));
-            libane::global_buffer_pool().release(std::move(out_buf));
 #endif
         }
     }
@@ -752,6 +775,130 @@ libane_status_t libane_graph_execute(libane_compiled_graph_t cg,
         return LIBANE_ERR_EXECUTE_FAILED;
     }
     return LIBANE_OK;
+}
+
+/* ── Raw MIL probe API ───────────────────────────────────────────────────── */
+
+libane_mil_handle_t libane_mil_compile(const char*   mil_text,
+                                        const char**  weight_names,
+                                        const void**  weight_data,
+                                        const size_t* weight_sizes,
+                                        size_t        num_weights) {
+    if (!mil_text) {
+        set_error("libane_mil_compile: null mil_text");
+        return nullptr;
+    }
+    libane::runtime::initialize();
+    if (!use_ane()) {
+        set_error("libane_mil_compile: ANE unavailable: %s",
+                  libane::runtime::fallback_reason());
+        return nullptr;
+    }
+
+    std::vector<libane::runtime::WeightEntry> wentries;
+    wentries.reserve(num_weights);
+    for (size_t i = 0; i < num_weights; ++i) {
+        if (!weight_names || !weight_names[i] || !weight_data || !weight_data[i]) {
+            set_error("libane_mil_compile: null weight entry at index %zu", i);
+            return nullptr;
+        }
+        auto blob = libane::mil::WeightBlob::from_fp16(weight_data[i], weight_sizes[i]);
+        wentries.push_back({weight_names[i], blob.data});
+    }
+
+    auto* prog = libane::runtime::ane_compile(mil_text, wentries, "mil_probe");
+    if (!prog) {
+        set_error("libane_mil_compile: %s", libane::runtime::ane_last_error());
+        return nullptr;
+    }
+
+    auto* h = new (std::nothrow) libane_mil_program_s{};
+    if (!h) {
+        libane::runtime::ane_unload(prog);
+        set_error("libane_mil_compile: out of memory");
+        return nullptr;
+    }
+    h->prog = prog;
+    return h;
+}
+
+libane_status_t libane_mil_execute(libane_mil_handle_t h,
+                                    const void**  in_data,
+                                    const size_t* in_sizes,
+                                    size_t        num_inputs,
+                                    void**        out_data,
+                                    const size_t* out_sizes,
+                                    size_t        num_outputs) {
+    if (!h || !h->prog) {
+        set_error("libane_mil_execute: null handle");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+    if (num_inputs > 0 && (!in_data || !in_sizes)) {
+        set_error("libane_mil_execute: null input arrays");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+    if (num_outputs > 0 && (!out_data || !out_sizes)) {
+        set_error("libane_mil_execute: null output arrays");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+
+#ifdef __APPLE__
+    // Satisfy ANE IOSurface uniform-alloc constraints (#2, #4, #18).
+    // All input IOSurfaces share one alloc size; all outputs share another.
+    // Both are rounded up to the 49 KB ANE minimum.
+    static constexpr size_t kMinIOS = 49152;
+    size_t max_in  = kMinIOS;
+    size_t max_out = kMinIOS;
+    for (size_t i = 0; i < num_inputs;  ++i) max_in  = std::max(max_in,  in_sizes[i]);
+    for (size_t i = 0; i < num_outputs; ++i) max_out = std::max(max_out, out_sizes[i]);
+
+    auto& pool = libane::global_buffer_pool();
+
+    std::vector<std::unique_ptr<libane::AneBuffer>> in_bufs, out_bufs;
+    in_bufs.reserve(num_inputs);
+    out_bufs.reserve(num_outputs);
+    std::vector<IOSurfaceRef> in_ios, out_ios;
+    in_ios.reserve(num_inputs);
+    out_ios.reserve(num_outputs);
+
+    for (size_t i = 0; i < num_inputs; ++i) {
+        auto buf = pool.acquire(max_in);
+        buf->copy_from(in_data[i], in_sizes[i]);
+        in_ios.push_back(buf->iosurface());
+        in_bufs.push_back(std::move(buf));
+    }
+    for (size_t i = 0; i < num_outputs; ++i) {
+        auto buf = pool.acquire(max_out);
+        out_ios.push_back(buf->iosurface());
+        out_bufs.push_back(std::move(buf));
+    }
+
+    bool ok = libane::runtime::ane_execute_multi(h->prog, in_ios, out_ios);
+
+    if (ok) {
+        for (size_t i = 0; i < num_outputs; ++i)
+            out_bufs[i]->copy_to(out_data[i], out_sizes[i]);
+    }
+
+    for (auto& b : in_bufs)  pool.release(std::move(b));
+    for (auto& b : out_bufs) pool.release(std::move(b));
+
+    if (!ok) {
+        set_error("libane_mil_execute: %s", libane::runtime::ane_last_error());
+        return LIBANE_ERR_EXECUTE_FAILED;
+    }
+    return LIBANE_OK;
+#else
+    (void)in_data; (void)in_sizes; (void)out_data; (void)out_sizes;
+    set_error("libane_mil_execute: ANE not available on this platform");
+    return LIBANE_ERR_UNAVAILABLE;
+#endif
+}
+
+void libane_mil_release(libane_mil_handle_t h) {
+    if (!h) return;
+    if (h->prog) libane::runtime::ane_unload(h->prog);
+    delete h;
 }
 
 } // extern "C"

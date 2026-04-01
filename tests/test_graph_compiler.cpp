@@ -119,6 +119,23 @@ TEST_CASE("build_plan: matmul+gelu fuse into one group", "[compiler][fusion]") {
     CHECK(plan.groups[0].output == t2);
 }
 
+TEST_CASE("build_plan: matmul+reshape+gelu fuse into one group", "[compiler][fusion]") {
+    AneGraph g;
+    auto w = matmul_weights(512, 256);
+    TensorId x  = g.add_input("x", S(512, 128));        // numel 65536
+    TensorId t1 = g.add_op(LIBANE_OP_MATMUL,  {x},  S(256, 128),
+                             w.data(), w.size());
+    TensorId t2 = g.add_op(LIBANE_OP_RESHAPE, {t1}, S(1024, 32)); // same numel
+    TensorId t3 = g.add_op(LIBANE_OP_GELU,    {t2}, S(1024, 32));
+    g.mark_output(t3);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 3);
+    CHECK(plan.groups[0].output == t3);
+}
+
 TEST_CASE("build_plan: matmul+rmsnorm+gelu fuse into one group", "[compiler][fusion]") {
     AneGraph g;
     auto wm  = matmul_weights(512, 256);
@@ -196,6 +213,175 @@ TEST_CASE("build_plan: matmul+add fuses with side input tracked", "[compiler][fu
     CHECK(grp.inputs.size() == 2);
     CHECK(grp.output == t2);
     CHECK(grp.node_ids.size() == 2);
+}
+
+TEST_CASE("build_plan: matmul+sub fuses with side input tracked", "[compiler][fusion]") {
+    AneGraph g;
+    auto wm = matmul_weights(512, 256);
+    TensorId x   = g.add_input("x",   S(512, 128));
+    TensorId res = g.add_input("res", S(256, 128));
+    TensorId t1  = g.add_op(LIBANE_OP_MATMUL, {x},       S(256, 128),
+                              wm.data(), wm.size());
+    TensorId t2  = g.add_op(LIBANE_OP_SUB,    {t1, res}, S(256, 128));
+    g.mark_output(t2);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    const auto& grp = plan.groups[0];
+    CHECK(grp.node_ids.size() == 2);
+    CHECK(grp.inputs.size() == 2);
+    CHECK(grp.output == t2);
+}
+
+TEST_CASE("build_plan: matmul+real_div fuses with side input tracked", "[compiler][fusion]") {
+    AneGraph g;
+    auto wm = matmul_weights(512, 256);
+    TensorId x   = g.add_input("x",   S(512, 128));
+    TensorId den = g.add_input("den", S(256, 128));
+    TensorId t1  = g.add_op(LIBANE_OP_MATMUL,   {x},       S(256, 128),
+                              wm.data(), wm.size());
+    TensorId t2  = g.add_op(LIBANE_OP_REAL_DIV, {t1, den}, S(256, 128));
+    g.mark_output(t2);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    const auto& grp = plan.groups[0];
+    CHECK(grp.node_ids.size() == 2);
+    CHECK(grp.inputs.size() == 2);
+    CHECK(grp.output == t2);
+}
+
+TEST_CASE("build_plan: matmul+concat fuses with side input tracked", "[compiler][fusion]") {
+    AneGraph g;
+    auto wm = matmul_weights(512, 256);
+    TensorId x    = g.add_input("x",    S(512, 128));
+    TensorId side = g.add_input("side", S(128, 128));
+    TensorId t1   = g.add_op(LIBANE_OP_MATMUL, {x},       S(256, 128),
+                               wm.data(), wm.size());
+    TensorId t2   = g.add_op(LIBANE_OP_CONCAT, {t1, side}, S(384, 128));
+    g.mark_output(t2);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    const auto& grp = plan.groups[0];
+    CHECK(grp.node_ids.size() == 2);
+    CHECK(grp.inputs.size() == 2);
+    CHECK(grp.output == t2);
+}
+
+TEST_CASE("build_plan: matmul+slice_by_index fuse into one group", "[compiler][fusion]") {
+    AneGraph g;
+    auto wm = matmul_weights(512, 512);
+    TensorId x  = g.add_input("x", S(512, 128));
+    TensorId t1 = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                             wm.data(), wm.size());
+    TensorId t2 = g.add_op(LIBANE_OP_SLICE_BY_INDEX, {t1}, S(256, 64));
+    g.mark_output(t2);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 2);
+    CHECK(plan.groups[0].output == t2);
+}
+
+TEST_CASE("build_plan: matmul+reduce_sum fuse into one group", "[compiler][fusion]") {
+    AneGraph g;
+    auto wm = matmul_weights(512, 512);
+    TensorId x  = g.add_input("x", S(512, 128));
+    TensorId t1 = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                             wm.data(), wm.size());
+    TensorId t2 = g.add_op(LIBANE_OP_REDUCE_SUM, {t1}, S(1, 128));
+    g.mark_output(t2);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 2);
+    CHECK(plan.groups[0].output == t2);
+}
+
+TEST_CASE("build_plan: matmul+reduce_mean fuse into one group", "[compiler][fusion]") {
+    AneGraph g;
+    auto wm = matmul_weights(512, 512);
+    TensorId x  = g.add_input("x", S(512, 128));
+    TensorId t1 = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                             wm.data(), wm.size());
+    TensorId t2 = g.add_op(LIBANE_OP_REDUCE_MEAN, {t1}, S(1, 128));
+    g.mark_output(t2);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 2);
+    CHECK(plan.groups[0].output == t2);
+}
+
+TEST_CASE("build_plan: matmul+reduce_max fuse into one group", "[compiler][fusion]") {
+    AneGraph g;
+    auto wm = matmul_weights(512, 512);
+    TensorId x  = g.add_input("x", S(512, 128));
+    TensorId t1 = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                             wm.data(), wm.size());
+    TensorId t2 = g.add_op(LIBANE_OP_REDUCE_MAX, {t1}, S(1, 128));
+    g.mark_output(t2);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 2);
+    CHECK(plan.groups[0].output == t2);
+}
+
+TEST_CASE("build_plan: matmul+sqrt fuse into one group", "[compiler][fusion]") {
+    AneGraph g;
+    auto wm = matmul_weights(512, 512);
+    TensorId x  = g.add_input("x", S(512, 128));
+    TensorId t1 = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                             wm.data(), wm.size());
+    TensorId t2 = g.add_op(LIBANE_OP_SQRT, {t1}, S(512, 128));
+    g.mark_output(t2);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 2);
+    CHECK(plan.groups[0].output == t2);
+}
+
+TEST_CASE("build_plan: matmul+log fuse into one group", "[compiler][fusion]") {
+    AneGraph g;
+    auto wm = matmul_weights(512, 512);
+    TensorId x  = g.add_input("x", S(512, 128));
+    TensorId t1 = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                             wm.data(), wm.size());
+    TensorId t2 = g.add_op(LIBANE_OP_LOG, {t1}, S(512, 128));
+    g.mark_output(t2);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 2);
+    CHECK(plan.groups[0].output == t2);
+}
+
+TEST_CASE("build_plan: matmul+rsqrt fuse into one group", "[compiler][fusion]") {
+    AneGraph g;
+    auto wm = matmul_weights(512, 512);
+    TensorId x  = g.add_input("x", S(512, 128));
+    TensorId t1 = g.add_op(LIBANE_OP_MATMUL, {x}, S(512, 128),
+                             wm.data(), wm.size());
+    TensorId t2 = g.add_op(LIBANE_OP_RSQRT, {t1}, S(512, 128));
+    g.mark_output(t2);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 2);
+    CHECK(plan.groups[0].output == t2);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

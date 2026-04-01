@@ -1,6 +1,6 @@
 /**
  * libane — Apple Neural Engine Native C++ Runtime Library
- * Amirani Labs · v0.7.0
+ * Amirani Labs · v0.7.1
  *
  * Stable C ABI. ABI stability guaranteed across minor versions.
  * Uses AppleNeuralEngine.framework via dlopen — private API, intentional.
@@ -17,10 +17,10 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────────── */
 
-#define LIBANE_VERSION         "0.7.0"
+#define LIBANE_VERSION         "0.7.1"
 #define LIBANE_VERSION_MAJOR   0
 #define LIBANE_VERSION_MINOR   7
-#define LIBANE_VERSION_PATCH   0
+#define LIBANE_VERSION_PATCH   1
 
 /* ── fp16 portability ────────────────────────────────────────────────────── */
 
@@ -51,6 +51,17 @@ typedef enum {
     LIBANE_OP_SILU       = 9,
     LIBANE_OP_RMSNORM    = 10,
     LIBANE_OP_LAYERNORM  = 11,
+    LIBANE_OP_RESHAPE    = 12,
+    LIBANE_OP_CONCAT     = 13,
+    LIBANE_OP_SLICE_BY_INDEX = 14,
+    LIBANE_OP_REDUCE_SUM = 15,
+    LIBANE_OP_REDUCE_MEAN = 16,
+    LIBANE_OP_REDUCE_MAX = 17,
+    LIBANE_OP_SUB = 18,
+    LIBANE_OP_REAL_DIV = 19,
+    LIBANE_OP_SQRT = 20,
+    LIBANE_OP_LOG = 21,
+    LIBANE_OP_RSQRT = 22,
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */
@@ -368,6 +379,80 @@ libane_status_t libane_graph_execute(libane_compiled_graph_t cg,
                                       void**                  output_ptrs,
                                       const size_t*           output_bytes,
                                       size_t                  num_outputs);
+
+/* ── Raw MIL probe API ───────────────────────────────────────────────────── */
+
+/**
+ * Opaque handle to a compiled raw-MIL program.
+ * Created by libane_mil_compile(). Freed by libane_mil_release().
+ */
+typedef struct libane_mil_program_s* libane_mil_handle_t;
+
+/**
+ * Compile a raw MIL text program with optional weight files.
+ *
+ * This is the low-level probe API. It accepts arbitrary MIL text and bypasses
+ * the higher-level op abstractions used by libane_compile(). Useful for:
+ *   - Testing undocumented MIL ops and parameter combinations
+ *   - Running custom multi-op pipelines
+ *   - Numerical verification against CPU reference values
+ *
+ * Weight data must be raw fp16 bytes. The library adds the 128-byte ANE blob
+ * header automatically. Weight names must match the filename referenced in the
+ * MIL file() ops, e.g. "weight.bin".
+ *
+ * @param mil_text      NUL-terminated UTF-8 MIL program source.
+ * @param weight_names  Array of NUL-terminated weight filenames (NULL if num_weights == 0).
+ * @param weight_data   Array of raw fp16 weight data pointers.
+ * @param weight_sizes  Array of weight data byte lengths.
+ * @param num_weights   Number of weight entries (0 for weight-free programs).
+ * @return              Non-null handle on success; NULL on compile failure.
+ *                      Check libane_last_error() on NULL return.
+ *                      Returns NULL if ANE is unavailable.
+ */
+libane_mil_handle_t libane_mil_compile(const char*   mil_text,
+                                        const char**  weight_names,
+                                        const void**  weight_data,
+                                        const size_t* weight_sizes,
+                                        size_t        num_weights);
+
+/**
+ * Execute a compiled MIL program with multiple inputs and outputs.
+ *
+ * Inputs are mapped to MIL parameters by the ANE in alphabetical order of
+ * parameter name (Orion constraint #13). The caller must order in_data
+ * accordingly; the runtime enforces the reordering automatically.
+ *
+ * Automatically satisfies ANE IOSurface constraints:
+ *   - #4:  IOSurface allocations are padded to the 49 KB minimum.
+ *   - #18: All input IOSurfaces share a uniform allocation size.
+ *   - #2:  All output IOSurfaces share a uniform allocation size.
+ *
+ * @param h           Handle from libane_mil_compile().
+ * @param in_data     Array of fp16 input data pointers (in MIL alphabetical param order).
+ * @param in_sizes    Array of input byte sizes.
+ * @param num_inputs  Number of input buffers.
+ * @param out_data    Array of caller-allocated fp16 output buffers.
+ * @param out_sizes   Array of output buffer byte sizes.
+ * @param num_outputs Number of output buffers.
+ * @return            LIBANE_OK on success.
+ *                    LIBANE_ERR_INVALID_ARG for null arguments.
+ *                    LIBANE_ERR_EXECUTE_FAILED if the ANE dispatch fails.
+ *                    LIBANE_ERR_UNAVAILABLE on non-Apple platforms.
+ */
+libane_status_t libane_mil_execute(libane_mil_handle_t h,
+                                    const void**  in_data,
+                                    const size_t* in_sizes,
+                                    size_t        num_inputs,
+                                    void**        out_data,
+                                    const size_t* out_sizes,
+                                    size_t        num_outputs);
+
+/**
+ * Release a raw MIL handle and return its resources.
+ * Safe to call with NULL.
+ */
+void libane_mil_release(libane_mil_handle_t h);
 
 #ifdef __cplusplus
 }
