@@ -2607,6 +2607,68 @@ def scan_lowered_support(C: int = 64, S: int = 512) -> list[ProbeResult]:
     return results
 
 
+def scan_scatter_lowering_proto(C: int = 8, S: int = 32) -> list[ProbeResult]:
+    """
+    Prototype static-index scatter lowering via one-hot masks.
+
+    This does not use scatter ops directly. It demonstrates a decomposition
+    that uses only already-verified primitives:
+      out = base * (1 - mask) + updates * mask
+    where mask is a static one-hot-like tensor.
+    """
+    print("── Scatter lowering proto ───────────────────────────────────────")
+    if S % 8 != 0:
+        raise ValueError("S must be a multiple of 8")
+
+    n = C * S
+
+    def _run_case(name: str, mask: np.ndarray, base: np.ndarray, upd: np.ndarray) -> ProbeResult:
+        tt = f"tensor<fp16, [1,{C},1,{S}]>"
+        body = (
+            '        fp16 one = const()[name=string("one"), val=fp16(1.0)];\n'
+            f'        {tt} inv = sub(x=one, y=a_input2)[name=string("inv")];\n'
+            f'        {tt} xb = mul(x=a_input0, y=inv)[name=string("xb")];\n'
+            f'        {tt} uu = mul(x=a_input1, y=a_input2)[name=string("uu")];\n'
+            f'        {tt} z_output0 = add(x=xb, y=uu)[name=string("z_output0")];'
+        )
+        mil = mil_program(body, _sig3(C, S), "z_output0")
+        expected = (base * (1.0 - mask) + upd * mask).astype(np.float32)
+        r = probe_custom(
+            name,
+            mil,
+            [base.astype(np.float16), upd.astype(np.float16), mask.astype(np.float16)],
+            n,
+            expected=expected,
+            atol=0.05,
+        )
+        r.raw_acceptance = None
+        r.libane_lowered_support = bool(r.passed is True)
+        r.note = "static-index one-hot scatter decomposition (precomputed mask input)"
+        return r
+
+    base = np.linspace(-2.0, 2.0, n, dtype=np.float32).reshape(1, C, 1, S)
+    upd = (100.0 + np.arange(n, dtype=np.float32)).reshape(1, C, 1, S)
+
+    # Case 1: one target position per channel (channel-specific static index).
+    mask1 = np.zeros((1, C, 1, S), dtype=np.float32)
+    for c in range(C):
+        idx = (3 * c + 5) % S
+        mask1[0, c, 0, idx] = 1.0
+
+    # Case 2: two target positions per channel.
+    mask2 = np.zeros((1, C, 1, S), dtype=np.float32)
+    for c in range(C):
+        idx0 = (2 * c + 1) % S
+        idx1 = (5 * c + 7) % S
+        mask2[0, c, 0, idx0] = 1.0
+        mask2[0, c, 0, idx1] = 1.0
+
+    return [
+        _run_case("proto/scatter_static_onehot_single", mask1, base, upd),
+        _run_case("proto/scatter_static_onehot_double", mask2, base, upd),
+    ]
+
+
 def scan_all() -> list[ProbeResult]:
     """Run all scans and return combined results."""
     all_results: list[ProbeResult] = []
@@ -2805,6 +2867,8 @@ def _cli() -> None:
                         help="Run coremltools-vs-libane MIL differential for gap ops")
     parser.add_argument("--lowered-support", action="store_true",
                         help="Probe libane graph-lowering support (separate from raw MIL acceptance)")
+    parser.add_argument("--scatter-lowering-proto", action="store_true",
+                        help="Prototype static one-hot scatter decomposition using supported primitives")
     parser.add_argument("--sin-cos-sweep", action="store_true",
                         help="Run sin/cos input-range sweep")
     parser.add_argument("--all",        action="store_true",
@@ -2827,7 +2891,7 @@ def _cli() -> None:
         args.unary, args.binary, args.reductions, args.composite,
         args.intermediate, args.explore, args.params, args.params_all,
         args.round_semantics, args.dep_matrix, args.gap_ops, args.sig_sweep,
-        args.differential, args.lowered_support, args.sin_cos_sweep,
+        args.differential, args.lowered_support, args.scatter_lowering_proto, args.sin_cos_sweep,
     ])
 
     all_results: list[ProbeResult] = []
@@ -2862,6 +2926,8 @@ def _cli() -> None:
         all_results += scan_coreml_differential()
     if args.lowered_support:
         all_results += scan_lowered_support()
+    if args.scatter_lowering_proto:
+        all_results += scan_scatter_lowering_proto()
     if args.sin_cos_sweep:
         all_results += scan_sin_cos_ranges()
 
