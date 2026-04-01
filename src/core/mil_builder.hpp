@@ -26,7 +26,6 @@
  * Key facts from Orion §4 and maderix/ANE:
  *  - ANE tensors are ALWAYS [1, C, 1, S] (batch=1, height=1, no exceptions)
  *  - conv 1×1 is 3× faster than matmul on ANE — use conv for all linear projections
- *  - concat is banned (compiles but crashes at runtime)
  *  - S must be a multiple of 8, ≤ 65536; C ≤ 16384
  *  - conv bias is NOT supported — use a separate add op
  *  - GELU must use tanh approximation only
@@ -209,7 +208,7 @@ public:
     /**
      * RMSNorm: y = (x / rms(x)) * scale
      *
-     * Uses: rsqrt, mul operations on ANE.
+     * Uses: reduce_sum + pow(-0.5), mul operations on ANE.
      * scale: [1, C, 1, 1] broadcast constant.
      */
     static MilProgram rmsnorm(int C, int SP,
@@ -237,6 +236,35 @@ public:
      * Inputs named "x" and "y" (alphabetical order per ANE constraint #13).
      */
     static MilProgram mul(int C, int SP);
+
+    /**
+     * Elementwise subtraction. No weights.
+     * Inputs named "x" and "y" (alphabetical order per ANE constraint #13).
+     */
+    static MilProgram sub(int C, int SP);
+
+    /**
+     * Elementwise real division. No weights.
+     * Inputs named "x" and "y" (alphabetical order per ANE constraint #13).
+     */
+    static MilProgram real_div(int C, int SP);
+
+    /**
+     * Elementwise square root. No weights.
+     */
+    static MilProgram sqrt(int C, int SP);
+
+    /**
+     * Elementwise natural log with required epsilon.
+     * Epsilon is hardcoded to fp16(0x1.0cp-17) per ANE compiler constraint.
+     */
+    static MilProgram log(int C, int SP);
+
+    /**
+     * Elementwise reciprocal sqrt with required epsilon.
+     * Epsilon is hardcoded to fp16(0x1.0cp-17) per ANE compiler constraint.
+     */
+    static MilProgram rsqrt(int C, int SP);
 
     /**
      * SiLU activation: y = x * sigmoid(x). No weights.
@@ -275,7 +303,8 @@ public:
     //               Must be unique across all fragments in the fused group.
     //               All internal intermediate vars are named out_var+"_<suffix>".
     //
-    // For binary ops (add_fragment, mul_fragment), a second input is given via
+    // For binary ops (add_fragment, mul_fragment, sub_fragment, real_div_fragment),
+    // a second input is given via
     // side_var.  Both in_var and side_var appear as parameters of the fused
     // MIL function.
 
@@ -318,9 +347,58 @@ public:
                                      const std::string& side_var,
                                      const std::string& out_var);
 
+    static MilFragment sub_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& side_var,
+                                     const std::string& out_var);
+
+    static MilFragment real_div_fragment(int C, int SP,
+                                          const std::string& in_var,
+                                          const std::string& side_var,
+                                          const std::string& out_var);
+
+    static MilFragment sqrt_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
+    static MilFragment log_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& out_var);
+
+    static MilFragment rsqrt_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var);
+
+    static MilFragment concat_fragment(int in0_C, int in1_C, int SP,
+                                        const std::string& in_var,
+                                        const std::string& side_var,
+                                        const std::string& out_var);
+
+    static MilFragment slice_by_index_fragment(int in_C, int in_SP,
+                                                int out_C, int out_SP,
+                                                const std::string& in_var,
+                                                const std::string& out_var);
+
+    static MilFragment reduce_sum_fragment(int in_C, int SP,
+                                            const std::string& in_var,
+                                            const std::string& out_var);
+
+    static MilFragment reduce_mean_fragment(int in_C, int SP,
+                                             const std::string& in_var,
+                                             const std::string& out_var);
+
+    static MilFragment reduce_max_fragment(int in_C, int SP,
+                                            const std::string& in_var,
+                                            const std::string& out_var);
+
     static MilFragment transpose_fragment(int C, int SP,
                                            const std::string& in_var,
                                            const std::string& out_var);
+
+    static MilFragment reshape_fragment(int in_C, int in_SP,
+                                         int out_C, int out_SP,
+                                         const std::string& in_var,
+                                         const std::string& out_var);
 
     /* ── Fused program assembly ──────────────────────────────────────────── */
 
