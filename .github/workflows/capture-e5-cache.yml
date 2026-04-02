@@ -160,6 +160,39 @@ jobs:
           find /System -name "*.e5" 2>/dev/null | sort > e5_system_scan.txt || true
           wc -l e5_home_cache_scan.txt e5_system_scan.txt || true
 
+      - name: Collect discovered .e5 files into artifact payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p collected_e5
+          : > collected_e5_manifest.tsv
+
+          cat e5_files.txt e5_home_cache_scan.txt e5_system_scan.txt 2>/dev/null \
+            | sed '/^$/d' \
+            | sort -u > all_discovered_e5_paths.txt
+
+          while IFS= read -r p; do
+            [ -f "$p" ] || continue
+            sha="$(shasum -a 256 "$p" | awk '{print $1}')"
+            sz="$(wc -c < "$p" | tr -d ' ')"
+            # Keep filename stable + human-readable from source basename.
+            dst="collected_e5/${sha}_$(basename "$p")"
+            cp -f "$p" "$dst"
+
+            marker="unknown"
+            if strings -a "$p" | grep -q "AneInference"; then
+              marker="AneInference"
+            elif strings -a "$p" | grep -q "CpuInference"; then
+              marker="CpuInference"
+            elif strings -a "$p" | grep -q "MpsGraphInference"; then
+              marker="MpsGraphInference"
+            fi
+
+            printf '%s\t%s\t%s\t%s\t%s\n' "$sha" "$sz" "$marker" "$dst" "$p" >> collected_e5_manifest.tsv
+          done < all_discovered_e5_paths.txt
+
+          wc -l all_discovered_e5_paths.txt collected_e5_manifest.tsv || true
+
       - name: Archive cache directory
         shell: bash
         run: |
@@ -189,4 +222,7 @@ jobs:
             active_cache_base.txt
             e5_home_cache_scan.txt
             e5_system_scan.txt
+            all_discovered_e5_paths.txt
+            collected_e5_manifest.tsv
+            collected_e5/
           if-no-files-found: warn
