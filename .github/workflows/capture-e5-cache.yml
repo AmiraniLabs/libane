@@ -43,15 +43,22 @@ jobs:
           ./.venv/bin/python -m pip install --upgrade pip
           ./.venv/bin/python -m pip install coremltools numpy
 
-      - name: Clear existing e5 cache
+      - name: Prepare + validate e5 cache directory access
         shell: bash
         run: |
           set -euxo pipefail
           CACHE_DIR="$HOME/Library/Caches/com.apple.e5rt.e5bundlecache"
           rm -rf "$CACHE_DIR"
           mkdir -p "$CACHE_DIR"
+          test -d "$CACHE_DIR"
+          test -r "$CACHE_DIR"
+          test -w "$CACHE_DIR"
+          PROBE_FILE="$CACHE_DIR/.rw_probe_$$"
+          echo "probe" > "$PROBE_FILE"
+          test -f "$PROBE_FILE"
+          rm -f "$PROBE_FILE"
 
-      - name: Trigger CoreML compile + inference
+      - name: Trigger CoreML compile + inference (ANE required, no GPU fallback)
         shell: bash
         env:
           ITERATIONS: ${{ inputs.iterations }}
@@ -65,6 +72,19 @@ jobs:
           from coremltools.converters.mil import Builder as mb
 
           iters = int(os.environ.get("ITERATIONS", "8"))
+
+          # Hard gate: fail fast if no ANE compute device is exposed on this runner.
+          device_names = []
+          try:
+              from coremltools.models.compute_device import MLComputeDevice
+              device_names = [type(d).__name__ for d in MLComputeDevice.get_all_compute_devices()]
+          except Exception as e:
+              raise RuntimeError(f"Unable to enumerate CoreML compute devices: {e}") from e
+          print("compute_devices", device_names)
+          if not any("NeuralEngine" in name for name in device_names):
+              raise RuntimeError(
+                  "No Neural Engine compute device exposed. Refusing to run fallback path."
+              )
 
           @mb.program(input_specs=[mb.TensorSpec(shape=(1, 4), dtype=ct.converters.mil.mil.types.fp16)])
           def prog(x):
@@ -82,7 +102,8 @@ jobs:
           pkg_path = os.path.join(out_dir, "tiny_add.mlpackage")
           mlmodel.save(pkg_path)
 
-          model = ct.models.MLModel(pkg_path, compute_units=ct.ComputeUnit.ALL)
+          # CPU_AND_NE avoids GPU path; still fails earlier if NE is not exposed.
+          model = ct.models.MLModel(pkg_path, compute_units=ct.ComputeUnit.CPU_AND_NE)
           x = np.array([[1, 1, 1, 1]], dtype=np.float16)
           for _ in range(iters):
               _ = model.predict({"x": x})
@@ -95,9 +116,20 @@ jobs:
         run: |
           set -euxo pipefail
           CACHE_DIR="$HOME/Library/Caches/com.apple.e5rt.e5bundlecache"
-          find "$CACHE_DIR" -type f | sort > e5_cache_file_list.txt || true
-          find "$CACHE_DIR" -name "*.e5" -print | sort > e5_files.txt || true
-          wc -l e5_cache_file_list.txt e5_files.txt || true
+          find "$CACHE_DIR" -type f | sort > e5_cache_file_list.txt
+          find "$CACHE_DIR" -name "*.e5" -print | sort > e5_files.txt
+          wc -l e5_cache_file_list.txt e5_files.txt
+
+      - name: Enforce non-empty e5 output
+        shell: bash
+        run: |
+          set -euxo pipefail
+          E5_COUNT="$(wc -l < e5_files.txt)"
+          if [ "$E5_COUNT" -eq 0 ]; then
+            echo "No .e5 files generated under com.apple.e5rt.e5bundlecache."
+            echo "Failing intentionally to avoid silent fallback behavior."
+            exit 1
+          fi
 
       - name: Archive cache directory
         shell: bash
