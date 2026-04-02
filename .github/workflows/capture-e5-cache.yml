@@ -21,6 +21,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Show runner info
         shell: bash
         run: |
@@ -28,12 +33,13 @@ jobs:
           sw_vers
           uname -a
           sysctl -n machdep.cpu.brand_string || true
+          python --version
 
       - name: Set up Python virtualenv + deps
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m venv .venv
+          python -m venv .venv
           ./.venv/bin/python -m pip install --upgrade pip
           ./.venv/bin/python -m pip install coremltools numpy
 
