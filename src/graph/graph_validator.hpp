@@ -15,9 +15,18 @@
  *       matmul:    IC × OC × 2 bytes (IC from input tensor, OC from output tensor)
  *       rmsnorm:   C × 2 bytes (scale)
  *       layernorm: C × 2 × 2 bytes (gamma packed before beta)
+ *       reshape:   no weights, exactly one input, input/output numel equal
+ *       concat:    no weights, exactly two inputs, output C = C0 + C1, same S
+ *       slice_by_index: no weights, exactly one input, output dims <= input dims
+ *       reduce_sum: no weights, exactly one input, axis=1 keep_dims=true -> output C=1, same S
+ *       reduce_mean: same constraints as reduce_sum
+ *       reduce_max: same constraints as reduce_sum
+ *       sqrt:      no weights, exactly one input
+ *       log:       no weights, exactly one input
+ *       rsqrt:     no weights, exactly one input
  *       weight-free ops: weights must be empty
  *       conv2d / cast: unsupported in graph API
- *  7. Binary ops (ADD, MUL) and any other multi-input ops: all input
+ *  7. Binary arithmetic ops (ADD, MUL, SUB, REAL_DIV): all input
  *     tensors must have identical shapes (ANE constraint #18).
  *
  * All errors are collected before returning — the result contains every

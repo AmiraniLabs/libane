@@ -19,7 +19,18 @@ GELU: int
 SOFTMAX: int
 ADD: int
 MUL: int
+SUB: int
+REAL_DIV: int
+SQRT: int
+LOG: int
+RSQRT: int
 TRANSPOSE: int
+RESHAPE: int
+CONCAT: int
+SLICE_BY_INDEX: int
+REDUCE_SUM: int
+REDUCE_MEAN: int
+REDUCE_MAX: int
 SILU: int
 RMSNORM: int
 
@@ -38,7 +49,7 @@ def available() -> bool:
     ...
 
 def version() -> str:
-    """libane version string (e.g. '0.7.0')."""
+    """libane version string (e.g. '0.7.1')."""
     ...
 
 def last_error() -> str:

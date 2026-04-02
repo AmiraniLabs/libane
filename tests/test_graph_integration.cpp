@@ -394,6 +394,415 @@ TEST_CASE("T3: fused matmul+gelu via C API", "[integration][tier3][ane]") {
     libane_graph_release(g);
 }
 
+TEST_CASE("T3: concat via C API (axis=1, interleave=false)", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C0 = 32, C1 = 16, SP = 64;
+
+    auto* g = libane_graph_create();
+    REQUIRE(g != nullptr);
+
+    libane_shape_t s0; s0.dims[0]=1; s0.dims[1]=C0; s0.dims[2]=1; s0.dims[3]=SP; s0.ndim=4;
+    libane_shape_t s1; s1.dims[0]=1; s1.dims[1]=C1; s1.dims[2]=1; s1.dims[3]=SP; s1.ndim=4;
+    libane_shape_t so; so.dims[0]=1; so.dims[1]=C0+C1; so.dims[2]=1; so.dims[3]=SP; so.ndim=4;
+
+    uint32_t a = libane_graph_add_input(g, "a", s0);
+    uint32_t b = libane_graph_add_input(g, "b", s1);
+    REQUIRE(a != LIBANE_INVALID_TENSOR_ID);
+    REQUIRE(b != LIBANE_INVALID_TENSOR_ID);
+
+    uint32_t in_ids[2] = {a, b};
+    uint32_t cat = libane_graph_add_op(g, LIBANE_OP_CONCAT, in_ids, 2, so, nullptr, 0);
+    REQUIRE(cat != LIBANE_INVALID_TENSOR_ID);
+    CHECK(libane_graph_mark_output(g, cat, "out") == LIBANE_OK);
+
+    libane_compiled_graph_t cg = libane_graph_compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    auto a_data = fp16_fill(static_cast<size_t>(C0) * SP, 1.0f);
+    auto b_data = fp16_fill(static_cast<size_t>(C1) * SP, 2.0f);
+    auto out_data = std::vector<fp16>(static_cast<size_t>(C0 + C1) * SP, to_f16(0.0f));
+
+    const void* in_ptrs[2]  = {a_data.data(), b_data.data()};
+    size_t in_bytes[2]      = {a_data.size() * sizeof(fp16), b_data.size() * sizeof(fp16)};
+    void* out_ptrs[1]       = {out_data.data()};
+    size_t out_bytes[1]     = {out_data.size() * sizeof(fp16)};
+
+    libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 2, out_ptrs, out_bytes, 1);
+    CHECK(st == LIBANE_OK);
+
+    // Output is channel-concat(a, b): first C0*SP entries from a, then C1*SP from b.
+    for (size_t i = 0; i < static_cast<size_t>(C0) * SP; ++i)
+        CHECK(near(to_f32(out_data[i]), 1.0f));
+    for (size_t i = static_cast<size_t>(C0) * SP; i < out_data.size(); ++i)
+        CHECK(near(to_f32(out_data[i]), 2.0f));
+
+    libane_compiled_graph_release(cg);
+    libane_graph_release(g);
+}
+
+TEST_CASE("T3: slice_by_index via C API", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+    const int OC = 32, OSP = 32;
+
+    auto* g = libane_graph_create();
+    REQUIRE(g != nullptr);
+
+    libane_shape_t in_s;  in_s.dims[0]=1; in_s.dims[1]=C;  in_s.dims[2]=1; in_s.dims[3]=SP;  in_s.ndim=4;
+    libane_shape_t out_s; out_s.dims[0]=1; out_s.dims[1]=OC; out_s.dims[2]=1; out_s.dims[3]=OSP; out_s.ndim=4;
+
+    uint32_t x = libane_graph_add_input(g, "x", in_s);
+    REQUIRE(x != LIBANE_INVALID_TENSOR_ID);
+
+    uint32_t y = libane_graph_add_op(g, LIBANE_OP_SLICE_BY_INDEX, &x, 1, out_s, nullptr, 0);
+    REQUIRE(y != LIBANE_INVALID_TENSOR_ID);
+    CHECK(libane_graph_mark_output(g, y, "out") == LIBANE_OK);
+
+    libane_compiled_graph_t cg = libane_graph_compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    auto in_data = std::vector<fp16>(static_cast<size_t>(C) * SP, to_f16(0.0f));
+    for (size_t i = 0; i < in_data.size(); ++i) {
+        in_data[i] = to_f16(static_cast<float>(i % 97) * 0.01f);
+    }
+    auto out_data = std::vector<fp16>(static_cast<size_t>(OC) * OSP, to_f16(0.0f));
+
+    const void* in_ptrs[1]  = {in_data.data()};
+    size_t in_bytes[1]      = {in_data.size() * sizeof(fp16)};
+    void* out_ptrs[1]       = {out_data.data()};
+    size_t out_bytes[1]     = {out_data.size() * sizeof(fp16)};
+
+    libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 1, out_ptrs, out_bytes, 1);
+    CHECK(st == LIBANE_OK);
+
+    // Slice is origin-aligned prefix: output contains first OC*OSP elements.
+    for (size_t i = 0; i < out_data.size(); ++i) {
+        CHECK(near(to_f32(out_data[i]), to_f32(in_data[i])));
+    }
+
+    libane_compiled_graph_release(cg);
+    libane_graph_release(g);
+}
+
+TEST_CASE("T3: reduce_sum via C API", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+
+    auto* g = libane_graph_create();
+    REQUIRE(g != nullptr);
+
+    libane_shape_t in_s;  in_s.dims[0]=1; in_s.dims[1]=C; in_s.dims[2]=1; in_s.dims[3]=SP; in_s.ndim=4;
+    libane_shape_t out_s; out_s.dims[0]=1; out_s.dims[1]=1; out_s.dims[2]=1; out_s.dims[3]=SP; out_s.ndim=4;
+
+    uint32_t x = libane_graph_add_input(g, "x", in_s);
+    REQUIRE(x != LIBANE_INVALID_TENSOR_ID);
+
+    uint32_t y = libane_graph_add_op(g, LIBANE_OP_REDUCE_SUM, &x, 1, out_s, nullptr, 0);
+    REQUIRE(y != LIBANE_INVALID_TENSOR_ID);
+    CHECK(libane_graph_mark_output(g, y, "out") == LIBANE_OK);
+
+    libane_compiled_graph_t cg = libane_graph_compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    // Fill each channel-slice with 1.0; reduce over channels should produce C.
+    auto in_data = fp16_fill(static_cast<size_t>(C) * SP, 1.0f);
+    auto out_data = std::vector<fp16>(static_cast<size_t>(SP), to_f16(0.0f));
+
+    const void* in_ptrs[1] = {in_data.data()};
+    size_t in_bytes[1] = {in_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_bytes[1] = {out_data.size() * sizeof(fp16)};
+
+    libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 1, out_ptrs, out_bytes, 1);
+    CHECK(st == LIBANE_OK);
+    for (size_t i = 0; i < out_data.size(); ++i) {
+        CHECK(near(to_f32(out_data[i]), static_cast<float>(C), 0.08f, 0.2f));
+    }
+
+    libane_compiled_graph_release(cg);
+    libane_graph_release(g);
+}
+
+TEST_CASE("T3: reduce_mean via C API", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+
+    auto* g = libane_graph_create();
+    REQUIRE(g != nullptr);
+
+    libane_shape_t in_s;  in_s.dims[0]=1; in_s.dims[1]=C; in_s.dims[2]=1; in_s.dims[3]=SP; in_s.ndim=4;
+    libane_shape_t out_s; out_s.dims[0]=1; out_s.dims[1]=1; out_s.dims[2]=1; out_s.dims[3]=SP; out_s.ndim=4;
+
+    uint32_t x = libane_graph_add_input(g, "x", in_s);
+    REQUIRE(x != LIBANE_INVALID_TENSOR_ID);
+
+    uint32_t y = libane_graph_add_op(g, LIBANE_OP_REDUCE_MEAN, &x, 1, out_s, nullptr, 0);
+    REQUIRE(y != LIBANE_INVALID_TENSOR_ID);
+    CHECK(libane_graph_mark_output(g, y, "out") == LIBANE_OK);
+
+    libane_compiled_graph_t cg = libane_graph_compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    auto in_data = fp16_fill(static_cast<size_t>(C) * SP, 1.0f);
+    auto out_data = std::vector<fp16>(static_cast<size_t>(SP), to_f16(0.0f));
+
+    const void* in_ptrs[1] = {in_data.data()};
+    size_t in_bytes[1] = {in_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_bytes[1] = {out_data.size() * sizeof(fp16)};
+
+    libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 1, out_ptrs, out_bytes, 1);
+    CHECK(st == LIBANE_OK);
+    for (size_t i = 0; i < out_data.size(); ++i) {
+        CHECK(near(to_f32(out_data[i]), 1.0f, 0.08f, 0.15f));
+    }
+
+    libane_compiled_graph_release(cg);
+    libane_graph_release(g);
+}
+
+TEST_CASE("T3: reduce_max via C API", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 32, SP = 64;
+
+    auto* g = libane_graph_create();
+    REQUIRE(g != nullptr);
+
+    libane_shape_t in_s;  in_s.dims[0]=1; in_s.dims[1]=C; in_s.dims[2]=1; in_s.dims[3]=SP; in_s.ndim=4;
+    libane_shape_t out_s; out_s.dims[0]=1; out_s.dims[1]=1; out_s.dims[2]=1; out_s.dims[3]=SP; out_s.ndim=4;
+
+    uint32_t x = libane_graph_add_input(g, "x", in_s);
+    REQUIRE(x != LIBANE_INVALID_TENSOR_ID);
+
+    uint32_t y = libane_graph_add_op(g, LIBANE_OP_REDUCE_MAX, &x, 1, out_s, nullptr, 0);
+    REQUIRE(y != LIBANE_INVALID_TENSOR_ID);
+    CHECK(libane_graph_mark_output(g, y, "out") == LIBANE_OK);
+
+    libane_compiled_graph_t cg = libane_graph_compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    auto in_data = std::vector<fp16>(static_cast<size_t>(C) * SP, to_f16(0.0f));
+    for (int c = 0; c < C; ++c) {
+        for (int s = 0; s < SP; ++s) {
+            in_data[static_cast<size_t>(c) * SP + s] = to_f16(static_cast<float>(c) * 0.5f + static_cast<float>(s) * 0.001f);
+        }
+    }
+    auto out_data = std::vector<fp16>(static_cast<size_t>(SP), to_f16(0.0f));
+
+    const void* in_ptrs[1] = {in_data.data()};
+    size_t in_bytes[1] = {in_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_bytes[1] = {out_data.size() * sizeof(fp16)};
+
+    libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 1, out_ptrs, out_bytes, 1);
+    CHECK(st == LIBANE_OK);
+    for (int s = 0; s < SP; ++s) {
+        float expected = static_cast<float>(C - 1) * 0.5f + static_cast<float>(s) * 0.001f;
+        CHECK(near(to_f32(out_data[static_cast<size_t>(s)]), expected, 0.08f, 0.2f));
+    }
+
+    libane_compiled_graph_release(cg);
+    libane_graph_release(g);
+}
+
+TEST_CASE("T3: sub via C API", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+
+    auto* g = libane_graph_create();
+    REQUIRE(g != nullptr);
+
+    libane_shape_t s; s.dims[0]=1; s.dims[1]=C; s.dims[2]=1; s.dims[3]=SP; s.ndim=4;
+    uint32_t a = libane_graph_add_input(g, "a", s);
+    uint32_t b = libane_graph_add_input(g, "b", s);
+    REQUIRE(a != LIBANE_INVALID_TENSOR_ID);
+    REQUIRE(b != LIBANE_INVALID_TENSOR_ID);
+
+    uint32_t in_ids[2] = {a, b};
+    uint32_t y = libane_graph_add_op(g, LIBANE_OP_SUB, in_ids, 2, s, nullptr, 0);
+    REQUIRE(y != LIBANE_INVALID_TENSOR_ID);
+    CHECK(libane_graph_mark_output(g, y, "out") == LIBANE_OK);
+
+    libane_compiled_graph_t cg = libane_graph_compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    auto a_data = fp16_fill(static_cast<size_t>(C) * SP, 3.0f);
+    auto b_data = fp16_fill(static_cast<size_t>(C) * SP, 1.0f);
+    auto out_data = std::vector<fp16>(static_cast<size_t>(C) * SP, to_f16(0.0f));
+
+    const void* in_ptrs[2] = {a_data.data(), b_data.data()};
+    size_t in_bytes[2] = {a_data.size() * sizeof(fp16), b_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_bytes[1] = {out_data.size() * sizeof(fp16)};
+
+    libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 2, out_ptrs, out_bytes, 1);
+    CHECK(st == LIBANE_OK);
+    for (size_t i = 0; i < out_data.size(); ++i) {
+        CHECK(near(to_f32(out_data[i]), 2.0f, 0.08f, 0.15f));
+    }
+
+    libane_compiled_graph_release(cg);
+    libane_graph_release(g);
+}
+
+TEST_CASE("T3: real_div via C API", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+
+    auto* g = libane_graph_create();
+    REQUIRE(g != nullptr);
+
+    libane_shape_t s; s.dims[0]=1; s.dims[1]=C; s.dims[2]=1; s.dims[3]=SP; s.ndim=4;
+    uint32_t a = libane_graph_add_input(g, "a", s);
+    uint32_t b = libane_graph_add_input(g, "b", s);
+    REQUIRE(a != LIBANE_INVALID_TENSOR_ID);
+    REQUIRE(b != LIBANE_INVALID_TENSOR_ID);
+
+    uint32_t in_ids[2] = {a, b};
+    uint32_t y = libane_graph_add_op(g, LIBANE_OP_REAL_DIV, in_ids, 2, s, nullptr, 0);
+    REQUIRE(y != LIBANE_INVALID_TENSOR_ID);
+    CHECK(libane_graph_mark_output(g, y, "out") == LIBANE_OK);
+
+    libane_compiled_graph_t cg = libane_graph_compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    auto a_data = fp16_fill(static_cast<size_t>(C) * SP, 3.0f);
+    auto b_data = fp16_fill(static_cast<size_t>(C) * SP, 2.0f);
+    auto out_data = std::vector<fp16>(static_cast<size_t>(C) * SP, to_f16(0.0f));
+
+    const void* in_ptrs[2] = {a_data.data(), b_data.data()};
+    size_t in_bytes[2] = {a_data.size() * sizeof(fp16), b_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_bytes[1] = {out_data.size() * sizeof(fp16)};
+
+    libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 2, out_ptrs, out_bytes, 1);
+    CHECK(st == LIBANE_OK);
+    for (size_t i = 0; i < out_data.size(); ++i) {
+        CHECK(near(to_f32(out_data[i]), 1.5f, 0.08f, 0.15f));
+    }
+
+    libane_compiled_graph_release(cg);
+    libane_graph_release(g);
+}
+
+TEST_CASE("T3: sqrt via C API", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+
+    auto* g = libane_graph_create();
+    REQUIRE(g != nullptr);
+
+    libane_shape_t s; s.dims[0]=1; s.dims[1]=C; s.dims[2]=1; s.dims[3]=SP; s.ndim=4;
+    uint32_t x = libane_graph_add_input(g, "x", s);
+    REQUIRE(x != LIBANE_INVALID_TENSOR_ID);
+
+    uint32_t y = libane_graph_add_op(g, LIBANE_OP_SQRT, &x, 1, s, nullptr, 0);
+    REQUIRE(y != LIBANE_INVALID_TENSOR_ID);
+    CHECK(libane_graph_mark_output(g, y, "out") == LIBANE_OK);
+
+    libane_compiled_graph_t cg = libane_graph_compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    auto in_data  = fp16_fill(static_cast<size_t>(C) * SP, 4.0f);
+    auto out_data = std::vector<fp16>(static_cast<size_t>(C) * SP, to_f16(0.0f));
+
+    const void* in_ptrs[1] = {in_data.data()};
+    size_t in_bytes[1] = {in_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_bytes[1] = {out_data.size() * sizeof(fp16)};
+
+    libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 1, out_ptrs, out_bytes, 1);
+    CHECK(st == LIBANE_OK);
+    for (size_t i = 0; i < out_data.size(); ++i) {
+        CHECK(near(to_f32(out_data[i]), 2.0f, 0.08f, 0.15f));
+    }
+
+    libane_compiled_graph_release(cg);
+    libane_graph_release(g);
+}
+
+TEST_CASE("T3: log via C API", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+
+    auto* g = libane_graph_create();
+    REQUIRE(g != nullptr);
+
+    libane_shape_t s; s.dims[0]=1; s.dims[1]=C; s.dims[2]=1; s.dims[3]=SP; s.ndim=4;
+    uint32_t x = libane_graph_add_input(g, "x", s);
+    REQUIRE(x != LIBANE_INVALID_TENSOR_ID);
+
+    uint32_t y = libane_graph_add_op(g, LIBANE_OP_LOG, &x, 1, s, nullptr, 0);
+    REQUIRE(y != LIBANE_INVALID_TENSOR_ID);
+    CHECK(libane_graph_mark_output(g, y, "out") == LIBANE_OK);
+
+    libane_compiled_graph_t cg = libane_graph_compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    auto in_data  = fp16_fill(static_cast<size_t>(C) * SP, 1.0f);
+    auto out_data = std::vector<fp16>(static_cast<size_t>(C) * SP, to_f16(0.0f));
+
+    const void* in_ptrs[1] = {in_data.data()};
+    size_t in_bytes[1] = {in_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_bytes[1] = {out_data.size() * sizeof(fp16)};
+
+    libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 1, out_ptrs, out_bytes, 1);
+    CHECK(st == LIBANE_OK);
+    for (size_t i = 0; i < out_data.size(); ++i) {
+        CHECK(near(to_f32(out_data[i]), 0.0f, 0.1f, 0.2f));
+    }
+
+    libane_compiled_graph_release(cg);
+    libane_graph_release(g);
+}
+
+TEST_CASE("T3: rsqrt via C API", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+
+    auto* g = libane_graph_create();
+    REQUIRE(g != nullptr);
+
+    libane_shape_t s; s.dims[0]=1; s.dims[1]=C; s.dims[2]=1; s.dims[3]=SP; s.ndim=4;
+    uint32_t x = libane_graph_add_input(g, "x", s);
+    REQUIRE(x != LIBANE_INVALID_TENSOR_ID);
+
+    uint32_t y = libane_graph_add_op(g, LIBANE_OP_RSQRT, &x, 1, s, nullptr, 0);
+    REQUIRE(y != LIBANE_INVALID_TENSOR_ID);
+    CHECK(libane_graph_mark_output(g, y, "out") == LIBANE_OK);
+
+    libane_compiled_graph_t cg = libane_graph_compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    auto in_data  = fp16_fill(static_cast<size_t>(C) * SP, 4.0f);
+    auto out_data = std::vector<fp16>(static_cast<size_t>(C) * SP, to_f16(0.0f));
+
+    const void* in_ptrs[1] = {in_data.data()};
+    size_t in_bytes[1] = {in_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_bytes[1] = {out_data.size() * sizeof(fp16)};
+
+    libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 1, out_ptrs, out_bytes, 1);
+    CHECK(st == LIBANE_OK);
+    for (size_t i = 0; i < out_data.size(); ++i) {
+        CHECK(near(to_f32(out_data[i]), 0.5f, 0.08f, 0.15f));
+    }
+
+    libane_compiled_graph_release(cg);
+    libane_graph_release(g);
+}
+
 TEST_CASE("T3: execute returns false for mismatched input count", "[integration][tier3][ane]") {
     if (!libane_available()) SKIP("ANE not available");
 

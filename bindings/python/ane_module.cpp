@@ -100,9 +100,16 @@ static py::array py_matmul(py::array A_in, py::array B_in) {
 
 /* ── matmul (fp32) ───────────────────────────────────────────────────────── */
 
-static py::array_t<float> py_matmul_f32(py::array_t<float> A, py::array_t<float> B) {
-    require_2d(A, "A");
-    require_2d(B, "B");
+static py::array_t<float> py_matmul_f32(py::array A_in, py::array B_in) {
+    require_2d(A_in, "A");
+    require_2d(B_in, "B");
+
+    py::module_ np = py::module_::import("numpy");
+    py::array A = np.attr("ascontiguousarray")(
+        np.attr("asarray")(A_in, "dtype"_a="float32"));
+    py::array B = np.attr("ascontiguousarray")(
+        np.attr("asarray")(B_in, "dtype"_a="float32"));
+
     auto abuf = A.request();
     auto bbuf = B.request();
     int M = static_cast<int>(abuf.shape[0]);
@@ -476,7 +483,18 @@ For multi-output graphs, call set_output_shapes() first::
     m.attr("SOFTMAX")   = static_cast<int>(LIBANE_OP_SOFTMAX);
     m.attr("ADD")       = static_cast<int>(LIBANE_OP_ADD);
     m.attr("MUL")       = static_cast<int>(LIBANE_OP_MUL);
+    m.attr("SUB")       = static_cast<int>(LIBANE_OP_SUB);
+    m.attr("REAL_DIV")  = static_cast<int>(LIBANE_OP_REAL_DIV);
+    m.attr("SQRT")      = static_cast<int>(LIBANE_OP_SQRT);
+    m.attr("LOG")       = static_cast<int>(LIBANE_OP_LOG);
+    m.attr("RSQRT")     = static_cast<int>(LIBANE_OP_RSQRT);
     m.attr("TRANSPOSE") = static_cast<int>(LIBANE_OP_TRANSPOSE);
+    m.attr("RESHAPE")   = static_cast<int>(LIBANE_OP_RESHAPE);
+    m.attr("CONCAT")    = static_cast<int>(LIBANE_OP_CONCAT);
+    m.attr("SLICE_BY_INDEX") = static_cast<int>(LIBANE_OP_SLICE_BY_INDEX);
+    m.attr("REDUCE_SUM") = static_cast<int>(LIBANE_OP_REDUCE_SUM);
+    m.attr("REDUCE_MEAN") = static_cast<int>(LIBANE_OP_REDUCE_MEAN);
+    m.attr("REDUCE_MAX") = static_cast<int>(LIBANE_OP_REDUCE_MAX);
     m.attr("SILU")      = static_cast<int>(LIBANE_OP_SILU);
     m.attr("RMSNORM")   = static_cast<int>(LIBANE_OP_RMSNORM);
 
