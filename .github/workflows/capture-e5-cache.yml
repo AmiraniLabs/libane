@@ -1,0 +1,110 @@
+name: Capture e5rt Cache (M2)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs_on:
+        description: "Runner label (pin M2 Pro with macos-14-xlarge)"
+        required: true
+        default: "macos-14-xlarge"
+      iterations:
+        description: "Number of prediction iterations"
+        required: true
+        default: "8"
+
+jobs:
+  capture:
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show runner info
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sw_vers
+          uname -a
+          sysctl -n machdep.cpu.brand_string || true
+
+      - name: Install Python deps
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install coremltools numpy
+
+      - name: Clear existing e5 cache
+        shell: bash
+        run: |
+          set -euxo pipefail
+          CACHE_DIR="$HOME/Library/Caches/com.apple.e5rt.e5bundlecache"
+          rm -rf "$CACHE_DIR"
+          mkdir -p "$CACHE_DIR"
+
+      - name: Trigger CoreML compile + inference
+        shell: bash
+        env:
+          ITERATIONS: ${{ inputs.iterations }}
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import os
+          import tempfile
+          import numpy as np
+          import coremltools as ct
+          from coremltools.converters.mil import Builder as mb
+
+          iters = int(os.environ.get("ITERATIONS", "8"))
+
+          @mb.program(input_specs=[mb.TensorSpec(shape=(1, 4), dtype=ct.converters.mil.mil.types.fp16)])
+          def prog(x):
+              y = mb.add(x=x, y=np.array([[1, 2, 3, 4]], dtype=np.float16), name="y")
+              return y
+
+          mlmodel = ct.convert(
+              prog,
+              convert_to="mlprogram",
+              minimum_deployment_target=ct.target.macOS13,
+              compute_units=ct.ComputeUnit.ALL,
+          )
+
+          out_dir = tempfile.mkdtemp(prefix="coreml_e5_trigger_")
+          pkg_path = os.path.join(out_dir, "tiny_add.mlpackage")
+          mlmodel.save(pkg_path)
+
+          model = ct.models.MLModel(pkg_path, compute_units=ct.ComputeUnit.ALL)
+          x = np.array([[1, 1, 1, 1]], dtype=np.float16)
+          for _ in range(iters):
+              _ = model.predict({"x": x})
+
+          print("model_package", pkg_path)
+          PY
+
+      - name: Collect e5 cache inventory
+        shell: bash
+        run: |
+          set -euxo pipefail
+          CACHE_DIR="$HOME/Library/Caches/com.apple.e5rt.e5bundlecache"
+          find "$CACHE_DIR" -type f | sort > e5_cache_file_list.txt || true
+          find "$CACHE_DIR" -name "*.e5" -print | sort > e5_files.txt || true
+          wc -l e5_cache_file_list.txt e5_files.txt || true
+
+      - name: Archive cache directory
+        shell: bash
+        run: |
+          set -euxo pipefail
+          CACHE_PARENT="$HOME/Library/Caches"
+          tar -czf e5bundlecache.tar.gz -C "$CACHE_PARENT" com.apple.e5rt.e5bundlecache
+
+      - name: Upload cache artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: e5bundlecache-${{ github.run_id }}
+          path: |
+            e5bundlecache.tar.gz
+            e5_cache_file_list.txt
+            e5_files.txt
+          if-no-files-found: warn
