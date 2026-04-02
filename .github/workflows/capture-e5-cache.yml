@@ -51,16 +51,19 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          CACHE_DIR="$HOME/Library/Caches/com.apple.e5rt.e5bundlecache"
-          rm -rf "$CACHE_DIR"
-          mkdir -p "$CACHE_DIR"
-          test -d "$CACHE_DIR"
-          test -r "$CACHE_DIR"
-          test -w "$CACHE_DIR"
-          PROBE_FILE="$CACHE_DIR/.rw_probe_$$"
+          CACHE_BASE="$HOME/Library/Caches/org.python.python/com.apple.e5rt.e5bundlecache"
+          FALLBACK_BASE="$HOME/Library/Caches/com.apple.e5rt.e5bundlecache"
+          rm -rf "$CACHE_BASE" "$FALLBACK_BASE"
+          mkdir -p "$CACHE_BASE"
+          test -d "$CACHE_BASE"
+          test -r "$CACHE_BASE"
+          test -w "$CACHE_BASE"
+          PROBE_FILE="$CACHE_BASE/.rw_probe_$$"
           echo "probe" > "$PROBE_FILE"
           test -f "$PROBE_FILE"
           rm -f "$PROBE_FILE"
+          echo "CACHE_BASE=$CACHE_BASE" >> "$GITHUB_ENV"
+          echo "FALLBACK_BASE=$FALLBACK_BASE" >> "$GITHUB_ENV"
 
       - name: Trigger CoreML compile + inference (ANE-aware)
         shell: bash
@@ -128,9 +131,25 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          CACHE_DIR="$HOME/Library/Caches/com.apple.e5rt.e5bundlecache"
-          find "$CACHE_DIR" -type f | sort > e5_cache_file_list.txt
-          find "$CACHE_DIR" -name "*.e5" -print | sort > e5_files.txt
+          ACTIVE_CACHE_BASE=""
+          if [ -d "$CACHE_BASE" ] && [ "$(find "$CACHE_BASE" -type f | wc -l)" -gt 0 ]; then
+            ACTIVE_CACHE_BASE="$CACHE_BASE"
+          elif [ -d "$FALLBACK_BASE" ] && [ "$(find "$FALLBACK_BASE" -type f | wc -l)" -gt 0 ]; then
+            ACTIVE_CACHE_BASE="$FALLBACK_BASE"
+          elif [ -d "$CACHE_BASE" ]; then
+            ACTIVE_CACHE_BASE="$CACHE_BASE"
+          elif [ -d "$FALLBACK_BASE" ]; then
+            ACTIVE_CACHE_BASE="$FALLBACK_BASE"
+          fi
+
+          echo "active_cache_base=${ACTIVE_CACHE_BASE:-<none>}" | tee active_cache_base.txt
+          if [ -n "$ACTIVE_CACHE_BASE" ]; then
+            find "$ACTIVE_CACHE_BASE" -type f | sort > e5_cache_file_list.txt
+            find "$ACTIVE_CACHE_BASE" -name "*.e5" -print | sort > e5_files.txt
+          else
+            : > e5_cache_file_list.txt
+            : > e5_files.txt
+          fi
           wc -l e5_cache_file_list.txt e5_files.txt
 
       - name: Broader .e5 scan (best effort)
@@ -146,7 +165,18 @@ jobs:
         run: |
           set -euxo pipefail
           CACHE_PARENT="$HOME/Library/Caches"
-          tar -czf e5bundlecache.tar.gz -C "$CACHE_PARENT" com.apple.e5rt.e5bundlecache
+          TAR_ITEMS=()
+          if [ -d "$CACHE_PARENT/org.python.python/com.apple.e5rt.e5bundlecache" ]; then
+            TAR_ITEMS+=("org.python.python/com.apple.e5rt.e5bundlecache")
+          fi
+          if [ -d "$CACHE_PARENT/com.apple.e5rt.e5bundlecache" ]; then
+            TAR_ITEMS+=("com.apple.e5rt.e5bundlecache")
+          fi
+          if [ "${#TAR_ITEMS[@]}" -eq 0 ]; then
+            mkdir -p "$CACHE_PARENT/com.apple.e5rt.e5bundlecache"
+            TAR_ITEMS+=("com.apple.e5rt.e5bundlecache")
+          fi
+          tar -czf e5bundlecache.tar.gz -C "$CACHE_PARENT" "${TAR_ITEMS[@]}"
 
       - name: Upload cache artifact
         uses: actions/upload-artifact@v4
@@ -156,6 +186,7 @@ jobs:
             e5bundlecache.tar.gz
             e5_cache_file_list.txt
             e5_files.txt
+            active_cache_base.txt
             e5_home_cache_scan.txt
             e5_system_scan.txt
           if-no-files-found: warn
