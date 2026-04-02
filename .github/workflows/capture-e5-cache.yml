@@ -29,12 +29,13 @@ jobs:
           uname -a
           sysctl -n machdep.cpu.brand_string || true
 
-      - name: Install Python deps
+      - name: Set up Python virtualenv + deps
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --upgrade pip
-          python3 -m pip install coremltools numpy
+          python3 -m venv .venv
+          ./.venv/bin/python -m pip install --upgrade pip
+          ./.venv/bin/python -m pip install coremltools numpy
 
       - name: Clear existing e5 cache
         shell: bash
@@ -50,7 +51,7 @@ jobs:
           ITERATIONS: ${{ inputs.iterations }}
         run: |
           set -euxo pipefail
-          python3 - <<'PY'
+          ./.venv/bin/python - <<'PY'
           import os
           import tempfile
           import numpy as np
