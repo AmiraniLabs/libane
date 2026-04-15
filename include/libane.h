@@ -386,6 +386,69 @@ libane_status_t libane_graph_execute(libane_compiled_graph_t cg,
                                       const size_t*           output_bytes,
                                       size_t                  num_outputs);
 
+/* ── Raw MIL probe API ───────────────────────────────────────────────────── */
+
+/**
+ * Opaque handle to a compiled raw MIL program.
+ * Created by libane_mil_compile() / libane_mil_compile_with_weights().
+ * Destroyed by libane_mil_release().
+ *
+ * The struct is defined outside the libane namespace so the C ABI typedef
+ * works without name-mangling.
+ */
+typedef struct libane_mil_program_s* libane_mil_handle_t;
+
+/**
+ * Compile a raw MIL text program with optional external weight files.
+ *
+ * @param mil_text      UTF-8 MIL source (complete program including buildInfo header).
+ * @param weight_names  Array of weight filenames referenced by file() in the MIL text
+ *                      (e.g. "weight.bin").  May be NULL when num_weights == 0.
+ * @param weight_data   Array of pointers to raw fp16 weight data (no ANE header —
+ *                      the header is added internally).  May be NULL when num_weights == 0.
+ * @param weight_sizes  Byte sizes of each weight_data buffer.
+ * @param num_weights   Number of weight files.
+ *
+ * @return  Non-null libane_mil_handle_t on success; NULL on failure.
+ *          The handle must be freed with libane_mil_release().
+ *          Requires ANE; returns NULL when ANE is unavailable.
+ */
+libane_mil_handle_t libane_mil_compile(const char*   mil_text,
+                                        const char**  weight_names,
+                                        const void**  weight_data,
+                                        const size_t* weight_sizes,
+                                        size_t        num_weights);
+
+/**
+ * Execute a compiled MIL program.
+ *
+ * Inputs and outputs are raw fp16 buffers.  All input IOSurfaces are allocated
+ * at the same size (max of all in_sizes and 49152) to satisfy Orion constraint #18.
+ * All output IOSurfaces are similarly uniform (Orion constraint #2).
+ *
+ * @param h           Handle from libane_mil_compile().
+ * @param in_data     Array of pointers to fp16 input data.
+ * @param in_sizes    Byte sizes of each input buffer.
+ * @param num_inputs  Length of in_data / in_sizes.
+ * @param out_data    Caller-allocated destination buffers (fp16).
+ * @param out_sizes   Byte sizes of each output buffer.
+ * @param num_outputs Length of out_data / out_sizes.
+ *
+ * @return LIBANE_OK on success, negative status on failure.
+ */
+libane_status_t libane_mil_execute(libane_mil_handle_t h,
+                                    const void**  in_data,
+                                    const size_t* in_sizes,
+                                    size_t        num_inputs,
+                                    void**        out_data,
+                                    const size_t* out_sizes,
+                                    size_t        num_outputs);
+
+/**
+ * Free a compiled MIL program.  Safe to call with NULL.
+ */
+void libane_mil_release(libane_mil_handle_t h);
+
 #ifdef __cplusplus
 }
 #endif

@@ -805,4 +805,115 @@ libane_status_t libane_graph_execute(libane_compiled_graph_t cg,
     return LIBANE_OK;
 }
 
+/* ── Raw MIL probe API ───────────────────────────────────────────────────── */
+
+libane_mil_handle_t libane_mil_compile(const char*   mil_text,
+                                        const char**  weight_names,
+                                        const void**  weight_data,
+                                        const size_t* weight_sizes,
+                                        size_t        num_weights) {
+    if (!mil_text) {
+        set_error("libane_mil_compile: null mil_text");
+        return nullptr;
+    }
+    if (num_weights > 0 && (!weight_names || !weight_data || !weight_sizes)) {
+        set_error("libane_mil_compile: null weight arrays with num_weights > 0");
+        return nullptr;
+    }
+
+    std::vector<libane::runtime::WeightEntry> entries;
+    entries.reserve(num_weights);
+    for (size_t i = 0; i < num_weights; ++i) {
+        auto blob = libane::mil::WeightBlob::from_fp16(weight_data[i], weight_sizes[i]);
+        entries.push_back({weight_names[i], std::move(blob.data)});
+    }
+
+    auto* prog = libane::runtime::ane_compile(mil_text, entries, "mil_probe");
+    if (!prog) {
+        set_error("libane_mil_compile: %s", libane::runtime::ane_last_error());
+        return nullptr;
+    }
+
+    auto* h = new (std::nothrow) libane_mil_program_s{prog};
+    if (!h) {
+        libane::runtime::ane_unload(prog);
+        set_error("libane_mil_compile: out of memory");
+        return nullptr;
+    }
+    return h;
+}
+
+libane_status_t libane_mil_execute(libane_mil_handle_t h,
+                                    const void**  in_data,
+                                    const size_t* in_sizes,
+                                    size_t        num_inputs,
+                                    void**        out_data,
+                                    const size_t* out_sizes,
+                                    size_t        num_outputs) {
+    if (!h || !h->prog) {
+        set_error("libane_mil_execute: null handle");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+    if (num_inputs  > 0 && (!in_data  || !in_sizes)) {
+        set_error("libane_mil_execute: null input arrays");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+    if (num_outputs > 0 && (!out_data || !out_sizes)) {
+        set_error("libane_mil_execute: null output arrays");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+
+    // Orion constraints #2 and #18: all input IOSurfaces must share one alloc
+    // size; same for outputs.  Minimum is 49KB (constraint #4 — also enforced
+    // independently inside BufferPool::allocate()).
+    static constexpr size_t kMinIOS = 49152;
+    size_t max_in  = kMinIOS;
+    size_t max_out = kMinIOS;
+    for (size_t i = 0; i < num_inputs;  ++i) max_in  = std::max(max_in,  in_sizes[i]);
+    for (size_t i = 0; i < num_outputs; ++i) max_out = std::max(max_out, out_sizes[i]);
+
+    auto& pool = libane::global_buffer_pool();
+
+    std::vector<std::unique_ptr<libane::AneBuffer>> in_bufs, out_bufs;
+    std::vector<IOSurfaceRef> in_ios, out_ios;
+
+    for (size_t i = 0; i < num_inputs; ++i) {
+        auto buf = pool.acquire(max_in);
+        buf->copy_from(in_data[i], in_sizes[i]);
+        in_ios.push_back(buf->iosurface());
+        in_bufs.push_back(std::move(buf));
+    }
+    for (size_t i = 0; i < num_outputs; ++i) {
+        auto buf = pool.acquire(max_out);
+        out_ios.push_back(buf->iosurface());
+        out_bufs.push_back(std::move(buf));
+    }
+
+    bool ok = libane::runtime::ane_execute_multi(h->prog, in_ios, out_ios);
+
+    if (ok) {
+        for (size_t i = 0; i < num_outputs; ++i)
+            out_bufs[i]->copy_to(out_data[i], out_sizes[i]);
+    }
+
+    for (auto& b : in_bufs)  pool.release(std::move(b));
+    for (auto& b : out_bufs) pool.release(std::move(b));
+
+    if (!ok) {
+        const char* rt = libane::runtime::ane_last_error();
+        if (rt && rt[0] != '\0')
+            set_error("libane_mil_execute: %s", rt);
+        else
+            set_error("libane_mil_execute: execution failed");
+        return LIBANE_ERR_EXECUTE_FAILED;
+    }
+    return LIBANE_OK;
+}
+
+void libane_mil_release(libane_mil_handle_t h) {
+    if (!h) return;
+    if (h->prog) libane::runtime::ane_unload(h->prog);
+    delete h;
+}
+
 } // extern "C"
