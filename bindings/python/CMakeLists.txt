@@ -24,4 +24,3 @@ endif()
 
 install(TARGETS ane DESTINATION . COMPONENT python)
 install(FILES ane.pyi DESTINATION . COMPONENT python)
-install(FILES probe.py DESTINATION . COMPONENT python)
