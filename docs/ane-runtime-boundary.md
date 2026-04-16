@@ -46,7 +46,11 @@ that requires firmware-side knowledge of buffer layout checks this handle:
 |---|---|---|
 | `processRequest:model:qos:...` | No | **Yes** |
 | `evaluateWithQoS:options:request:` | No | **Yes** |
+| `_ANERequest.completionHandler` | No | **Yes** |
 | Shared IOSurface zero-copy chaining | No | **Yes** |
+| `_ANESharedEvents` signal events | Yes | No (crash: nil C++ vtable) |
+| `_ANESharedEvents` wait events (condition met) | Yes | No (crash: nil C++ vtable) |
+| `_ANESharedEvents` wait events (condition unmet) | Yes | No (silently ignored) |
 | `mapIOSurfacesWithRequest:cacheInference:` | Yes | No (error 0x12) |
 | `_ANEIOSurfaceObject.startOffset` honored by DMA | Yes | No (ignored) |
 | `_ANEChainingRequest` / `prepareChainingWithModel:` | Yes | No (error 15) |
@@ -98,6 +102,28 @@ The existing libane architecture (separate IOSurface per tensor, sequential
 `ane_execute` calls) already implements zero-copy chaining correctly. This
 is confirmed, not an approximation.
 
+**`_ANERequest.completionHandler`**
+A block property on `_ANERequest` that fires asynchronously on
+`ANEServicesThread` after `evaluateWithQoS:` returns. The IOSurface output
+buffer is coherent at the time the handler fires. Unlike `_ANESharedEvents`,
+this mechanism requires no C++ event infrastructure and works on Path A.
+
+Pattern for async ANE dispatch on Path A:
+```objc
+id req = /* build request */;
+[req setCompletionHandler:^{
+    /* runs on ANEServicesThread, ~0.2ms after evaluateWithQoS: returns */
+    /* IOSurface output is coherent here */
+    dispatch_semaphore_signal(done);
+}];
+[model evaluateWithQoS:kQoS options:@{} request:req error:nil];
+/* caller can be on any thread; evaluateWithQoS: blocks until hardware done */
+/* handler fires shortly after, independently */
+```
+
+Timing (64×32 model): eval wall ≈ 0.1–0.4 ms; handler fires ≈ 0.2 ms later
+(XPC completion notification roundtrip from ANE daemon to client).
+
 ---
 
 ## What libane Cannot Do Without a CoreML Detour
@@ -106,11 +132,35 @@ is confirmed, not an approximation.
 - True firmware-level kernel pipelining (_ANEChainingRequest)
 - IOSurface pre-mapping for repeated inference (mapIOSurfaces)
 - Loopback buffer support (processInputBuffers / processOutputSet)
+- `_ANESharedEvents` signal/wait for cross-process or Metal GPU↔ANE sync
 
 All of these require `intermediateBufferHandle != 0`, which requires
 `_ANEClient.loadModel:`, which requires `model.espresso.net` format — a
 completely different compilation pipeline incompatible with the MIL text
 path.
+
+### _ANESharedEvents crash analysis
+
+`_ANESharedEvents` crashes on Path A because the `processRequest:` completion
+block maintains a C++ event infrastructure pointer for event processing. That
+pointer is nil when `intermediateBufferHandle=0`. At completion, the block
+attempts C++ virtual dispatch on the nil pointer:
+
+```
+ldr x9, [x8, #0x10]!   ;; x8 = nil → EXC_BAD_ACCESS at address 0x10
+blraa x9, x8            ;; C++ vtable virtual call with self=nil
+```
+
+(crash frame: `__100-[_ANEProgramForEvaluation processRequest:...]_block_invoke + 1320`)
+
+Crash conditions:
+- Any `_ANESharedSignalEvent` on the request → always crashes
+- Any `_ANESharedWaitEvent` whose wait condition is already met → crashes
+- Any `_ANESharedWaitEvent` whose condition is never met → silently ignored (no crash)
+- Empty `_ANESharedEvents` (@[], @[]) → no crash (nothing to process)
+
+The crash cannot be worked around from user space. `_ANERequest.completionHandler`
+is the correct async notification mechanism for Path A.
 
 ---
 
@@ -132,3 +182,6 @@ private API and fits within Path A's capabilities.
 - Branch `experiment/iosurface-startoffset`: `startOffset` mechanism,
   alignment sweep, functional test, `mapIOSurfacesWithRequest:` mapper
   analysis, `vm_remap` reasoning
+- Branch `experiment/ane-shared-events`: `_ANESharedEvents` crash root cause,
+  `_ANESharedSignalEvent` / `_ANESharedWaitEvent` ivar layout, crash condition
+  matrix, `_ANERequest.completionHandler` as working alternative
