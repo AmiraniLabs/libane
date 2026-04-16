@@ -245,16 +245,106 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
 
         case LIBANE_OP_GELU:
         case LIBANE_OP_SOFTMAX:
+        case LIBANE_OP_AVG_POOL:
+        case LIBANE_OP_MAX_POOL:
+        case LIBANE_OP_NEG:
+        case LIBANE_OP_SINH:
+        case LIBANE_OP_COSH:
+        case LIBANE_OP_TAN:
+        case LIBANE_OP_ASIN:
+        case LIBANE_OP_ACOS:
         case LIBANE_OP_SILU:
         case LIBANE_OP_TRANSPOSE:
         case LIBANE_OP_CAST:
             if (!n.weights.empty())
                 err("op is weight-free but " + std::to_string(n.weights.size()) +
                     " weight bytes were provided");
+            if (n.inputs.size() != 1)
+                err("requires exactly one input, got " + std::to_string(n.inputs.size()));
             break;
+
+        case LIBANE_OP_REDUCE_PROD: {
+            if (!n.weights.empty())
+                err("op is weight-free but " + std::to_string(n.weights.size()) +
+                    " weight bytes were provided");
+            if (n.inputs.size() != 1) {
+                err("reduce_prod requires exactly one input, got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            const auto& in_t = g.tensor(n.inputs[0]);
+            if (out_t.shape.channels != 1 || out_t.shape.seq != in_t.shape.seq) {
+                err("reduce_prod output shape must be [1,1,1,S] with S matching input");
+            }
+            break;
+        }
+
+        case LIBANE_OP_SCATTER:
+        case LIBANE_OP_SCATTER_ND:
+        case LIBANE_OP_SCATTER_ALONG_AXIS: {
+            if (n.inputs.size() != 2) {
+                err("scatter-like op requires exactly two inputs (base, updates), got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            if (n.weights.empty()) {
+                err("scatter-like op requires static mask weights [1,C,1,S]");
+                break;
+            }
+            const auto& a = g.tensor(n.inputs[0]).shape;
+            const auto& b = g.tensor(n.inputs[1]).shape;
+            if (!(a == b && a == out_t.shape)) {
+                err("scatter-like op requires input/output shapes to match exactly");
+            }
+            size_t expected = out_t.shape.bytes();
+            if (n.weights.size() != expected) {
+                err("scatter-like mask size mismatch: expected " + std::to_string(expected) +
+                    " bytes ([1,C,1,S] fp16), got " + std::to_string(n.weights.size()));
+            }
+            break;
+        }
+
+        case LIBANE_OP_GATHER: {
+            if (n.inputs.size() == 1) {
+                // Static gather mask provided as compile-time weights.
+                if (n.weights.empty()) {
+                    err("gather(static) requires mask weights [1,C,1,S]");
+                    break;
+                }
+                const auto& in = g.tensor(n.inputs[0]).shape;
+                if (!(in == out_t.shape))
+                    err("gather(static) requires input/output shapes to match exactly");
+                size_t expected = out_t.shape.bytes();
+                if (n.weights.size() != expected) {
+                    err("gather(static) mask size mismatch: expected " + std::to_string(expected) +
+                        " bytes ([1,C,1,S] fp16), got " + std::to_string(n.weights.size()));
+                }
+                break;
+            }
+
+            if (n.inputs.size() == 2) {
+                // Dynamic gather mask provided as second runtime input.
+                if (!n.weights.empty())
+                    err("gather(dynamic) is weight-free; provide mask as second input");
+                const auto& x = g.tensor(n.inputs[0]).shape;
+                const auto& m = g.tensor(n.inputs[1]).shape;
+                if (!(x == m && x == out_t.shape)) {
+                    err("gather(dynamic) requires x/mask/output shapes to match exactly");
+                }
+                break;
+            }
+
+            err("gather supports exactly one input (static mask) or two inputs (dynamic mask), got " +
+                std::to_string(n.inputs.size()));
+            break;
+        }
 
         case LIBANE_OP_ADD:
         case LIBANE_OP_MUL:
+        case LIBANE_OP_MOD:
+        case LIBANE_OP_LOGICAL_AND:
+        case LIBANE_OP_LOGICAL_OR:
+        case LIBANE_OP_LOGICAL_XOR:
             if (!n.weights.empty())
                 err("op is weight-free but " + std::to_string(n.weights.size()) +
                     " weight bytes were provided");

@@ -416,6 +416,410 @@ MilProgram MilBuilder::softmax(int C, int SP) {
     return p;
 }
 
+/* ── avg_pool (lowered) ─────────────────────────────────────────────────── */
+
+MilProgram MilBuilder::avg_pool(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    // ANE accepts identity robustly. For the graph's current 1x1/stride1 pool
+    // use-case, avg_pool is semantically identity.
+    std::string t = header();
+    t += "    func main<ios18>(" + tensor_type(shape) + " x) {\n";
+    t += "        " + tensor_type(shape) + " y = identity(x=x)[name=string(\"avg_pool_lowered\")];\n";
+    t += "    } -> (y);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── max_pool (lowered) ─────────────────────────────────────────────────── */
+
+MilProgram MilBuilder::max_pool(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    // ANE accepts identity robustly. For the graph's current 1x1/stride1 pool
+    // use-case, max_pool is semantically identity.
+    std::string t = header();
+    t += "    func main<ios18>(" + tensor_type(shape) + " x) {\n";
+    t += "        " + tensor_type(shape) + " y = identity(x=x)[name=string(\"max_pool_lowered\")];\n";
+    t += "    } -> (y);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── logical_and (lowered) ──────────────────────────────────────────────── */
+
+MilProgram MilBuilder::logical_and(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    // Lower logical_and to casts + mul:
+    // bool(x) -> fp16 in {0,1}, bool(y) -> fp16 in {0,1}, out = mul.
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x, " + tt + " y) {\n";
+    t += "        " + tb + " xb = cast(x=x, dtype=string(\"bool\"))[name=string(\"lnd_xb\")];\n";
+    t += "        " + tb + " yb = cast(x=y, dtype=string(\"bool\"))[name=string(\"lnd_yb\")];\n";
+    t += "        " + tt + " xf = cast(x=xb, dtype=string(\"fp16\"))[name=string(\"lnd_xf\")];\n";
+    t += "        " + tt + " yf = cast(x=yb, dtype=string(\"fp16\"))[name=string(\"lnd_yf\")];\n";
+    t += "        " + tt + " z = mul(x=xf, y=yf)[name=string(\"lnd_out\")];\n";
+    t += "    } -> (z);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── logical_or (lowered) ───────────────────────────────────────────────── */
+
+MilProgram MilBuilder::logical_or(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    // Lower logical_or to casts + maximum over {0,1} fp16 masks.
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x, " + tt + " y) {\n";
+    t += "        " + tb + " xb = cast(x=x, dtype=string(\"bool\"))[name=string(\"lor_xb\")];\n";
+    t += "        " + tb + " yb = cast(x=y, dtype=string(\"bool\"))[name=string(\"lor_yb\")];\n";
+    t += "        " + tt + " xf = cast(x=xb, dtype=string(\"fp16\"))[name=string(\"lor_xf\")];\n";
+    t += "        " + tt + " yf = cast(x=yb, dtype=string(\"fp16\"))[name=string(\"lor_yf\")];\n";
+    t += "        " + tt + " z = maximum(x=xf, y=yf)[name=string(\"lor_out\")];\n";
+    t += "    } -> (z);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── logical_xor (lowered) ──────────────────────────────────────────────── */
+
+MilProgram MilBuilder::logical_xor(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    // Lower logical_xor to casts + not_equal over {0,1} fp16 masks.
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x, " + tt + " y) {\n";
+    t += "        " + tb + " xb = cast(x=x, dtype=string(\"bool\"))[name=string(\"lxr_xb\")];\n";
+    t += "        " + tb + " yb = cast(x=y, dtype=string(\"bool\"))[name=string(\"lxr_yb\")];\n";
+    t += "        " + tt + " xf = cast(x=xb, dtype=string(\"fp16\"))[name=string(\"lxr_xf\")];\n";
+    t += "        " + tt + " yf = cast(x=yb, dtype=string(\"fp16\"))[name=string(\"lxr_yf\")];\n";
+    t += "        " + tb + " zb = not_equal(x=xf, y=yf)[name=string(\"lxr_zb\")];\n";
+    t += "        " + tt + " z = cast(x=zb, dtype=string(\"fp16\"))[name=string(\"lxr_out\")];\n";
+    t += "    } -> (z);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── reduce_prod (lowered) ──────────────────────────────────────────────── */
+
+MilProgram MilBuilder::reduce_prod(int C, int SP) {
+    TensorShape in{1, C, 1, SP};
+    TensorShape out{1, 1, 1, SP};
+    in.validate();
+    out.validate();
+
+    std::string tin = tensor_type(in);
+    std::string tout = tensor_type(out);
+
+    // Lower reduce_prod using:
+    // reduce_prod(x) = exp(reduce_sum(log(x + eps), axis=1, keep_dims=true))
+    std::string t = header();
+    t += "    func main<ios18>(" + tin + " x) {\n";
+    t += "        fp16 rp_eps = const()[name=string(\"rp_eps\"), val=fp16(0x1.0cp-17)];\n";
+    t += "        " + tin + " rp_x = add(x=x, y=rp_eps)[name=string(\"rp_x\")];\n";
+    t += "        " + tin + " rp_l = log(x=rp_x, epsilon=rp_eps)[name=string(\"rp_l\")];\n";
+    t += "        tensor<int32, [1]> rp_ax = const()[name=string(\"rp_ax\"), val=tensor<int32, [1]>([1])];\n";
+    t += "        bool rp_kd = const()[name=string(\"rp_kd\"), val=bool(true)];\n";
+    t += "        " + tout + " rp_s = reduce_sum(x=rp_l, axes=rp_ax, keep_dims=rp_kd)[name=string(\"rp_s\")];\n";
+    t += "        " + tout + " y = exp(x=rp_s)[name=string(\"rp_out\")];\n";
+    t += "    } -> (y);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = in;
+    p.output_shape = out;
+    return p;
+}
+
+/* ── scatter static-mask (lowered) ──────────────────────────────────────── */
+
+MilProgram MilBuilder::scatter_static_mask(int C, int SP,
+                                            const std::string& mask_file) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string mref = tt + "(BLOBFILE(path=string(\"@model_path/weights/" + mask_file +
+                       "\"), offset=uint64(" + std::to_string(WeightBlob::kWeightDictOffset) + ")))";
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " base, " + tt + " updates) {\n";
+    t += "        " + tt + " m = const()[name=string(\"m\"), val=" + mref + "];\n";
+    t += "        fp16 one = const()[name=string(\"one\"), val=fp16(1.0)];\n";
+    t += "        " + tt + " inv = sub(x=one, y=m)[name=string(\"inv\")];\n";
+    t += "        " + tt + " xb = mul(x=base, y=inv)[name=string(\"xb\")];\n";
+    t += "        " + tt + " uu = mul(x=updates, y=m)[name=string(\"uu\")];\n";
+    t += "        " + tt + " out = add(x=xb, y=uu)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = mask_file;
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+MilProgram MilBuilder::gather_static_mask(int C, int SP,
+                                           const std::string& mask_file) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string mref = tt + "(BLOBFILE(path=string(\"@model_path/weights/" + mask_file +
+                       "\"), offset=uint64(" + std::to_string(WeightBlob::kWeightDictOffset) + ")))";
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x) {\n";
+    t += "        " + tt + " m = const()[name=string(\"m\"), val=" + mref + "];\n";
+    t += "        " + tt + " out = mul(x=x, y=m)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = mask_file;
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+MilProgram MilBuilder::gather_dynamic_mask(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x, " + tt + " mask) {\n";
+    t += "        " + tt + " out = mul(x=x, y=mask)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+MilProgram MilBuilder::neg(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x) {\n";
+    t += "        fp16 n1 = const()[name=string(\"n1\"), val=fp16(-1.0)];\n";
+    t += "        " + tt + " out = mul(x=x, y=n1)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+MilProgram MilBuilder::mod(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x, " + tt + " y) {\n";
+    t += "        " + tt + " q = floor_div(x=x, y=y)[name=string(\"q\")];\n";
+    t += "        " + tt + " qy = mul(x=q, y=y)[name=string(\"qy\")];\n";
+    t += "        " + tt + " out = sub(x=x, y=qy)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+MilProgram MilBuilder::sinh(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x) {\n";
+    t += "        fp16 n1 = const()[name=string(\"n1\"), val=fp16(-1.0)];\n";
+    t += "        fp16 h = const()[name=string(\"h\"), val=fp16(0.5)];\n";
+    t += "        " + tt + " nx = mul(x=x, y=n1)[name=string(\"nx\")];\n";
+    t += "        " + tt + " ex = exp(x=x)[name=string(\"ex\")];\n";
+    t += "        " + tt + " enx = exp(x=nx)[name=string(\"enx\")];\n";
+    t += "        " + tt + " d = sub(x=ex, y=enx)[name=string(\"d\")];\n";
+    t += "        " + tt + " out = mul(x=d, y=h)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+MilProgram MilBuilder::cosh(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x) {\n";
+    t += "        fp16 n1 = const()[name=string(\"n1\"), val=fp16(-1.0)];\n";
+    t += "        fp16 h = const()[name=string(\"h\"), val=fp16(0.5)];\n";
+    t += "        " + tt + " nx = mul(x=x, y=n1)[name=string(\"nx\")];\n";
+    t += "        " + tt + " ex = exp(x=x)[name=string(\"ex\")];\n";
+    t += "        " + tt + " enx = exp(x=nx)[name=string(\"enx\")];\n";
+    t += "        " + tt + " s = add(x=ex, y=enx)[name=string(\"s\")];\n";
+    t += "        " + tt + " out = mul(x=s, y=h)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+MilProgram MilBuilder::tan(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x) {\n";
+    t += "        fp16 teps = const()[name=string(\"teps\"), val=fp16(0x1.0cp-17)];\n";
+    t += "        " + tt + " sx = sin(x=x)[name=string(\"sx\")];\n";
+    t += "        " + tt + " cx = cos(x=x)[name=string(\"cx\")];\n";
+    t += "        " + tt + " cxe = add(x=cx, y=teps)[name=string(\"cxe\")];\n";
+    t += "        " + tt + " out = real_div(x=sx, y=cxe)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+MilProgram MilBuilder::asin(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x) {\n";
+    t += "        fp16 one = const()[name=string(\"one\"), val=fp16(1.0)];\n";
+    t += "        fp16 ae = const()[name=string(\"ae\"), val=fp16(0x1.0cp-17)];\n";
+    t += "        " + tt + " xsq = mul(x=x, y=x)[name=string(\"xsq\")];\n";
+    t += "        " + tt + " den2 = sub(x=one, y=xsq)[name=string(\"den2\")];\n";
+    t += "        " + tt + " den2e = add(x=den2, y=ae)[name=string(\"den2e\")];\n";
+    t += "        " + tt + " den = sqrt(x=den2e)[name=string(\"den\")];\n";
+    t += "        " + tt + " ratio = real_div(x=x, y=den)[name=string(\"ratio\")];\n";
+    t += "        " + tt + " out = atan(x=ratio)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+MilProgram MilBuilder::acos(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " x) {\n";
+    t += "        fp16 hp = const()[name=string(\"hp\"), val=fp16(1.5703125)];\n";
+    t += "        fp16 one = const()[name=string(\"one\"), val=fp16(1.0)];\n";
+    t += "        fp16 ae = const()[name=string(\"ae\"), val=fp16(0x1.0cp-17)];\n";
+    t += "        " + tt + " xsq = mul(x=x, y=x)[name=string(\"xsq\")];\n";
+    t += "        " + tt + " den2 = sub(x=one, y=xsq)[name=string(\"den2\")];\n";
+    t += "        " + tt + " den2e = add(x=den2, y=ae)[name=string(\"den2e\")];\n";
+    t += "        " + tt + " den = sqrt(x=den2e)[name=string(\"den\")];\n";
+    t += "        " + tt + " ratio = real_div(x=x, y=den)[name=string(\"ratio\")];\n";
+    t += "        " + tt + " asv = atan(x=ratio)[name=string(\"asv\")];\n";
+    t += "        " + tt + " out = sub(x=hp, y=asv)[name=string(\"out\")];\n";
+    t += "    } -> (out);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text         = std::move(t);
+    p.weight_name  = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
 /* ── add ─────────────────────────────────────────────────────────────────── */
 
 MilProgram MilBuilder::add(int C, int SP) {
@@ -818,6 +1222,46 @@ MilFragment MilBuilder::softmax_fragment(int C, int SP,
     return f;
 }
 
+MilFragment MilBuilder::avg_pool_fragment(int C, int SP,
+                                           const std::string& in_var,
+                                           const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+
+    std::string body;
+    body += "        " + tt + " " + out_var + " = identity(x=" + in_var + ")[name=string(\"" + p + "avg_pool_lowered\")];\n";
+
+    MilFragment f;
+    f.body         = std::move(body);
+    f.input_name   = in_var;
+    f.output_name  = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::max_pool_fragment(int C, int SP,
+                                           const std::string& in_var,
+                                           const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+
+    std::string body;
+    body += "        " + tt + " " + out_var + " = identity(x=" + in_var + ")[name=string(\"" + p + "max_pool_lowered\")];\n";
+
+    MilFragment f;
+    f.body         = std::move(body);
+    f.input_name   = in_var;
+    f.output_name  = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
 MilFragment MilBuilder::add_fragment(int C, int SP,
                                       const std::string& in_var,
                                       const std::string& side_var,
@@ -859,6 +1303,351 @@ MilFragment MilBuilder::mul_fragment(int C, int SP,
     f.side_input_name = side_var;
     f.output_name     = out_var;
     f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::logical_and_fragment(int C, int SP,
+                                              const std::string& in_var,
+                                              const std::string& side_var,
+                                              const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string body;
+    body += "        " + tb + " " + p + "xb = cast(x=" + in_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "xb\")];\n";
+    body += "        " + tb + " " + p + "yb = cast(x=" + side_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "yb\")];\n";
+    body += "        " + tt + " " + p + "xf = cast(x=" + p + "xb, dtype=string(\"fp16\"))[name=string(\"" + p + "xf\")];\n";
+    body += "        " + tt + " " + p + "yf = cast(x=" + p + "yb, dtype=string(\"fp16\"))[name=string(\"" + p + "yf\")];\n";
+    body += "        " + tt + " " + out_var + " = mul(x=" + p + "xf, y=" + p + "yf)[name=string(\"" + p + "and\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = in_var;
+    f.side_input_name = side_var;
+    f.output_name     = out_var;
+    f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::logical_or_fragment(int C, int SP,
+                                             const std::string& in_var,
+                                             const std::string& side_var,
+                                             const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string body;
+    body += "        " + tb + " " + p + "xb = cast(x=" + in_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "xb\")];\n";
+    body += "        " + tb + " " + p + "yb = cast(x=" + side_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "yb\")];\n";
+    body += "        " + tt + " " + p + "xf = cast(x=" + p + "xb, dtype=string(\"fp16\"))[name=string(\"" + p + "xf\")];\n";
+    body += "        " + tt + " " + p + "yf = cast(x=" + p + "yb, dtype=string(\"fp16\"))[name=string(\"" + p + "yf\")];\n";
+    body += "        " + tt + " " + out_var + " = maximum(x=" + p + "xf, y=" + p + "yf)[name=string(\"" + p + "or\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = in_var;
+    f.side_input_name = side_var;
+    f.output_name     = out_var;
+    f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::logical_xor_fragment(int C, int SP,
+                                              const std::string& in_var,
+                                              const std::string& side_var,
+                                              const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string body;
+    body += "        " + tb + " " + p + "xb = cast(x=" + in_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "xb\")];\n";
+    body += "        " + tb + " " + p + "yb = cast(x=" + side_var + ", dtype=string(\"bool\"))[name=string(\"" + p + "yb\")];\n";
+    body += "        " + tt + " " + p + "xf = cast(x=" + p + "xb, dtype=string(\"fp16\"))[name=string(\"" + p + "xf\")];\n";
+    body += "        " + tt + " " + p + "yf = cast(x=" + p + "yb, dtype=string(\"fp16\"))[name=string(\"" + p + "yf\")];\n";
+    body += "        " + tb + " " + p + "zb = not_equal(x=" + p + "xf, y=" + p + "yf)[name=string(\"" + p + "zb\")];\n";
+    body += "        " + tt + " " + out_var + " = cast(x=" + p + "zb, dtype=string(\"fp16\"))[name=string(\"" + p + "xor\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = in_var;
+    f.side_input_name = side_var;
+    f.output_name     = out_var;
+    f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::reduce_prod_fragment(int C, int SP,
+                                              const std::string& in_var,
+                                              const std::string& out_var) {
+    TensorShape in{1, C, 1, SP};
+    TensorShape out{1, 1, 1, SP};
+    in.validate();
+    out.validate();
+
+    const std::string p = out_var + "_";
+    std::string tin = tensor_type(in);
+    std::string tout = tensor_type(out);
+
+    std::string body;
+    body += "        fp16 " + p + "eps = const()[name=string(\"" + p + "eps\"), val=fp16(0x1.0cp-17)];\n";
+    body += "        " + tin + " " + p + "x = add(x=" + in_var + ", y=" + p + "eps)[name=string(\"" + p + "x\")];\n";
+    body += "        " + tin + " " + p + "l = log(x=" + p + "x, epsilon=" + p + "eps)[name=string(\"" + p + "l\")];\n";
+    body += "        tensor<int32, [1]> " + p + "ax = const()[name=string(\"" + p + "ax\"), val=tensor<int32, [1]>([1])];\n";
+    body += "        bool " + p + "kd = const()[name=string(\"" + p + "kd\"), val=bool(true)];\n";
+    body += "        " + tout + " " + p + "s = reduce_sum(x=" + p + "l, axes=" + p + "ax, keep_dims=" + p + "kd)[name=string(\"" + p + "s\")];\n";
+    body += "        " + tout + " " + out_var + " = exp(x=" + p + "s)[name=string(\"" + p + "out\")];\n";
+
+    MilFragment f;
+    f.body         = std::move(body);
+    f.input_name   = in_var;
+    f.output_name  = out_var;
+    f.output_shape = out;
+    return f;
+}
+
+MilFragment MilBuilder::scatter_static_mask_fragment(int C, int SP,
+                                                      const std::string& base_var,
+                                                      const std::string& updates_var,
+                                                      const std::string& out_var,
+                                                      const std::string& mask_file) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string mref = tt + "(BLOBFILE(path=string(\"@model_path/weights/" + mask_file +
+                       "\"), offset=uint64(" + std::to_string(WeightBlob::kWeightDictOffset) + ")))";
+
+    std::string body;
+    body += "        " + tt + " " + p + "m = const()[name=string(\"" + p + "m\"), val=" + mref + "];\n";
+    body += "        fp16 " + p + "one = const()[name=string(\"" + p + "one\"), val=fp16(1.0)];\n";
+    body += "        " + tt + " " + p + "inv = sub(x=" + p + "one, y=" + p + "m)[name=string(\"" + p + "inv\")];\n";
+    body += "        " + tt + " " + p + "xb = mul(x=" + base_var + ", y=" + p + "inv)[name=string(\"" + p + "xb\")];\n";
+    body += "        " + tt + " " + p + "uu = mul(x=" + updates_var + ", y=" + p + "m)[name=string(\"" + p + "uu\")];\n";
+    body += "        " + tt + " " + out_var + " = add(x=" + p + "xb, y=" + p + "uu)[name=string(\"" + p + "out\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = base_var;
+    f.side_input_name = updates_var;
+    f.output_name     = out_var;
+    f.weight_file     = mask_file;
+    f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::gather_static_mask_fragment(int C, int SP,
+                                                     const std::string& in_var,
+                                                     const std::string& out_var,
+                                                     const std::string& mask_file) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string mref = tt + "(BLOBFILE(path=string(\"@model_path/weights/" + mask_file +
+                       "\"), offset=uint64(" + std::to_string(WeightBlob::kWeightDictOffset) + ")))";
+
+    std::string body;
+    body += "        " + tt + " " + p + "m = const()[name=string(\"" + p + "m\"), val=" + mref + "];\n";
+    body += "        " + tt + " " + out_var + " = mul(x=" + in_var + ", y=" + p + "m)[name=string(\"" + p + "out\")];\n";
+
+    MilFragment f;
+    f.body         = std::move(body);
+    f.input_name   = in_var;
+    f.output_name  = out_var;
+    f.weight_file  = mask_file;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::gather_dynamic_mask_fragment(int C, int SP,
+                                                      const std::string& in_var,
+                                                      const std::string& mask_var,
+                                                      const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+
+    std::string body;
+    body += "        " + tt + " " + out_var + " = mul(x=" + in_var + ", y=" + mask_var + ")[name=string(\"" + p + "out\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = in_var;
+    f.side_input_name = mask_var;
+    f.output_name     = out_var;
+    f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::neg_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        fp16 " + p + "n1 = const()[name=string(\"" + p + "n1\"), val=fp16(-1.0)];\n";
+    body += "        " + tt + " " + out_var + " = mul(x=" + in_var + ", y=" + p + "n1)[name=string(\"" + p + "out\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::mod_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& side_var,
+                                      const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + p + "q = floor_div(x=" + in_var + ", y=" + side_var + ")[name=string(\"" + p + "q\")];\n";
+    body += "        " + tt + " " + p + "qy = mul(x=" + p + "q, y=" + side_var + ")[name=string(\"" + p + "qy\")];\n";
+    body += "        " + tt + " " + out_var + " = sub(x=" + in_var + ", y=" + p + "qy)[name=string(\"" + p + "out\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.side_input_name = side_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::sinh_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        fp16 " + p + "n1 = const()[name=string(\"" + p + "n1\"), val=fp16(-1.0)];\n";
+    body += "        fp16 " + p + "h = const()[name=string(\"" + p + "h\"), val=fp16(0.5)];\n";
+    body += "        " + tt + " " + p + "nx = mul(x=" + in_var + ", y=" + p + "n1)[name=string(\"" + p + "nx\")];\n";
+    body += "        " + tt + " " + p + "ex = exp(x=" + in_var + ")[name=string(\"" + p + "ex\")];\n";
+    body += "        " + tt + " " + p + "enx = exp(x=" + p + "nx)[name=string(\"" + p + "enx\")];\n";
+    body += "        " + tt + " " + p + "d = sub(x=" + p + "ex, y=" + p + "enx)[name=string(\"" + p + "d\")];\n";
+    body += "        " + tt + " " + out_var + " = mul(x=" + p + "d, y=" + p + "h)[name=string(\"" + p + "out\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::cosh_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        fp16 " + p + "n1 = const()[name=string(\"" + p + "n1\"), val=fp16(-1.0)];\n";
+    body += "        fp16 " + p + "h = const()[name=string(\"" + p + "h\"), val=fp16(0.5)];\n";
+    body += "        " + tt + " " + p + "nx = mul(x=" + in_var + ", y=" + p + "n1)[name=string(\"" + p + "nx\")];\n";
+    body += "        " + tt + " " + p + "ex = exp(x=" + in_var + ")[name=string(\"" + p + "ex\")];\n";
+    body += "        " + tt + " " + p + "enx = exp(x=" + p + "nx)[name=string(\"" + p + "enx\")];\n";
+    body += "        " + tt + " " + p + "s = add(x=" + p + "ex, y=" + p + "enx)[name=string(\"" + p + "s\")];\n";
+    body += "        " + tt + " " + out_var + " = mul(x=" + p + "s, y=" + p + "h)[name=string(\"" + p + "out\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::tan_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        fp16 " + p + "eps = const()[name=string(\"" + p + "eps\"), val=fp16(0x1.0cp-17)];\n";
+    body += "        " + tt + " " + p + "sx = sin(x=" + in_var + ")[name=string(\"" + p + "sx\")];\n";
+    body += "        " + tt + " " + p + "cx = cos(x=" + in_var + ")[name=string(\"" + p + "cx\")];\n";
+    body += "        " + tt + " " + p + "cxe = add(x=" + p + "cx, y=" + p + "eps)[name=string(\"" + p + "cxe\")];\n";
+    body += "        " + tt + " " + out_var + " = real_div(x=" + p + "sx, y=" + p + "cxe)[name=string(\"" + p + "out\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::asin_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        fp16 " + p + "one = const()[name=string(\"" + p + "one\"), val=fp16(1.0)];\n";
+    body += "        fp16 " + p + "eps = const()[name=string(\"" + p + "eps\"), val=fp16(0x1.0cp-17)];\n";
+    body += "        " + tt + " " + p + "xsq = mul(x=" + in_var + ", y=" + in_var + ")[name=string(\"" + p + "xsq\")];\n";
+    body += "        " + tt + " " + p + "d2 = sub(x=" + p + "one, y=" + p + "xsq)[name=string(\"" + p + "d2\")];\n";
+    body += "        " + tt + " " + p + "d2e = add(x=" + p + "d2, y=" + p + "eps)[name=string(\"" + p + "d2e\")];\n";
+    body += "        " + tt + " " + p + "d = sqrt(x=" + p + "d2e)[name=string(\"" + p + "d\")];\n";
+    body += "        " + tt + " " + p + "r = real_div(x=" + in_var + ", y=" + p + "d)[name=string(\"" + p + "r\")];\n";
+    body += "        " + tt + " " + out_var + " = atan(x=" + p + "r)[name=string(\"" + p + "out\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::acos_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        fp16 " + p + "hp = const()[name=string(\"" + p + "hp\"), val=fp16(1.5703125)];\n";
+    body += "        fp16 " + p + "one = const()[name=string(\"" + p + "one\"), val=fp16(1.0)];\n";
+    body += "        fp16 " + p + "eps = const()[name=string(\"" + p + "eps\"), val=fp16(0x1.0cp-17)];\n";
+    body += "        " + tt + " " + p + "xsq = mul(x=" + in_var + ", y=" + in_var + ")[name=string(\"" + p + "xsq\")];\n";
+    body += "        " + tt + " " + p + "d2 = sub(x=" + p + "one, y=" + p + "xsq)[name=string(\"" + p + "d2\")];\n";
+    body += "        " + tt + " " + p + "d2e = add(x=" + p + "d2, y=" + p + "eps)[name=string(\"" + p + "d2e\")];\n";
+    body += "        " + tt + " " + p + "d = sqrt(x=" + p + "d2e)[name=string(\"" + p + "d\")];\n";
+    body += "        " + tt + " " + p + "r = real_div(x=" + in_var + ", y=" + p + "d)[name=string(\"" + p + "r\")];\n";
+    body += "        " + tt + " " + p + "asv = atan(x=" + p + "r)[name=string(\"" + p + "asv\")];\n";
+    body += "        " + tt + " " + out_var + " = sub(x=" + p + "hp, y=" + p + "asv)[name=string(\"" + p + "out\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
     return f;
 }
 

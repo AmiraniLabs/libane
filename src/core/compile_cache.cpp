@@ -3,6 +3,7 @@
 #include <functional>
 #include <fstream>
 #include <filesystem>
+#include <mutex>
 
 namespace libane {
 

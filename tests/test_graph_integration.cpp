@@ -85,6 +85,19 @@ static std::vector<uint8_t> layernorm_bytes(int C, float gamma_val = 1.0f,
     return g;
 }
 
+static std::vector<uint8_t> scatter_mask_bytes(int C, int SP) {
+    // One static write position per channel: mask[c, idx(c)] = 1, else 0.
+    const size_t n = static_cast<size_t>(C) * SP;
+    std::vector<uint8_t> w(n * 2, 0);
+    const fp16 one = to_f16(1.0f);
+    for (int c = 0; c < C; ++c) {
+        int idx = (7 * c + 3) % SP;
+        size_t lin = static_cast<size_t>(c) * SP + static_cast<size_t>(idx);
+        std::memcpy(w.data() + lin * 2, &one, 2);
+    }
+    return w;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Tier 1 — C++ build_plan on realistic sub-graphs
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -414,4 +427,300 @@ TEST_CASE("T3: execute returns false for mismatched input count", "[integration]
 
     bool ok = GraphExecutor::execute(*cg, {}, {}, {out_ptr}, {out_bytes});
     CHECK(!ok);
+}
+
+TEST_CASE("T3: static-mask scatter compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+
+    AneGraph g;
+    TensorId base = g.add_input("base", S(C, SP));
+    TensorId upd  = g.add_input("updates", S(C, SP));
+    auto mask = scatter_mask_bytes(C, SP);
+    TensorId out = g.add_op(LIBANE_OP_SCATTER, {base, upd}, S(C, SP), mask.data(), mask.size());
+    g.mark_output(out);
+
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    std::vector<fp16> base_data(n), upd_data(n), out_data(n, to_f16(0.0f));
+    for (size_t i = 0; i < n; ++i) {
+        base_data[i] = to_f16(static_cast<float>(i % 97) * 0.125f - 3.0f);
+        upd_data[i]  = to_f16(100.0f + static_cast<float>(i % 31));
+    }
+
+    const void* in_ptrs[2] = {base_data.data(), upd_data.data()};
+    size_t in_sizes[2] = {base_data.size() * sizeof(fp16), upd_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_sizes[1] = {out_data.size() * sizeof(fp16)};
+
+    bool ok = GraphExecutor::execute(*cg,
+                                     {in_ptrs[0], in_ptrs[1]},
+                                     {in_sizes[0], in_sizes[1]},
+                                     {out_ptrs[0]},
+                                     {out_sizes[0]});
+    REQUIRE(ok);
+
+    for (int c = 0; c < C; ++c) {
+        int idx = (7 * c + 3) % SP;
+        size_t lin = static_cast<size_t>(c) * SP + static_cast<size_t>(idx);
+        CHECK(near(to_f32(out_data[lin]), to_f32(upd_data[lin]), 0.0f, 0.1f));
+    }
+}
+
+TEST_CASE("T3: static-mask gather compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+
+    AneGraph g;
+    TensorId x = g.add_input("x", S(C, SP));
+    auto mask = scatter_mask_bytes(C, SP);
+    TensorId out = g.add_op(LIBANE_OP_GATHER, {x}, S(C, SP), mask.data(), mask.size());
+    g.mark_output(out);
+
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    std::vector<fp16> x_data(n), out_data(n, to_f16(0.0f));
+    for (size_t i = 0; i < n; ++i)
+        x_data[i] = to_f16(static_cast<float>(i % 53) * 0.25f - 4.0f);
+
+    const void* in_ptrs[1] = {x_data.data()};
+    size_t in_sizes[1] = {x_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_sizes[1] = {out_data.size() * sizeof(fp16)};
+
+    bool ok = GraphExecutor::execute(*cg,
+                                     {in_ptrs[0]},
+                                     {in_sizes[0]},
+                                     {out_ptrs[0]},
+                                     {out_sizes[0]});
+    REQUIRE(ok);
+
+    for (int c = 0; c < C; ++c) {
+        int idx = (7 * c + 3) % SP;
+        size_t lin = static_cast<size_t>(c) * SP + static_cast<size_t>(idx);
+        CHECK(near(to_f32(out_data[lin]), to_f32(x_data[lin]), 0.0f, 0.1f));
+    }
+}
+
+TEST_CASE("T3: dynamic-mask gather compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+
+    AneGraph g;
+    TensorId x = g.add_input("x", S(C, SP));
+    TensorId m = g.add_input("m", S(C, SP));
+    TensorId out = g.add_op(LIBANE_OP_GATHER, {x, m}, S(C, SP));
+    g.mark_output(out);
+
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    std::vector<fp16> x_data(n), m_data(n), out_data(n, to_f16(0.0f));
+    for (size_t i = 0; i < n; ++i) {
+        x_data[i] = to_f16(static_cast<float>(i % 41) * 0.125f - 2.0f);
+        m_data[i] = to_f16((i % 5 == 0) ? 1.0f : 0.0f);
+    }
+
+    const void* in_ptrs[2] = {x_data.data(), m_data.data()};
+    size_t in_sizes[2] = {x_data.size() * sizeof(fp16), m_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_sizes[1] = {out_data.size() * sizeof(fp16)};
+
+    bool ok = GraphExecutor::execute(*cg,
+                                     {in_ptrs[0], in_ptrs[1]},
+                                     {in_sizes[0], in_sizes[1]},
+                                     {out_ptrs[0]},
+                                     {out_sizes[0]});
+    REQUIRE(ok);
+
+    for (size_t i = 0; i < n; ++i) {
+        float expected = to_f32(x_data[i]) * to_f32(m_data[i]);
+        CHECK(near(to_f32(out_data[i]), expected, 0.0f, 0.1f));
+    }
+}
+
+TEST_CASE("T3: static-mask scatter_nd compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+
+    AneGraph g;
+    TensorId base = g.add_input("base", S(C, SP));
+    TensorId upd  = g.add_input("updates", S(C, SP));
+    auto mask = scatter_mask_bytes(C, SP);
+    TensorId out = g.add_op(LIBANE_OP_SCATTER_ND, {base, upd}, S(C, SP), mask.data(), mask.size());
+    g.mark_output(out);
+
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    std::vector<fp16> base_data(n), upd_data(n), out_data(n, to_f16(0.0f));
+    for (size_t i = 0; i < n; ++i) {
+        base_data[i] = to_f16(static_cast<float>(i % 97) * 0.125f - 3.0f);
+        upd_data[i]  = to_f16(100.0f + static_cast<float>(i % 31));
+    }
+
+    const void* in_ptrs[2] = {base_data.data(), upd_data.data()};
+    size_t in_sizes[2] = {base_data.size() * sizeof(fp16), upd_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_sizes[1] = {out_data.size() * sizeof(fp16)};
+
+    bool ok = GraphExecutor::execute(*cg,
+                                     {in_ptrs[0], in_ptrs[1]},
+                                     {in_sizes[0], in_sizes[1]},
+                                     {out_ptrs[0]},
+                                     {out_sizes[0]});
+    REQUIRE(ok);
+
+    for (int c = 0; c < C; ++c) {
+        int idx = (7 * c + 3) % SP;
+        size_t lin = static_cast<size_t>(c) * SP + static_cast<size_t>(idx);
+        CHECK(near(to_f32(out_data[lin]), to_f32(upd_data[lin]), 0.0f, 0.1f));
+    }
+}
+
+TEST_CASE("T3: static-mask scatter_along_axis compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+
+    AneGraph g;
+    TensorId base = g.add_input("base", S(C, SP));
+    TensorId upd  = g.add_input("updates", S(C, SP));
+    auto mask = scatter_mask_bytes(C, SP);
+    TensorId out = g.add_op(LIBANE_OP_SCATTER_ALONG_AXIS, {base, upd}, S(C, SP), mask.data(), mask.size());
+    g.mark_output(out);
+
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    std::vector<fp16> base_data(n), upd_data(n), out_data(n, to_f16(0.0f));
+    for (size_t i = 0; i < n; ++i) {
+        base_data[i] = to_f16(static_cast<float>(i % 97) * 0.125f - 3.0f);
+        upd_data[i]  = to_f16(100.0f + static_cast<float>(i % 31));
+    }
+
+    const void* in_ptrs[2] = {base_data.data(), upd_data.data()};
+    size_t in_sizes[2] = {base_data.size() * sizeof(fp16), upd_data.size() * sizeof(fp16)};
+    void* out_ptrs[1] = {out_data.data()};
+    size_t out_sizes[1] = {out_data.size() * sizeof(fp16)};
+
+    bool ok = GraphExecutor::execute(*cg,
+                                     {in_ptrs[0], in_ptrs[1]},
+                                     {in_sizes[0], in_sizes[1]},
+                                     {out_ptrs[0]},
+                                     {out_sizes[0]});
+    REQUIRE(ok);
+
+    for (int c = 0; c < C; ++c) {
+        int idx = (7 * c + 3) % SP;
+        size_t lin = static_cast<size_t>(c) * SP + static_cast<size_t>(idx);
+        CHECK(near(to_f32(out_data[lin]), to_f32(upd_data[lin]), 0.0f, 0.1f));
+    }
+}
+
+TEST_CASE("T3: neg lowering compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+    AneGraph g;
+    TensorId x = g.add_input("x", S(C, SP));
+    TensorId y = g.add_op(LIBANE_OP_NEG, {x}, S(C, SP));
+    g.mark_output(y);
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+    std::vector<fp16> in(n), out(n, to_f16(0.0f));
+    for (size_t i = 0; i < n; ++i) in[i] = to_f16(float(int(i % 41) - 20) * 0.25f);
+    bool ok = GraphExecutor::execute(*cg, {in.data()}, {in.size() * sizeof(fp16)}, {out.data()}, {out.size() * sizeof(fp16)});
+    REQUIRE(ok);
+    for (size_t i = 0; i < n; ++i) CHECK(near(to_f32(out[i]), -to_f32(in[i]), 0.0f, 0.05f));
+}
+
+TEST_CASE("T3: mod lowering compile + execute (negative operands)", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+    AneGraph g;
+    TensorId x = g.add_input("x", S(C, SP));
+    TensorId d = g.add_input("d", S(C, SP));
+    TensorId y = g.add_op(LIBANE_OP_MOD, {x, d}, S(C, SP));
+    g.mark_output(y);
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+    std::vector<fp16> in(n), den(n), out(n, to_f16(0.0f));
+    for (size_t i = 0; i < n; ++i) {
+        float xv = float(int(i % 31) - 15);
+        float dv = float((i % 5) + 2); // positive denominator
+        if (i % 2) xv = -xv;
+        in[i] = to_f16(xv);
+        den[i] = to_f16(dv);
+    }
+    bool ok = GraphExecutor::execute(*cg,
+                                     {in.data(), den.data()},
+                                     {in.size() * sizeof(fp16), den.size() * sizeof(fp16)},
+                                     {out.data()},
+                                     {out.size() * sizeof(fp16)});
+    REQUIRE(ok);
+    for (size_t i = 0; i < n; ++i) {
+        float xv = to_f32(in[i]);
+        float dv = to_f32(den[i]);
+        float q = std::floor(xv / dv);
+        float ref = xv - q * dv;
+        CHECK(near(to_f32(out[i]), ref, 0.0f, 0.2f));
+    }
+}
+
+TEST_CASE("T3: sinh/cosh/tan lowering compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+    auto run_unary = [&](libane_op_t op, auto ref_fn, float atol) {
+        AneGraph g;
+        TensorId x = g.add_input("x", S(C, SP));
+        TensorId y = g.add_op(op, {x}, S(C, SP));
+        g.mark_output(y);
+        auto cg = GraphCompiler::compile(g);
+        if (!cg) return false;
+        std::vector<fp16> in(n), out(n, to_f16(0.0f));
+        for (size_t i = 0; i < n; ++i) in[i] = to_f16(float(int(i % 33) - 16) * 0.0625f);
+        bool ok = GraphExecutor::execute(*cg, {in.data()}, {in.size() * sizeof(fp16)}, {out.data()}, {out.size() * sizeof(fp16)});
+        if (!ok) return false;
+        for (size_t i = 0; i < n; ++i) CHECK(near(to_f32(out[i]), ref_fn(to_f32(in[i])), 0.0f, atol));
+        return true;
+    };
+    REQUIRE(run_unary(LIBANE_OP_SINH, [](float x){ return std::sinh(x); }, 0.15f));
+    REQUIRE(run_unary(LIBANE_OP_COSH, [](float x){ return std::cosh(x); }, 0.15f));
+    REQUIRE(run_unary(LIBANE_OP_TAN,  [](float x){ return std::tan(x);  }, 0.20f));
+}
+
+TEST_CASE("T3: asin/acos lowering compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+    const int C = 64, SP = 64;
+    const size_t n = static_cast<size_t>(C) * SP;
+    auto run_unary = [&](libane_op_t op, auto ref_fn) {
+        AneGraph g;
+        TensorId x = g.add_input("x", S(C, SP));
+        TensorId y = g.add_op(op, {x}, S(C, SP));
+        g.mark_output(y);
+        auto cg = GraphCompiler::compile(g);
+        if (!cg) return false;
+        std::vector<fp16> in(n), out(n, to_f16(0.0f));
+        for (size_t i = 0; i < n; ++i) in[i] = to_f16(-0.95f + 1.9f * float(i % 127) / 126.0f);
+        bool ok = GraphExecutor::execute(*cg, {in.data()}, {in.size() * sizeof(fp16)}, {out.data()}, {out.size() * sizeof(fp16)});
+        if (!ok) return false;
+        for (size_t i = 0; i < n; ++i) CHECK(near(to_f32(out[i]), ref_fn(to_f32(in[i])), 0.0f, 0.25f));
+        return true;
+    };
+    REQUIRE(run_unary(LIBANE_OP_ASIN, [](float x){ return std::asin(x); }));
+    REQUIRE(run_unary(LIBANE_OP_ACOS, [](float x){ return std::acos(x); }));
 }

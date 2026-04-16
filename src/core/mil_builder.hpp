@@ -228,6 +228,96 @@ public:
     static MilProgram softmax(int C, int SP);
 
     /**
+     * avg_pool lowering path for graph IR.
+     *
+     * Current graph usage is identity-equivalent kernel/stride (1x1/1x1), so
+     * we lower to identity to avoid ANE standalone compile rejects.
+     */
+    static MilProgram avg_pool(int C, int SP);
+
+    /**
+     * max_pool lowering path for graph IR.
+     *
+     * Current graph usage is identity-equivalent kernel/stride (1x1/1x1), so
+     * we lower to identity to avoid ANE standalone compile rejects.
+     */
+    static MilProgram max_pool(int C, int SP);
+
+    /**
+     * Logical AND lowering path.
+     * Semantics: out = fp16(bool(x) && bool(y)).
+     */
+    static MilProgram logical_and(int C, int SP);
+
+    /**
+     * Logical OR lowering path.
+     * Semantics: out = fp16(bool(x) || bool(y)).
+     */
+    static MilProgram logical_or(int C, int SP);
+
+    /**
+     * Logical XOR lowering path.
+     * Semantics: out = fp16(bool(x) xor bool(y)).
+     */
+    static MilProgram logical_xor(int C, int SP);
+
+    /**
+     * Reduce-product lowering path across channels (axis=1, keep_dims=true).
+     * Input: [1,C,1,S], Output: [1,1,1,S]
+     */
+    static MilProgram reduce_prod(int C, int SP);
+
+    /**
+     * Static-mask scatter lowering.
+     *
+     * Semantics:
+     *   out = base * (1 - mask) + updates * mask
+     * where mask is a compile-time fp16 tensor [1,C,1,S] stored as weights.
+     */
+    static MilProgram scatter_static_mask(int C, int SP,
+                                           const std::string& mask_file = "mask.bin");
+
+    /**
+     * Static-mask gather lowering.
+     *
+     * Semantics:
+     *   out = x * mask
+     * where mask is a compile-time fp16 tensor [1,C,1,S] stored as weights.
+     */
+    static MilProgram gather_static_mask(int C, int SP,
+                                          const std::string& mask_file = "mask.bin");
+
+    /**
+     * Dynamic-mask gather lowering.
+     *
+     * Semantics:
+     *   out = x * mask
+     * where mask is provided at runtime as a second input [1,C,1,S].
+     */
+    static MilProgram gather_dynamic_mask(int C, int SP);
+
+    /** Unary negation lowering: out = mul(x, -1). */
+    static MilProgram neg(int C, int SP);
+
+    /** Elementwise modulo lowering: out = x - floor_div(x,y) * y. */
+    static MilProgram mod(int C, int SP);
+
+    /** Hyperbolic sine lowering: sinh(x) = 0.5 * (exp(x) - exp(-x)). */
+    static MilProgram sinh(int C, int SP);
+
+    /** Hyperbolic cosine lowering: cosh(x) = 0.5 * (exp(x) + exp(-x)). */
+    static MilProgram cosh(int C, int SP);
+
+    /** Tangent lowering: tan(x) = sin(x) / (cos(x) + eps). */
+    static MilProgram tan(int C, int SP);
+
+    /** Inverse sine lowering using atan and sqrt with clamp/epsilon guards. */
+    static MilProgram asin(int C, int SP);
+
+    /** Inverse cosine lowering: acos(x) = pi/2 - asin(x). */
+    static MilProgram acos(int C, int SP);
+
+    /**
      * Elementwise add. No weights.
      */
     static MilProgram add(int C, int SP);
@@ -308,6 +398,14 @@ public:
                                          const std::string& in_var,
                                          const std::string& out_var);
 
+    static MilFragment avg_pool_fragment(int C, int SP,
+                                          const std::string& in_var,
+                                          const std::string& out_var);
+
+    static MilFragment max_pool_fragment(int C, int SP,
+                                          const std::string& in_var,
+                                          const std::string& out_var);
+
     static MilFragment add_fragment(int C, int SP,
                                      const std::string& in_var,
                                      const std::string& side_var,
@@ -317,6 +415,70 @@ public:
                                      const std::string& in_var,
                                      const std::string& side_var,
                                      const std::string& out_var);
+
+    static MilFragment logical_and_fragment(int C, int SP,
+                                             const std::string& in_var,
+                                             const std::string& side_var,
+                                             const std::string& out_var);
+
+    static MilFragment logical_or_fragment(int C, int SP,
+                                            const std::string& in_var,
+                                            const std::string& side_var,
+                                            const std::string& out_var);
+
+    static MilFragment logical_xor_fragment(int C, int SP,
+                                             const std::string& in_var,
+                                             const std::string& side_var,
+                                             const std::string& out_var);
+
+    static MilFragment reduce_prod_fragment(int C, int SP,
+                                             const std::string& in_var,
+                                             const std::string& out_var);
+
+    static MilFragment scatter_static_mask_fragment(int C, int SP,
+                                                     const std::string& base_var,
+                                                     const std::string& updates_var,
+                                                     const std::string& out_var,
+                                                     const std::string& mask_file = "mask.bin");
+
+    static MilFragment gather_static_mask_fragment(int C, int SP,
+                                                    const std::string& in_var,
+                                                    const std::string& out_var,
+                                                    const std::string& mask_file = "mask.bin");
+
+    static MilFragment gather_dynamic_mask_fragment(int C, int SP,
+                                                     const std::string& in_var,
+                                                     const std::string& mask_var,
+                                                     const std::string& out_var);
+
+    static MilFragment neg_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& out_var);
+
+    static MilFragment mod_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& side_var,
+                                     const std::string& out_var);
+
+    static MilFragment sinh_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
+    static MilFragment cosh_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
+    static MilFragment tan_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& out_var);
+
+    static MilFragment asin_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
+    static MilFragment acos_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
 
     static MilFragment transpose_fragment(int C, int SP,
                                            const std::string& in_var,

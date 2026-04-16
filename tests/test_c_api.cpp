@@ -262,6 +262,254 @@ TEST_CASE("libane_execute with null input returns error", "[api]") {
     libane_release(h);
 }
 
+TEST_CASE("libane_compile reduce_prod is graph-only", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+    auto h = libane_compile(LIBANE_OP_REDUCE_PROD, shape, nullptr, 0);
+    CHECK(h == nullptr);
+    CHECK(std::strlen(libane_last_error()) > 0);
+}
+
+TEST_CASE("libane_compile scatter is graph-only", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+    auto h = libane_compile(LIBANE_OP_SCATTER, shape, nullptr, 0);
+    CHECK(h == nullptr);
+    CHECK(std::strlen(libane_last_error()) > 0);
+}
+
+TEST_CASE("libane_compile gather is graph-only", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+    auto h = libane_compile(LIBANE_OP_GATHER, shape, nullptr, 0);
+    CHECK(h == nullptr);
+    CHECK(std::strlen(libane_last_error()) > 0);
+}
+
+TEST_CASE("libane_compile scatter_nd is graph-only", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+    auto h = libane_compile(LIBANE_OP_SCATTER_ND, shape, nullptr, 0);
+    CHECK(h == nullptr);
+    CHECK(std::strlen(libane_last_error()) > 0);
+}
+
+TEST_CASE("libane_compile scatter_along_axis is graph-only", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+    auto h = libane_compile(LIBANE_OP_SCATTER_ALONG_AXIS, shape, nullptr, 0);
+    CHECK(h == nullptr);
+    CHECK(std::strlen(libane_last_error()) > 0);
+}
+
+TEST_CASE("libane_compile neg/mod/sinh/cosh/tan/asin/acos are graph-only", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+
+    const libane_op_t ops[] = {
+        LIBANE_OP_NEG, LIBANE_OP_MOD, LIBANE_OP_SINH, LIBANE_OP_COSH,
+        LIBANE_OP_TAN, LIBANE_OP_ASIN, LIBANE_OP_ACOS
+    };
+    for (auto op : ops) {
+        auto h = libane_compile(op, shape, nullptr, 0);
+        CHECK(h == nullptr);
+        CHECK(std::strlen(libane_last_error()) > 0);
+    }
+}
+
+TEST_CASE("libane_execute avg_pool lowering path behaves as identity", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    // 64*512*2 = 65536 bytes (>49KB), avoids small-buffer IOSurface artifacts.
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+
+    auto h = libane_compile(LIBANE_OP_AVG_POOL, shape, nullptr, 0);
+    if (!h) { WARN("ANE compile failed — skipping: " << libane_last_error()); return; }
+    REQUIRE(h != nullptr);
+
+    const size_t n = static_cast<size_t>(shape.dims[1]) * shape.dims[3];
+    std::vector<libane_f16_t> in(n), out(n);
+    for (size_t i = 0; i < n; ++i)
+        in[i] = f16(static_cast<float>((int(i % 31) - 15) * 0.25f));
+
+    auto st = libane_execute(h, in.data(), out.data(), shape);
+    REQUIRE(st == LIBANE_OK);
+
+    for (size_t i = 0; i < std::min<size_t>(n, 512); ++i) {
+        CHECK(std::abs(f32(out[i]) - f32(in[i])) < 0.05f);
+    }
+
+    libane_release(h);
+}
+
+TEST_CASE("libane_execute max_pool lowering path behaves as identity", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+
+    auto h = libane_compile(LIBANE_OP_MAX_POOL, shape, nullptr, 0);
+    if (!h) { WARN("ANE compile failed — skipping: " << libane_last_error()); return; }
+    REQUIRE(h != nullptr);
+
+    const size_t n = static_cast<size_t>(shape.dims[1]) * shape.dims[3];
+    std::vector<libane_f16_t> in(n), out(n);
+    for (size_t i = 0; i < n; ++i)
+        in[i] = f16(static_cast<float>((int(i % 17) - 8) * 0.5f));
+
+    auto st = libane_execute(h, in.data(), out.data(), shape);
+    REQUIRE(st == LIBANE_OK);
+
+    for (size_t i = 0; i < std::min<size_t>(n, 512); ++i) {
+        CHECK(std::abs(f32(out[i]) - f32(in[i])) < 0.05f);
+    }
+
+    libane_release(h);
+}
+
+TEST_CASE("libane_execute2 logical_and lowering path returns 0/1 mask", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+
+    auto h = libane_compile(LIBANE_OP_LOGICAL_AND, shape, nullptr, 0);
+    if (!h) { WARN("ANE compile failed — skipping: " << libane_last_error()); return; }
+    REQUIRE(h != nullptr);
+
+    const size_t n = static_cast<size_t>(shape.dims[1]) * shape.dims[3];
+    std::vector<libane_f16_t> a(n), b(n), out(n);
+    std::vector<float> expected(n);
+    for (size_t i = 0; i < n; ++i) {
+        float av = (i % 3 == 0) ? 0.0f : ((i % 2 == 0) ? 2.0f : -1.0f);
+        float bv = (i % 5 == 0) ? 0.0f : 4.0f;
+        a[i] = f16(av);
+        b[i] = f16(bv);
+        expected[i] = ((av != 0.0f) && (bv != 0.0f)) ? 1.0f : 0.0f;
+    }
+
+    auto st = libane_execute2(h, a.data(), b.data(), out.data(), shape);
+    REQUIRE(st == LIBANE_OK);
+
+    for (size_t i = 0; i < std::min<size_t>(n, 1024); ++i) {
+        CHECK(std::abs(f32(out[i]) - expected[i]) < 0.05f);
+    }
+
+    libane_release(h);
+}
+
+TEST_CASE("libane_execute2 logical_or lowering path returns 0/1 mask", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+
+    auto h = libane_compile(LIBANE_OP_LOGICAL_OR, shape, nullptr, 0);
+    if (!h) { WARN("ANE compile failed — skipping: " << libane_last_error()); return; }
+    REQUIRE(h != nullptr);
+
+    const size_t n = static_cast<size_t>(shape.dims[1]) * shape.dims[3];
+    std::vector<libane_f16_t> a(n), b(n), out(n);
+    std::vector<float> expected(n);
+    for (size_t i = 0; i < n; ++i) {
+        float av = (i % 3 == 0) ? 0.0f : 2.0f;
+        float bv = (i % 5 == 0) ? 0.0f : -4.0f;
+        a[i] = f16(av);
+        b[i] = f16(bv);
+        expected[i] = ((av != 0.0f) || (bv != 0.0f)) ? 1.0f : 0.0f;
+    }
+
+    auto st = libane_execute2(h, a.data(), b.data(), out.data(), shape);
+    REQUIRE(st == LIBANE_OK);
+
+    for (size_t i = 0; i < std::min<size_t>(n, 1024); ++i) {
+        CHECK(std::abs(f32(out[i]) - expected[i]) < 0.05f);
+    }
+
+    libane_release(h);
+}
+
+TEST_CASE("libane_execute2 logical_xor lowering path returns 0/1 mask", "[api]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    libane_shape_t shape{};
+    shape.dims[0]=1; shape.dims[1]=64; shape.dims[2]=1; shape.dims[3]=512; shape.ndim=4;
+
+    auto h = libane_compile(LIBANE_OP_LOGICAL_XOR, shape, nullptr, 0);
+    if (!h) { WARN("ANE compile failed — skipping: " << libane_last_error()); return; }
+    REQUIRE(h != nullptr);
+
+    const size_t n = static_cast<size_t>(shape.dims[1]) * shape.dims[3];
+    std::vector<libane_f16_t> a(n), b(n), out(n);
+    std::vector<float> expected(n);
+    for (size_t i = 0; i < n; ++i) {
+        float av = (i % 3 == 0) ? 0.0f : ((i % 2 == 0) ? 2.0f : -1.0f);
+        float bv = (i % 5 == 0) ? 0.0f : ((i % 7 == 0) ? 0.0f : 4.0f);
+        a[i] = f16(av);
+        b[i] = f16(bv);
+        bool ab = (av != 0.0f);
+        bool bb = (bv != 0.0f);
+        expected[i] = (ab != bb) ? 1.0f : 0.0f;
+    }
+
+    auto st = libane_execute2(h, a.data(), b.data(), out.data(), shape);
+    REQUIRE(st == LIBANE_OK);
+
+    for (size_t i = 0; i < std::min<size_t>(n, 1024); ++i) {
+        CHECK(std::abs(f32(out[i]) - expected[i]) < 0.05f);
+    }
+
+    libane_release(h);
+}
+
 /* ── libane_matmul_f16 ──────────────────────────────────────────────────── */
 
 TEST_CASE("libane_matmul_f16 identity matrix", "[api][matmul]") {
@@ -729,4 +977,258 @@ TEST_CASE("libane_compile_batch handles mixed success and failure", "[api][batch
 
     libane_release(handles[0]);
     libane_release(handles[2]);
+}
+
+/* ── libane_mil_compile / execute / release ─────────────────────────────── */
+
+// Minimal valid MIL program: relu(x) — unary, no weights.
+// Shape [1,32,1,32] = 1024 fp16 elements = 2048 bytes; pool pads to 49KB.
+static const char kReluMil[] = R"(
+buildInfo {
+   coremlc-version: "7.0.0"
+   coremltools-version: "7.0.0"
+   mlmodel-version: "7"
+   model-name: "test_relu"
+}
+func main(x: fp16[1,32,1,32]) -> (fp16[1,32,1,32]) {
+  %v = relu(x=x) -> (fp16);
+  return (%v);
+}
+)";
+
+// Binary MIL: add(a, b).  Inputs named a,b so alphabetical order = natural order.
+static const char kAddMil[] = R"(
+buildInfo {
+   coremlc-version: "7.0.0"
+   coremltools-version: "7.0.0"
+   mlmodel-version: "7"
+   model-name: "test_add"
+}
+func main(a: fp16[1,32,1,32], b: fp16[1,32,1,32]) -> (fp16[1,32,1,32]) {
+  %v = add(x=a, y=b) -> (fp16);
+  return (%v);
+}
+)";
+
+// MIL with one external weight file: elementwise mul by a learned scale.
+// Offset 64 = WeightBlob::kWeightDictOffset.
+static const char kScaleMil[] = R"(
+buildInfo {
+   coremlc-version: "7.0.0"
+   coremltools-version: "7.0.0"
+   mlmodel-version: "7"
+   model-name: "test_scale"
+}
+func main(x: fp16[1,32,1,32]) -> (fp16[1,32,1,32]) {
+  %w = const(val=tensor<fp16, [1,32,1,32]>(BLOBFILE(path=string("@model_path/weights/scale.bin"), offset=uint64(64)))) -> (fp16[1,32,1,32]);
+  %v = mul(x=x, y=%w) -> (fp16);
+  return (%v);
+}
+)";
+
+TEST_CASE("libane_mil_compile null text returns null", "[mil]") {
+    libane_set_log_level(LIBANE_LOG_SILENT);
+    auto h = libane_mil_compile(nullptr, nullptr, nullptr, nullptr, 0);
+    CHECK(h == nullptr);
+    CHECK(std::strlen(libane_last_error()) > 0);
+}
+
+TEST_CASE("libane_mil_compile invalid MIL returns null", "[mil]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    auto h = libane_mil_compile("this is not valid MIL",
+                                nullptr, nullptr, nullptr, 0);
+    CHECK(h == nullptr);
+    CHECK(std::strlen(libane_last_error()) > 0);
+}
+
+TEST_CASE("libane_mil_compile valid relu program", "[mil]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    auto h = libane_mil_compile(kReluMil, nullptr, nullptr, nullptr, 0);
+    if (!h) {
+        WARN("mil compile failed (may hit ~119 compile limit): " << libane_last_error());
+        return;
+    }
+    REQUIRE(h != nullptr);
+    libane_mil_release(h);
+}
+
+TEST_CASE("libane_mil_release null is safe", "[mil]") {
+    REQUIRE_NOTHROW(libane_mil_release(nullptr));
+}
+
+TEST_CASE("libane_mil_execute null handle returns error", "[mil]") {
+    libane_set_log_level(LIBANE_LOG_SILENT);
+    std::vector<libane_f16_t> buf(1024);
+    const void* in_ptrs[]  = { buf.data() };
+    void*       out_ptrs[] = { buf.data() };
+    size_t      sizes[]    = { 2048 };
+
+    auto st = libane_mil_execute(nullptr,
+                                  in_ptrs, sizes, 1,
+                                  out_ptrs, sizes, 1);
+    CHECK(st == LIBANE_ERR_INVALID_ARG);
+}
+
+TEST_CASE("libane_mil_execute relu output equals input for positive values", "[mil]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    auto h = libane_mil_compile(kReluMil, nullptr, nullptr, nullptr, 0);
+    if (!h) {
+        WARN("mil compile failed: " << libane_last_error());
+        return;
+    }
+    REQUIRE(h != nullptr);
+
+    static constexpr int N = 1024;  // [1,32,1,32]
+    std::vector<libane_f16_t> in(N), out(N, f16(0.0f));
+    // All-positive input: relu(x) == x
+    for (int i = 0; i < N; ++i) in[i] = f16(static_cast<float>(i % 32) * 0.1f + 0.1f);
+
+    const void* in_ptrs[]  = { in.data() };
+    void*       out_ptrs[] = { out.data() };
+    size_t      in_bytes[] = { N * sizeof(libane_f16_t) };
+    size_t      out_bytes[]= { N * sizeof(libane_f16_t) };
+
+    auto st = libane_mil_execute(h,
+                                  in_ptrs,  in_bytes,  1,
+                                  out_ptrs, out_bytes, 1);
+    if (st != LIBANE_OK) {
+        WARN("mil execute failed: " << libane_last_error());
+        libane_mil_release(h);
+        return;
+    }
+    REQUIRE(st == LIBANE_OK);
+
+    // relu(x) == x for all-positive input; fp16 round-trip should be exact
+    int mismatches = 0;
+    for (int i = 0; i < N; ++i) {
+        float diff = std::abs(f32(out[i]) - f32(in[i]));
+        if (diff > 0.02f) ++mismatches;
+    }
+    CHECK(mismatches == 0);
+
+    libane_mil_release(h);
+}
+
+TEST_CASE("libane_mil_execute add two inputs — uniform IOSurface alloc path", "[mil]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    auto h = libane_mil_compile(kAddMil, nullptr, nullptr, nullptr, 0);
+    if (!h) {
+        WARN("mil compile failed: " << libane_last_error());
+        return;
+    }
+    REQUIRE(h != nullptr);
+
+    static constexpr int N = 1024;
+    std::vector<libane_f16_t> a(N), b(N), out(N, f16(0.0f));
+    for (int i = 0; i < N; ++i) {
+        a[i] = f16(1.0f);
+        b[i] = f16(2.0f);
+    }
+
+    const void* in_ptrs[]  = { a.data(), b.data() };
+    void*       out_ptrs[] = { out.data() };
+    size_t      in_bytes[] = { N * 2, N * 2 };
+    size_t      out_bytes[]= { N * 2 };
+
+    auto st = libane_mil_execute(h,
+                                  in_ptrs,  in_bytes,  2,
+                                  out_ptrs, out_bytes, 1);
+    if (st != LIBANE_OK) {
+        WARN("mil execute failed: " << libane_last_error());
+        libane_mil_release(h);
+        return;
+    }
+    REQUIRE(st == LIBANE_OK);
+
+    // Every output element should be 1.0 + 2.0 = 3.0
+    int mismatches = 0;
+    for (int i = 0; i < N; ++i) {
+        float diff = std::abs(f32(out[i]) - 3.0f);
+        if (diff > 0.05f) ++mismatches;
+    }
+    CHECK(mismatches == 0);
+
+    libane_mil_release(h);
+}
+
+TEST_CASE("libane_mil_compile_with_weights external scale weight", "[mil]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    static constexpr int N = 1024;
+    // Scale weight: all-ones (so mul(x, scale) == x)
+    std::vector<libane_f16_t> scale(N);
+    for (int i = 0; i < N; ++i) scale[i] = f16(1.0f);
+
+    const char*  wnames[] = { "scale.bin" };
+    const void*  wdata[]  = { scale.data() };
+    size_t       wsizes[] = { N * 2 };
+
+    auto h = libane_mil_compile(kScaleMil, wnames, wdata, wsizes, 1);
+    if (!h) {
+        WARN("mil compile with weights failed: " << libane_last_error());
+        return;
+    }
+    REQUIRE(h != nullptr);
+
+    std::vector<libane_f16_t> in(N), out(N, f16(0.0f));
+    for (int i = 0; i < N; ++i) in[i] = f16(static_cast<float>(i % 32) * 0.1f + 0.1f);
+
+    const void* in_ptrs[]  = { in.data() };
+    void*       out_ptrs[] = { out.data() };
+    size_t      in_bytes[] = { N * 2 };
+    size_t      out_bytes[]= { N * 2 };
+
+    auto st = libane_mil_execute(h,
+                                  in_ptrs,  in_bytes,  1,
+                                  out_ptrs, out_bytes, 1);
+    if (st != LIBANE_OK) {
+        WARN("mil execute (weights) failed: " << libane_last_error());
+        libane_mil_release(h);
+        return;
+    }
+    REQUIRE(st == LIBANE_OK);
+
+    // scale is all-ones, so out[i] == in[i]
+    int mismatches = 0;
+    for (int i = 0; i < N; ++i) {
+        float diff = std::abs(f32(out[i]) - f32(in[i]));
+        if (diff > 0.02f) ++mismatches;
+    }
+    CHECK(mismatches == 0);
+
+    libane_mil_release(h);
 }

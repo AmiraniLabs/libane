@@ -62,3 +62,8 @@ repomix-output.xml
 
 # ── Example binaries ──────────────────────────────────────────────────────
 examples/13_c_api
+
+# ── Reference repos (cloned external projects, not tracked) ───────────────
+reference/
+probe_chaining/probe_chaining
+probe_offset/probe_offset

@@ -198,6 +198,150 @@ TEST_CASE("build_plan: matmul+add fuses with side input tracked", "[compiler][fu
     CHECK(grp.node_ids.size() == 2);
 }
 
+TEST_CASE("build_plan: matmul+avg_pool+max_pool can fuse as unary chain", "[compiler][fusion]") {
+    AneGraph g;
+    auto w = matmul_weights(512, 256);
+    TensorId x  = g.add_input("x", S(512, 128));
+    TensorId t1 = g.add_op(LIBANE_OP_MATMUL,   {x},  S(256, 128), w.data(), w.size());
+    TensorId t2 = g.add_op(LIBANE_OP_AVG_POOL, {t1}, S(256, 128));
+    TensorId t3 = g.add_op(LIBANE_OP_MAX_POOL, {t2}, S(256, 128));
+    g.mark_output(t3);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 3);
+    CHECK(plan.groups[0].output == t3);
+}
+
+TEST_CASE("build_plan: logical_or and logical_xor are supported binary ops", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(256, 128));
+    TensorId b = g.add_input("b", S(256, 128));
+    TensorId o = g.add_op(LIBANE_OP_LOGICAL_OR, {a, b}, S(256, 128));
+    TensorId x = g.add_op(LIBANE_OP_LOGICAL_XOR, {o, b}, S(256, 128));
+    g.mark_output(x);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 2);
+    CHECK(plan.groups[0].output == x);
+}
+
+TEST_CASE("build_plan: reduce_prod unary reduction node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(256, 128));
+    TensorId r = g.add_op(LIBANE_OP_REDUCE_PROD, {x}, S(1, 128));
+    g.mark_output(r);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 1);
+    CHECK(plan.groups[0].output == r);
+}
+
+TEST_CASE("build_plan: scatter static-mask node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(64, 128));
+    TensorId u = g.add_input("u", S(64, 128));
+    auto mask = fp16_weights(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_SCATTER, {a, u}, S(64, 128), mask.data(), mask.size());
+    g.mark_output(o);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 1);
+    CHECK(plan.groups[0].output == o);
+}
+
+TEST_CASE("build_plan: gather static-mask node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    auto mask = fp16_weights(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x}, S(64, 128), mask.data(), mask.size());
+    g.mark_output(o);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 1);
+    CHECK(plan.groups[0].output == o);
+}
+
+TEST_CASE("build_plan: gather dynamic-mask node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId m = g.add_input("m", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_GATHER, {x, m}, S(64, 128));
+    g.mark_output(o);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 1);
+    CHECK(plan.groups[0].output == o);
+}
+
+TEST_CASE("build_plan: scatter_nd static-mask node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(64, 128));
+    TensorId u = g.add_input("u", S(64, 128));
+    auto mask = fp16_weights(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_SCATTER_ND, {a, u}, S(64, 128), mask.data(), mask.size());
+    g.mark_output(o);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 1);
+    CHECK(plan.groups[0].output == o);
+}
+
+TEST_CASE("build_plan: scatter_along_axis static-mask node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(64, 128));
+    TensorId u = g.add_input("u", S(64, 128));
+    auto mask = fp16_weights(static_cast<size_t>(64) * 128);
+    TensorId o = g.add_op(LIBANE_OP_SCATTER_ALONG_AXIS, {a, u}, S(64, 128), mask.data(), mask.size());
+    g.mark_output(o);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 1);
+    CHECK(plan.groups[0].output == o);
+}
+
+TEST_CASE("build_plan: neg unary node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_NEG, {x}, S(64, 128));
+    g.mark_output(o);
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].output == o);
+}
+
+TEST_CASE("build_plan: mod binary node supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId y = g.add_input("y", S(64, 128));
+    TensorId o = g.add_op(LIBANE_OP_MOD, {x, y}, S(64, 128));
+    g.mark_output(o);
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].output == o);
+}
+
+TEST_CASE("build_plan: sinh/cosh/tan/asin/acos unary nodes supported", "[compiler][fusion]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", S(64, 128));
+    TensorId a = g.add_op(LIBANE_OP_SINH, {x}, S(64, 128));
+    TensorId b = g.add_op(LIBANE_OP_COSH, {a}, S(64, 128));
+    TensorId c = g.add_op(LIBANE_OP_TAN,  {b}, S(64, 128));
+    TensorId d = g.add_op(LIBANE_OP_ASIN, {c}, S(64, 128));
+    TensorId e = g.add_op(LIBANE_OP_ACOS, {d}, S(64, 128));
+    g.mark_output(e);
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].output == e);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * 4. Layernorm weight splitting
  * ═══════════════════════════════════════════════════════════════════════════ */

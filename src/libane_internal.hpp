@@ -28,3 +28,9 @@ struct libane_graph_s {
 struct libane_compiled_graph_s {
     std::unique_ptr<libane::graph::CompiledGraph> cg;
 };
+
+/* ── Raw MIL program handle (global namespace, per libane.h) ─────────────── */
+
+struct libane_mil_program_s {
+    libane::runtime::AneProgram* prog = nullptr;
+};

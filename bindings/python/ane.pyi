@@ -1,5 +1,5 @@
 """
-ane — Apple Neural Engine Python bindings (libane v0.7.0)
+ane — Apple Neural Engine Python bindings (libane v0.7.1)
 
 ANE-accelerated ML operations with automatic CPU fallback.
 Uses AppleNeuralEngine.framework via dlopen — private API, intentional.
@@ -22,6 +22,23 @@ MUL: int
 TRANSPOSE: int
 SILU: int
 RMSNORM: int
+AVG_POOL: int
+MAX_POOL: int
+LOGICAL_AND: int
+LOGICAL_OR: int
+LOGICAL_XOR: int
+REDUCE_PROD: int
+SCATTER: int
+GATHER: int
+SCATTER_ND: int
+SCATTER_ALONG_AXIS: int
+NEG: int
+MOD: int
+SINH: int
+COSH: int
+TAN: int
+ASIN: int
+ACOS: int
 
 # ── Log level constants ───────────────────────────────────────────────────────
 
@@ -38,7 +55,7 @@ def available() -> bool:
     ...
 
 def version() -> str:
-    """libane version string (e.g. '0.7.0')."""
+    """libane version string (e.g. '0.7.1')."""
     ...
 
 def last_error() -> str:
@@ -132,6 +149,75 @@ def gelu(x: np.ndarray) -> np.ndarray:
         GELU(x), same shape as input, dtype matches input.
     """
     ...
+
+# ── Raw MIL probe API ────────────────────────────────────────────────────────
+
+class CompiledMil:
+    """
+    Compiled raw MIL program. Returned by ``compile_mil()`` and
+    ``compile_mil_with_weights()``.
+
+    Use :mod:`probe` for a higher-level interface.
+    """
+
+    def run(
+        self,
+        inputs: list[np.ndarray],
+        output_sizes: list[int],
+    ) -> list[np.ndarray]:
+        """
+        Execute the compiled MIL program.
+
+        Args:
+            inputs:       Input arrays (converted to float16 internally).
+                          Must be in alphabetical order of MIL parameter names.
+            output_sizes: Output sizes in fp16 elements (not bytes).
+
+        Returns:
+            List of np.float16 arrays, one per output.
+
+        Raises:
+            RuntimeError on ANE dispatch failure.
+        """
+        ...
+
+
+def compile_mil(mil_text: str) -> CompiledMil:
+    """
+    Compile a raw MIL program (no external weights).
+
+    Args:
+        mil_text: UTF-8 MIL source text (complete program including buildInfo header).
+
+    Returns:
+        ``CompiledMil`` ready for ``.run()``.
+
+    Raises:
+        RuntimeError if ANE is unavailable or compilation fails.
+    """
+    ...
+
+
+def compile_mil_with_weights(
+    mil_text: str,
+    weights: dict[str, np.ndarray],
+) -> CompiledMil:
+    """
+    Compile a raw MIL program with external weight files.
+
+    Args:
+        mil_text: UTF-8 MIL source text.
+        weights:  Mapping from filename to fp16 weight array.
+                  Filenames must match ``file()`` references in the MIL text.
+
+    Returns:
+        ``CompiledMil`` ready for ``.run()``.
+
+    Raises:
+        RuntimeError if ANE is unavailable or compilation fails.
+    """
+    ...
+
 
 # ── Graph API ─────────────────────────────────────────────────────────────────
 

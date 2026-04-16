@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.7.1 — 2026-03-31
+
+### Fixed
+
+- Add explicit `#include <algorithm>` in `src/core/mil_builder.cpp` and `tests/test_fusion.cpp` (was relying on transitive include via other headers).
+- Add explicit `#include <mutex>` in `src/core/compile_cache.cpp` (same issue).
+
+---
+
 ## v0.7.0 — 2026-03-23
 
 First public release.

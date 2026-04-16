@@ -13,8 +13,8 @@ dispatches via automatic op fusion, and executes them through a stable C ABI.
 Matmul is implemented as conv1×1 for the [3× throughput advantage over MIL
 matmul](https://arxiv.org/abs/2603.06728) on ANE.
 
-> **Private API.** libane uses `AppleNeuralEngine.framework` via `dlopen`.
-> This is intentional and documented. Do not submit to the App Store.
+> **Private framework dependency**. libane loads `AppleNeuralEngine.framework` via `dlopen`.
+> It is intended for research use and low-level ANE experimentation, not production deployment.
 
 ---
 
@@ -47,7 +47,7 @@ import ane
 import numpy as np
 
 print(ane.available())   # True on Apple Silicon
-print(ane.version())     # "0.7.0"
+print(ane.version())     # "0.7.1"
 
 # Single-op matmul
 A = np.random.randn(128, 512).astype(np.float16)
