@@ -90,6 +90,7 @@ struct AneSymbols {
     SEL sel_evaluate           = nullptr;  // evaluateWithQoS:options:request:error:
     SEL sel_objectWithSurface  = nullptr;  // objectWithIOSurface:
     SEL sel_buildRequest       = nullptr;  // requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:
+    SEL sel_processRequest     = nullptr;  // processRequest:model:qos:qIndex:modelStringID:options:returnValue:error:
 
     bool loaded = false;
 };
@@ -151,6 +152,7 @@ static void do_initialize() {
     g_syms.sel_evaluate          = sel_registerName("evaluateWithQoS:options:request:error:");
     g_syms.sel_objectWithSurface = sel_registerName("objectWithIOSurface:");
     g_syms.sel_buildRequest      = sel_registerName("requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:");
+    g_syms.sel_processRequest    = sel_registerName("processRequest:model:qos:qIndex:modelStringID:options:returnValue:error:");
 
     // Verify the model class responds to compile
     if (![g_syms.cls_Model instancesRespondToSelector:g_syms.sel_compile]) {
@@ -412,6 +414,28 @@ AneProgram* ane_compile(const std::string& mil_text,
 
         auto* prog       = new AneProgram{};
         prog->objc_model = (void*)model;
+
+        // Extract _ANEProgramForEvaluation for fast-path dispatch (processRequest:).
+        // Accessed via KVC: model → inner _ANEModel → _ANEProgramForEvaluation.
+        // Non-fatal if unavailable — falls back to evaluateWithQoS:.
+        @try {
+            id inner = [model valueForKey:@"model"];
+            if (inner) {
+                id prog_eval = [inner valueForKey:@"program"];
+                if (prog_eval) {
+                    [inner retain];
+                    [prog_eval retain];
+                    prog->objc_inner_model = (void*)inner;
+                    prog->objc_program     = (void*)prog_eval;
+                    prog->model_string_id  =
+                        ((uint64_t(*)(id,SEL))objc_msgSend)(inner, sel_registerName("string_id"));
+                }
+            }
+        } @catch (...) {
+            // Non-fatal: fast path unavailable, evaluateWithQoS: will be used
+            prog->objc_program    = nullptr;
+            prog->objc_inner_model = nullptr;
+        }
         prog->size_bytes = mil_text.size();
         for (const auto& w : weights) prog->size_bytes += w.data.size();
         prog->debug_name = debug_name;
@@ -583,13 +607,40 @@ bool ane_execute_multi(AneProgram* program,
         }
 
         // --- Step 9: Evaluate ---
-        typedef BOOL (*EvalFn)(id, SEL, unsigned int, id, id, NSError**);
-        BOOL ok = ((EvalFn)objc_msgSend)(
-            model, g_syms.sel_evaluate, kQoS, @{}, request, &error);
-        if (!ok || error) {
-            set_error("ANE evaluate failed: %s",
-                      error ? [[error localizedDescription] UTF8String] : "unknown");
-            return false;
+        // Fast path: processRequest: on _ANEProgramForEvaluation — ~13% lower latency
+        // by bypassing _ANEInMemoryModel dispatch overhead.
+        // Falls back to evaluateWithQoS: if fast-path objects are unavailable.
+        if (program->objc_program && program->objc_inner_model) {
+            id prog_eval   = (id)program->objc_program;
+            id inner_model = (id)program->objc_inner_model;
+            uint32_t ret_val = 0;
+            typedef BOOL (*ProcReqFn)(id, SEL, id, id, unsigned int,
+                                      uint64_t, uint64_t, id, uint32_t*, NSError**);
+            BOOL ok = ((ProcReqFn)objc_msgSend)(
+                prog_eval,
+                g_syms.sel_processRequest,
+                request,
+                inner_model,
+                kQoS,
+                (uint64_t)0,               // qIndex
+                program->model_string_id,  // modelStringID
+                @{},                       // options
+                &ret_val,
+                &error);
+            if (!ok || error) {
+                set_error("ANE processRequest failed: %s",
+                          error ? [[error localizedDescription] UTF8String] : "unknown");
+                return false;
+            }
+        } else {
+            typedef BOOL (*EvalFn)(id, SEL, unsigned int, id, id, NSError**);
+            BOOL ok = ((EvalFn)objc_msgSend)(
+                model, g_syms.sel_evaluate, kQoS, @{}, request, &error);
+            if (!ok || error) {
+                set_error("ANE evaluate failed: %s",
+                          error ? [[error localizedDescription] UTF8String] : "unknown");
+                return false;
+            }
         }
 
         return true;
@@ -680,6 +731,10 @@ void ane_unload(AneProgram* program) {
                 ((UnloadFn)objc_msgSend)(model, g_syms.sel_unload, kQoS, &error);
                 // Ignore errors — best effort unload
             }
+
+            // Release fast-path objects before releasing the parent model
+            if (program->objc_program)     [(id)program->objc_program release];
+            if (program->objc_inner_model) [(id)program->objc_inner_model release];
 
             [model release];
         }

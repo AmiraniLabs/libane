@@ -81,8 +81,11 @@ struct WeightEntry {
  * Created by ane_compile(), destroyed by ane_unload().
  */
 struct AneProgram {
-    void*  objc_model   = nullptr;  ///< ObjC _ANEInMemoryModel* (retained)
-    size_t size_bytes   = 0;        ///< Approximate memory footprint
+    void*  objc_model        = nullptr;  ///< ObjC _ANEInMemoryModel* (retained)
+    void*  objc_program      = nullptr;  ///< ObjC _ANEProgramForEvaluation* (retained), nil if unavailable
+    void*  objc_inner_model  = nullptr;  ///< ObjC _ANEModel* (retained), for processRequest:
+    uint64_t model_string_id = 0;        ///< string_id of the inner _ANEModel
+    size_t size_bytes        = 0;        ///< Approximate memory footprint
     std::string debug_name;
     std::string model_dir;          ///< Temp dir path for delta compilation
     std::vector<WeightEntry> weights;  ///< stored for delta reload
