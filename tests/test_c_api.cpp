@@ -805,54 +805,11 @@ TEST_CASE("ANE softmax executes on hardware when available", "[api][ane]") {
 
 /* ── Delta reload ────────────────────────────────────────────────────────── */
 
-TEST_CASE("libane_delta_reload updates weights without recompile", "[api][ane]") {
-    libane_set_backend(nullptr);
-    libane_set_log_level(LIBANE_LOG_SILENT);
+// NOTE: libane_delta_reload() re-loads a compiled program without recompiling.
+// It does NOT update weight values — ANE bakes weights into the compiled HWX
+// at compile time. Confirmed via probe_delta_reload (2026-04-16, M3 Pro).
 
-    if (!libane_available()) SKIP("ANE not available");
-
-    const int C = 8, S = 8;
-
-    // W1 = all-ones weight matrix [C x C]
-    std::vector<float> W1(C * C, 1.0f);
-    // W2 = identity weight matrix [C x C]
-    std::vector<float> W2(C * C, 0.0f);
-    for (int i = 0; i < C; ++i) W2[i * C + i] = 1.0f;
-
-    // Build fp16 blobs (transpose=true for conv1x1 [OC,IC] layout)
-    auto blob1 = libane::mil::WeightBlob::from_fp32(W1.data(), C, C, true);
-    auto blob2 = libane::mil::WeightBlob::from_fp32(W2.data(), C, C, true);
-
-    libane_shape_t shape{};
-    shape.dims[0]=1; shape.dims[1]=C; shape.dims[2]=1; shape.dims[3]=S; shape.ndim=4;
-
-    // Compile with W1 (all-ones): pass raw fp16 weight data (after 128-byte header)
-    const void* w1_data = blob1.data.data() + libane::mil::WeightBlob::kDataOffset;
-    size_t w1_len = static_cast<size_t>(C) * C * sizeof(uint16_t);
-    libane_handle_t h = libane_compile(LIBANE_OP_MATMUL, shape, w1_data, w1_len);
-    if (!h) {
-        WARN("ANE compile limit reached — skipping: " << libane_last_error());
-        return;
-    }
-    REQUIRE(h != nullptr);
-
-    // Delta reload with W2 (identity)
-    const void* w2_data = blob2.data.data() + libane::mil::WeightBlob::kDataOffset;
-    size_t w2_len = static_cast<size_t>(C) * C * sizeof(uint16_t);
-    libane_status_t st = libane_delta_reload(h, w2_data, w2_len);
-    CHECK(st == LIBANE_OK);
-
-    libane_release(h);
-}
-
-TEST_CASE("libane_delta_reload with null handle returns error", "[api][ane]") {
-    libane_set_log_level(LIBANE_LOG_SILENT);
-    std::vector<uint16_t> dummy(64, 0);
-    auto st = libane_delta_reload(nullptr, dummy.data(), dummy.size() * 2);
-    CHECK(st == LIBANE_ERR_INVALID_ARG);
-}
-
-TEST_CASE("libane_delta_reload with null weights returns error", "[api][ane]") {
+TEST_CASE("libane_delta_reload re-loads without recompile", "[api][ane]") {
     libane_set_backend(nullptr);
     libane_set_log_level(LIBANE_LOG_SILENT);
 
@@ -866,18 +823,26 @@ TEST_CASE("libane_delta_reload with null weights returns error", "[api][ane]") {
     shape.dims[0]=1; shape.dims[1]=C; shape.dims[2]=1; shape.dims[3]=S; shape.ndim=4;
 
     const void* w_data = blob.data.data() + libane::mil::WeightBlob::kDataOffset;
-    libane_handle_t h = libane_compile(LIBANE_OP_MATMUL, shape, w_data,
-                                        static_cast<size_t>(C) * C * 2);
+    size_t w_len = static_cast<size_t>(C) * C * sizeof(uint16_t);
+    libane_handle_t h = libane_compile(LIBANE_OP_MATMUL, shape, w_data, w_len);
     if (!h) {
         WARN("ANE compile limit reached — skipping: " << libane_last_error());
         return;
     }
     REQUIRE(h != nullptr);
 
-    auto st = libane_delta_reload(h, nullptr, 0);
-    CHECK(st == LIBANE_ERR_INVALID_ARG);
+    // Delta reload: re-loads into SRAM without recompiling.
+    // Execution should still produce correct output with the original weights.
+    libane_status_t st = libane_delta_reload(h);
+    CHECK(st == LIBANE_OK);
 
     libane_release(h);
+}
+
+TEST_CASE("libane_delta_reload with null handle returns error", "[api][ane]") {
+    libane_set_log_level(LIBANE_LOG_SILENT);
+    auto st = libane_delta_reload(nullptr);
+    CHECK(st == LIBANE_ERR_INVALID_ARG);
 }
 
 /* ── Batch Compilation ──────────────────────────────────────────────────── */

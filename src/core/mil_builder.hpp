@@ -553,6 +553,14 @@ public:
                                             const std::string& in_var,
                                             const std::string& out_var);
 
+    static MilProgram  select(int C, int SP);
+
+    static MilFragment select_fragment(int C, int SP,
+                                        const std::string& cond_var,
+                                        const std::string& x_var,
+                                        const std::string& y_var,
+                                        const std::string& out_var);
+
     static MilFragment transpose_fragment(int C, int SP,
                                            const std::string& in_var,
                                            const std::string& out_var);

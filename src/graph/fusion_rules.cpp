@@ -21,6 +21,16 @@ bool FusionRules::op_supported(libane_op_t op) {
     case LIBANE_OP_LOGICAL_OR:
     case LIBANE_OP_LOGICAL_XOR:
     case LIBANE_OP_REDUCE_PROD:
+    case LIBANE_OP_REDUCE_SUM:
+    case LIBANE_OP_REDUCE_MEAN:
+    case LIBANE_OP_REDUCE_MAX:
+    case LIBANE_OP_SUB:
+    case LIBANE_OP_REAL_DIV:
+    case LIBANE_OP_SQRT:
+    case LIBANE_OP_LOG:
+    case LIBANE_OP_RSQRT:
+    case LIBANE_OP_CONCAT:
+    case LIBANE_OP_SLICE_BY_INDEX:
     case LIBANE_OP_SCATTER:
     case LIBANE_OP_SCATTER_ND:
     case LIBANE_OP_SCATTER_ALONG_AXIS:
@@ -38,6 +48,7 @@ bool FusionRules::op_supported(libane_op_t op) {
     case LIBANE_OP_LAYER_NORM:
     case LIBANE_OP_TRANSPOSE:
     case LIBANE_OP_RESHAPE:
+    case LIBANE_OP_SELECT:
         return true;
     case LIBANE_OP_CONV2D:
     case LIBANE_OP_CAST:

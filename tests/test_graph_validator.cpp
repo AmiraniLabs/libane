@@ -593,3 +593,41 @@ TEST_CASE("multiple violations all reported", "[validator]") {
     // Expect at least two errors: weight mismatch + shape mismatch
     CHECK(r.errors.size() >= 2);
 }
+
+/* ── SELECT validation ───────────────────────────────────────────────────── */
+
+TEST_CASE("select: valid 3-input graph passes", "[validator][select]") {
+    AneGraph g;
+    auto cond = g.add_input("cond", S(32, 64));
+    auto x    = g.add_input("x",    S(32, 64));
+    auto y    = g.add_input("y",    S(32, 64));
+
+    auto out = g.add_op(LIBANE_OP_SELECT, {cond, x, y}, S(32, 64));
+    g.mark_output(out);
+
+    auto r = GraphValidator::validate(g);
+    CHECK(r.ok());
+}
+
+TEST_CASE("select: wrong input count fails", "[validator][select]") {
+    AneGraph g;
+    auto cond = g.add_input("cond", S(32, 64));
+    auto x    = g.add_input("x",    S(32, 64));
+
+    g.add_op(LIBANE_OP_SELECT, {cond, x}, S(32, 64));
+
+    auto r = GraphValidator::validate(g);
+    CHECK_FALSE(r.ok());
+}
+
+TEST_CASE("select: shape mismatch fails", "[validator][select]") {
+    AneGraph g;
+    auto cond = g.add_input("cond", S(32, 64));
+    auto x    = g.add_input("x",    S(32, 64));
+    auto y    = g.add_input("y",    S(16, 64)); // different channels
+
+    g.add_op(LIBANE_OP_SELECT, {cond, x, y}, S(32, 64));
+
+    auto r = GraphValidator::validate(g);
+    CHECK_FALSE(r.ok());
+}

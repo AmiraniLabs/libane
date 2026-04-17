@@ -79,6 +79,7 @@ typedef enum {
     LIBANE_OP_SQRT           = 37,
     LIBANE_OP_LOG            = 38,
     LIBANE_OP_RSQRT          = 39,
+    LIBANE_OP_SELECT         = 40,
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */

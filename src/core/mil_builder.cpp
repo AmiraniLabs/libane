@@ -1955,6 +1955,58 @@ MilFragment MilBuilder::reduce_max_fragment(int in_C, int SP,
     return f;
 }
 
+MilProgram MilBuilder::select(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    // Inputs sorted alphabetically (ANE constraint #13): c < x < y.
+    // Condition arrives as fp16 (IOSurface format) and is cast to bool.
+    std::string t = header();
+    t += "    func main<ios18>(" + tt + " c, " + tt + " x, " + tt + " y) {\n";
+    t += "        " + tb + " cb = cast(x=c, dtype=string(\"bool\"))[name=string(\"sel_cb\")];\n";
+    t += "        " + tt + " z = select(cond=cb, a=x, b=y)[name=string(\"sel_out\")];\n";
+    t += "    } -> (z);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+MilFragment MilBuilder::select_fragment(int C, int SP,
+                                         const std::string& cond_var,
+                                         const std::string& x_var,
+                                         const std::string& y_var,
+                                         const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    std::string body;
+    body += "        " + tb + " " + p + "cb = cast(x=" + cond_var +
+            ", dtype=string(\"bool\"))[name=string(\"" + p + "cb\")];\n";
+    body += "        " + tt + " " + out_var +
+            " = select(cond=" + p + "cb, a=" + x_var + ", b=" + y_var +
+            ")[name=string(\"" + p + "sel\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = cond_var;
+    f.side_input_name = x_var;
+    f.output_name     = out_var;
+    f.output_shape    = shape;
+    return f;
+}
+
 MilFragment MilBuilder::transpose_fragment(int C, int SP,
                                             const std::string& in_var,
                                             const std::string& out_var) {

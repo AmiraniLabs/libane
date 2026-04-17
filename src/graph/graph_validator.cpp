@@ -345,6 +345,8 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
         case LIBANE_OP_ADD:
         case LIBANE_OP_MUL:
         case LIBANE_OP_MOD:
+        case LIBANE_OP_SUB:
+        case LIBANE_OP_REAL_DIV:
         case LIBANE_OP_LOGICAL_AND:
         case LIBANE_OP_LOGICAL_OR:
         case LIBANE_OP_LOGICAL_XOR:
@@ -355,6 +357,27 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
                 err("requires exactly two inputs, got " +
                     std::to_string(n.inputs.size()));
             break;
+
+        case LIBANE_OP_SELECT: {
+            if (!n.weights.empty())
+                err("select is weight-free but " + std::to_string(n.weights.size()) +
+                    " weight bytes were provided");
+            if (n.inputs.size() != 3) {
+                err("select requires exactly 3 inputs (condition, x, y), got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            const auto& cond_s = g.tensor(n.inputs[0]).shape;
+            const auto& x_s    = g.tensor(n.inputs[1]).shape;
+            const auto& y_s    = g.tensor(n.inputs[2]).shape;
+            if (cond_s.channels != x_s.channels || cond_s.seq != x_s.seq)
+                err("select: condition and x shapes must match");
+            if (x_s.channels != y_s.channels || x_s.seq != y_s.seq)
+                err("select: x and y shapes must match");
+            if (out_t.shape.channels != x_s.channels || out_t.shape.seq != x_s.seq)
+                err("select: output shape must match input shapes");
+            break;
+        }
 
         case LIBANE_OP_CONCAT: {
             if (!n.weights.empty()) {
@@ -419,6 +442,28 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
                     std::to_string(in_t.channels) + ",1," + std::to_string(in_t.seq) +
                     "], output [1," + std::to_string(out_t.shape.channels) + ",1," +
                     std::to_string(out_t.shape.seq) + "]");
+            }
+            break;
+        }
+
+        case LIBANE_OP_REDUCE_SUM:
+        case LIBANE_OP_REDUCE_MEAN:
+        case LIBANE_OP_REDUCE_MAX: {
+            if (!n.weights.empty())
+                err("op is weight-free but " + std::to_string(n.weights.size()) +
+                    " weight bytes were provided");
+            if (n.inputs.size() != 1)
+                err("reduce op requires exactly one input, got " +
+                    std::to_string(n.inputs.size()));
+            else {
+                const auto& in_s = g.tensor(n.inputs[0]).shape;
+                if (out_t.shape.channels != 1)
+                    err("reduce output channels must be 1, got " +
+                        std::to_string(out_t.shape.channels));
+                if (out_t.shape.seq != in_s.seq)
+                    err("reduce output seq must match input seq: expected " +
+                        std::to_string(in_s.seq) + ", got " +
+                        std::to_string(out_t.shape.seq));
             }
             break;
         }

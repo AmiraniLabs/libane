@@ -591,3 +591,36 @@ TEST_CASE("real_div() has inputs in alphabetical order (constraint #13)", "[mil]
     size_t y_pos = prog.text.find("> y)");
     CHECK(x_pos < y_pos);
 }
+
+TEST_CASE("select() emits correct MIL structure", "[mil][select]") {
+    auto prog = MilBuilder::select(32, 64);
+
+    // 3 inputs alphabetically: c < x < y
+    CHECK_THAT(prog.text, ContainsSubstring("> c,"));
+    CHECK_THAT(prog.text, ContainsSubstring("> x,"));
+    CHECK_THAT(prog.text, ContainsSubstring("> y)"));
+
+    size_t c_pos = prog.text.find("> c,");
+    size_t x_pos = prog.text.find("> x,");
+    size_t y_pos = prog.text.find("> y)");
+    CHECK(c_pos < x_pos);
+    CHECK(x_pos < y_pos);
+
+    // bool cast of condition
+    CHECK_THAT(prog.text, ContainsSubstring("cast(x=c, dtype=string(\"bool\"))"));
+    // select op present
+    CHECK_THAT(prog.text, ContainsSubstring("select(cond="));
+    CHECK_THAT(prog.text, ContainsSubstring("a=x"));
+    CHECK_THAT(prog.text, ContainsSubstring("b=y"));
+}
+
+TEST_CASE("select_fragment() emits cast + select", "[mil][select]") {
+    auto f = MilBuilder::select_fragment(16, 32, "t0", "t1", "t2", "t3");
+
+    CHECK(f.input_name  == "t0");
+    CHECK(f.output_name == "t3");
+    CHECK_THAT(f.body, ContainsSubstring("cast(x=t0"));
+    CHECK_THAT(f.body, ContainsSubstring("select(cond="));
+    CHECK_THAT(f.body, ContainsSubstring("a=t1"));
+    CHECK_THAT(f.body, ContainsSubstring("b=t2"));
+}

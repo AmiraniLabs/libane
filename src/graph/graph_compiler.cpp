@@ -163,6 +163,59 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
         return mil::MilBuilder::acos_fragment(
             out_shape.channels, out_shape.seq, in_var, out_var);
 
+    case LIBANE_OP_SELECT:
+        return mil::MilBuilder::select_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var,
+            tensor_var(node.inputs[1]),
+            tensor_var(node.inputs[2]),
+            out_var);
+
+    case LIBANE_OP_SUB:
+        return mil::MilBuilder::sub_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_REAL_DIV:
+        return mil::MilBuilder::real_div_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_SQRT:
+        return mil::MilBuilder::sqrt_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_LOG:
+        return mil::MilBuilder::log_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_RSQRT:
+        return mil::MilBuilder::rsqrt_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_CONCAT:
+        return mil::MilBuilder::concat_fragment(
+            in_shape.channels, out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_SLICE_BY_INDEX:
+        return mil::MilBuilder::slice_by_index_fragment(
+            in_shape.channels, in_shape.seq,
+            out_shape.channels, out_shape.seq,
+            in_var, out_var);
+
+    case LIBANE_OP_REDUCE_SUM:
+        return mil::MilBuilder::reduce_sum_fragment(
+            in_shape.channels, in_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_REDUCE_MEAN:
+        return mil::MilBuilder::reduce_mean_fragment(
+            in_shape.channels, in_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_REDUCE_MAX:
+        return mil::MilBuilder::reduce_max_fragment(
+            in_shape.channels, in_shape.seq, in_var, out_var);
+
     default:
         throw std::runtime_error(
             "node_to_fragment: unsupported op " + std::to_string(node.op));

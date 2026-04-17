@@ -339,6 +339,9 @@ libane_handle_t libane_compile(libane_op_t op,
             case LIBANE_OP_REDUCE_MAX:
                 set_error("REDUCE_MAX not supported via libane_compile (use graph API)");
                 return nullptr;
+            case LIBANE_OP_SELECT:
+                set_error("SELECT not supported via libane_compile — use graph API with 3 inputs (condition, x, y)");
+                return nullptr;
             default:
                 set_error("op %d not supported", (int)op);
                 return nullptr;
