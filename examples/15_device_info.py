@@ -23,7 +23,7 @@ print(f"libane {ane.version()}  ANE available: {ane.available()}")
 print()
 
 # ── Load the C library directly for the introspection APIs ───────────────────
-# (device_info and shape_limits are C API only in v0.8.0)
+# (device_info and shape_limits are C API only in v0.8.1)
 
 _build = os.path.join(os.path.dirname(__file__), "..", "build", "libane.dylib")
 _build = os.path.normpath(_build)

@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.8.1 — 2026-04-17
+
+### Fixed
+
+- `libane_mil_compile` now calls `runtime::initialize()` before use — previously
+  returned "ANE not available" when called from the dylib without a prior Graph API call.
+- `fp16_lit` in `mil_builder.cpp` no longer emits scientific notation (`e` form) for
+  near-zero PWL intercept values; firmware MIL parser rejects `e`-notation in `fp16()`
+  literals. Values below the fp16 subnormal floor (`~5.96e-8`) are clamped to `0.0`.
+- `LIBANE_API` visibility macro now correctly exported from dylib for all 31 public
+  C API functions (regression from v0.8.0 visibility refactor).
+- Example 10 (`10_throughput_sweep.py`): corrected minimum sequence length from 8 to 16
+  (`S % 16 == 0` ANE constraint).
+
+### Added
+
+- `examples/13_c_api.c` — Graph API, `libane_compile_batch`, and `libane_execute2`
+  from pure C (not C++).
+- `examples/15_device_info.py` — chip architecture, core count, and SRAM budget via
+  `libane_device_info`.
+- `examples/16_perf_stats.py` — IOReport bandwidth utilization and energy counters via
+  `libane_mil_execute_stats`; graceful fallback when IOReport is unavailable.
+- `examples/17_pwl_activation.py` — piecewise-linear approximation of SELU, Mish, Swish,
+  and Softplus; accuracy comparison against scipy reference.
+- `examples/18_sram_spill.py` — SRAM spill detection via `libane_mil_sram_spill` and
+  split-dispatch fix demonstration.
+
 ## v0.8.0 — 2026-04-17
 
 ### Added

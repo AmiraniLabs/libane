@@ -19,7 +19,7 @@ Returns `True` if the ANE is accessible on the current machine.
 
 ### `ane.version() → str`
 
-Returns the libane version string, e.g. `"0.8.0"`.
+Returns the libane version string, e.g. `"0.8.1"`.
 
 ### `ane.last_error() → str`
 

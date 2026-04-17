@@ -7,7 +7,7 @@ libane exposes a stable C ABI declared in `include/libane.h`. All symbols are pr
 ## Version
 
 ```c
-#define LIBANE_VERSION        "0.8.0"
+#define LIBANE_VERSION        "0.8.1"
 #define LIBANE_VERSION_MAJOR  0
 #define LIBANE_VERSION_MINOR  8
 #define LIBANE_VERSION_PATCH  0
@@ -75,7 +75,7 @@ Returns 1 if the ANE is accessible on the current machine, 0 otherwise. Safe to 
 const char* libane_version(void);
 ```
 
-Returns the library version string, e.g. `"0.8.0"`. Pointer is valid for the lifetime of the process.
+Returns the library version string, e.g. `"0.8.1"`. Pointer is valid for the lifetime of the process.
 
 ### `libane_last_error`
 

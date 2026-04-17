@@ -47,7 +47,7 @@ import ane
 import numpy as np
 
 print(ane.available())   # True on Apple Silicon
-print(ane.version())     # "0.8.0"
+print(ane.version())     # "0.8.1"
 
 # Single-op matmul
 A = np.random.randn(128, 512).astype(np.float16)

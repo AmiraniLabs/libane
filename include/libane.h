@@ -1,6 +1,6 @@
 /**
  * libane — Apple Neural Engine Native C++ Runtime Library
- * Amirani Labs · v0.8.0
+ * Amirani Labs · v0.8.1
  *
  * Stable C ABI. ABI stability guaranteed across minor versions.
  * Uses AppleNeuralEngine.framework via dlopen — private API, intentional.
@@ -17,10 +17,10 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────────── */
 
-#define LIBANE_VERSION         "0.8.0"
+#define LIBANE_VERSION         "0.8.1"
 #define LIBANE_VERSION_MAJOR   0
 #define LIBANE_VERSION_MINOR   8
-#define LIBANE_VERSION_PATCH   0
+#define LIBANE_VERSION_PATCH   1
 
 /* ── ABI visibility ──────────────────────────────────────────────────────── */
 
@@ -295,7 +295,7 @@ LIBANE_API libane_status_t libane_matmul_f32(const float* A,
 /** @return 1 if ANE is accessible and initialized, 0 if running in fallback mode. */
 LIBANE_API int libane_available(void);
 
-/** @return Semantic version string, e.g. "0.8.0". */
+/** @return Semantic version string, e.g. "0.8.1". */
 LIBANE_API const char* libane_version(void);
 
 /** @return Human-readable description of the last error on the calling thread. */
