@@ -227,5 +227,33 @@ const char* ane_last_error();
  */
 AneDeviceInfo device_info();
 
+/**
+ * Load a pre-built HWX binary directly, bypassing ANE compilation.
+ *
+ * Compiles a minimal stub model (matching I/O shape) to establish a
+ * model_dir and correct IOSurface buffer layout, overwrites the compiled
+ * HWX with the provided bytes, then unloads and reloads from disk.
+ *
+ * This is the Path C runtime entry point used by HwxBackend.  The first
+ * call per (channels, seq) shape still incurs a full ane_compile() for the
+ * stub; the performance gain materialises when the IOKit direct-load path
+ * (sel=3 ProgramCreate) replaces this stub route.
+ *
+ * @param hwx_bytes      BEEFFACE HWX binary (magic 0xBEEFFACE).
+ * @param channels       I/O tensor channels dimension.
+ * @param seq            I/O tensor seq dimension.
+ * @param input_name     MIL input parameter name (e.g., "t0").
+ * @param output_name    MIL output variable name  (e.g., "t1").
+ * @param debug_name     Optional label for error messages.
+ * @return               Loaded AneProgram* on success (caller calls ane_unload()).
+ *                       Returns nullptr on failure (check ane_last_error()).
+ */
+AneProgram* ane_load_hwx(const std::vector<uint8_t>& hwx_bytes,
+                          int                         channels,
+                          int                         seq,
+                          const std::string&          input_name  = "x",
+                          const std::string&          output_name = "y",
+                          const std::string&          debug_name  = "");
+
 } // namespace runtime
 } // namespace libane

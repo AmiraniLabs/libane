@@ -977,6 +977,102 @@ bool ane_delta_reload(AneProgram* program) {
     }
 }
 
+/* ── Load HWX ────────────────────────────────────────────────────────────── */
+
+AneProgram* ane_load_hwx(const std::vector<uint8_t>& hwx_bytes,
+                          int channels, int seq,
+                          const std::string& input_name,
+                          const std::string& output_name,
+                          const std::string& debug_name) {
+    if (g_state != AneState::Available) {
+        set_error("ane_load_hwx: ANE not available: %s", g_fallback_reason);
+        return nullptr;
+    }
+
+    // Build a minimal relu stub for the given I/O shape.
+    // Purpose: establish a model_dir with the correct IOSurface buffer layout.
+    // The stub's compiled HWX is then overwritten with the caller's bytes.
+    auto tt = [&]() -> std::string {
+        return "tensor<fp16, [1, " + std::to_string(channels) +
+               ", 1, " + std::to_string(seq) + "]>";
+    };
+    std::string stub_mil =
+        "program(1.3)\n"
+        "[buildInfo = dict<string, string>({"
+        "{\"coremlc-component-MIL\", \"3510.2.1\"}, "
+        "{\"coremlc-version\", \"3505.4.1\"}, "
+        "{\"coremltools-component-milinternal\", \"\"}, "
+        "{\"coremltools-version\", \"9.0\"}"
+        "})]\n"
+        "{\n"
+        "    func main<ios18>(" + tt() + " " + input_name + ") {\n"
+        "        " + tt() + " " + output_name +
+        " = relu(x=" + input_name + ")[name=string(\"hwx_stub\")];\n"
+        "    } -> (" + output_name + ");\n"
+        "}\n";
+
+    AneProgram* prog = ane_compile(stub_mil, {}, debug_name.empty()
+                                                      ? "hwx_stub"
+                                                      : debug_name + "_stub");
+    if (!prog) return nullptr;
+
+    @autoreleasepool {
+        NSString* model_dir_ns =
+            [NSString stringWithUTF8String:prog->model_dir.c_str()];
+        NSFileManager* fm = [NSFileManager defaultManager];
+
+        // Scan model_dir for the compiled HWX (may be in a subdirectory)
+        NSString* hwx_path = nil;
+        NSDirectoryEnumerator* en = [fm enumeratorAtPath:model_dir_ns];
+        for (NSString* f in en) {
+            if ([f hasSuffix:@".hwx"]) {
+                hwx_path = [model_dir_ns stringByAppendingPathComponent:f];
+                break;
+            }
+        }
+
+        if (!hwx_path) {
+            set_error("ane_load_hwx: no .hwx file found in model_dir %s",
+                      prog->model_dir.c_str());
+            ane_unload(prog);
+            return nullptr;
+        }
+
+        // Overwrite the stub HWX with the caller's bytes
+        NSData* our_data = [NSData dataWithBytes:hwx_bytes.data()
+                                          length:hwx_bytes.size()];
+        if (![our_data writeToFile:hwx_path atomically:YES]) {
+            set_error("ane_load_hwx: write to %s failed", [hwx_path UTF8String]);
+            ane_unload(prog);
+            return nullptr;
+        }
+
+        // Unload stub from SRAM, then reload with our HWX
+        id model = (id)prog->objc_model;
+        NSError* error = nil;
+        typedef BOOL (*UnloadFn)(id, SEL, unsigned int, NSError**);
+        typedef BOOL (*QoSFn3)(id, SEL, unsigned int, id, NSError**);
+
+        ((UnloadFn)objc_msgSend)(model, g_syms.sel_unload, kQoS, &error);
+
+        error = nil;
+        BOOL ok = ((QoSFn3)objc_msgSend)(model, g_syms.sel_load, kQoS, @{}, &error);
+        if (!ok || error) {
+            set_error("ane_load_hwx: reload failed: %s",
+                      error ? [[error localizedDescription] UTF8String] : "unknown");
+            ane_unload(prog);
+            return nullptr;
+        }
+
+        // Override tensor names with the caller's names (not the stub's)
+        prog->input_param_names = {input_name};
+        prog->output_var_names  = {output_name};
+        prog->debug_name        = debug_name;
+
+        return prog;
+    }
+}
+
 /* ── Unload ──────────────────────────────────────────────────────────────── */
 
 void ane_unload(AneProgram* program) {

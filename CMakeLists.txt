@@ -29,6 +29,8 @@ set(LIBANE_SOURCES
     src/graph/fusion_rules.cpp
     src/graph/graph_compiler.cpp
     src/graph/mil_backend.cpp
+    src/graph/hwx_emitter.cpp
+    src/graph/hwx_backend.cpp
     src/graph/graph_executor.cpp
     src/libane.cpp
 )
