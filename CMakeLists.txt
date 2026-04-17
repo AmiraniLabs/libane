@@ -31,6 +31,7 @@ set(LIBANE_SOURCES
     src/graph/mil_backend.cpp
     src/graph/hwx_emitter.cpp
     src/graph/hwx_backend.cpp
+    src/graph/espresso_builder.cpp
     src/graph/graph_executor.cpp
     src/libane.cpp
 )
