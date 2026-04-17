@@ -3,6 +3,7 @@
  */
 #include "graph_validator.hpp"
 
+#include <cstring>
 #include <unordered_set>
 #include <unordered_map>
 #include <queue>
@@ -259,12 +260,60 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
         case LIBANE_OP_RSQRT:
         case LIBANE_OP_TRANSPOSE:
         case LIBANE_OP_CAST:
+        case LIBANE_OP_RELU:
+        case LIBANE_OP_TANH:
+        case LIBANE_OP_SIGMOID:
+        case LIBANE_OP_HARDSWISH:
+        case LIBANE_OP_LEAKY_RELU:
+        case LIBANE_OP_ELU:
             if (!n.weights.empty())
                 err("op is weight-free but " + std::to_string(n.weights.size()) +
                     " weight bytes were provided");
             if (n.inputs.size() != 1)
                 err("requires exactly one input, got " + std::to_string(n.inputs.size()));
             break;
+
+        case LIBANE_OP_PIXEL_SHUFFLE: {
+            if (n.inputs.size() != 1) {
+                err("pixel_shuffle requires exactly one input, got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            if (n.weights.size() != 4) {
+                err("pixel_shuffle requires 4 weight bytes (int32 upscale_factor), got " +
+                    std::to_string(n.weights.size()));
+                break;
+            }
+            int32_t r = 0;
+            std::memcpy(&r, n.weights.data(), 4);
+            if (r <= 0)
+                err("pixel_shuffle upscale_factor must be > 0, got " + std::to_string(r));
+            const auto& in_t = g.tensor(n.inputs[0]);
+            if (in_t.shape.channels % r != 0)
+                err("pixel_shuffle input channels (" + std::to_string(in_t.shape.channels) +
+                    ") must be divisible by upscale_factor (" + std::to_string(r) + ")");
+            break;
+        }
+
+        case LIBANE_OP_PWL_ACTIVATION: {
+            if (n.inputs.size() != 1) {
+                err("pwl_activation requires exactly one input, got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            // weights: [x_min, x_max, samples...] as float32
+            if (n.weights.size() < 12 || (n.weights.size() % 4) != 0) {
+                err("pwl_activation weights must be at least 3 float32 values (x_min, x_max, sample[0]), got " +
+                    std::to_string(n.weights.size()) + " bytes");
+                break;
+            }
+            int n_floats = static_cast<int>(n.weights.size()) / 4;
+            if (n_floats < 4) {
+                err("pwl_activation needs at least 2 samples (n_floats >= 4), got " +
+                    std::to_string(n_floats));
+            }
+            break;
+        }
 
         case LIBANE_OP_REDUCE_PROD: {
             if (!n.weights.empty())

@@ -26,7 +26,7 @@
  * Key facts from Orion §4 and maderix/ANE:
  *  - ANE tensors are ALWAYS [1, C, 1, S] (batch=1, height=1, no exceptions)
  *  - conv 1×1 is 3× faster than matmul on ANE — use conv for all linear projections
- *  - S must be a multiple of 8, ≤ 65536; C ≤ 16384
+ *  - S must be a multiple of 16, ≤ 65536; C ≤ 16384
  *  - conv bias is NOT supported — use a separate add op
  *  - GELU must use tanh approximation only
  *  - matmul transpose flags require named const nodes, not inline literals
@@ -569,6 +569,64 @@ public:
                                          int out_C, int out_SP,
                                          const std::string& in_var,
                                          const std::string& out_var);
+
+    /** ReLU activation: y = max(x, 0). */
+    static MilFragment relu_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
+    /** Tanh activation: y = tanh(x). */
+    static MilFragment tanh_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
+    /** Sigmoid activation: y = sigmoid(x). */
+    static MilFragment sigmoid_fragment(int C, int SP,
+                                         const std::string& in_var,
+                                         const std::string& out_var);
+
+    /** HardSwish activation: y = x * clamp(x+3, 0, 6) / 6. */
+    static MilFragment hardswish_fragment(int C, int SP,
+                                           const std::string& in_var,
+                                           const std::string& out_var);
+
+    /** Leaky ReLU: y = max(alpha*x, x), alpha=0.01. */
+    static MilFragment leaky_relu_fragment(int C, int SP,
+                                            const std::string& in_var,
+                                            const std::string& out_var);
+
+    /** ELU activation: y = x if x>0 else exp(x)-1, alpha=1.0. */
+    static MilFragment elu_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& out_var);
+
+    /**
+     * 1-D pixel shuffle (depth-to-space):
+     *   Input:  [1, out_C * r, 1, in_SP]
+     *   Output: [1, out_C,     1, in_SP * r]
+     *
+     * out_C × r must equal the input channel count.
+     * in_SP and in_SP * r must both be valid ANE spatial dims (multiples of 16).
+     */
+    static MilFragment pixel_shuffle_fragment(int out_C, int in_SP, int r,
+                                               const std::string& in_var,
+                                               const std::string& out_var);
+
+    /**
+     * Piecewise-linear custom activation.
+     *
+     * Approximates any smooth activation function over [x_min, x_max] using
+     * n_samples-1 equal-width linear segments.  Outside the range the function
+     * extrapolates linearly from the nearest segment.
+     *
+     * samples[0..n_samples-1] — output values at equally-spaced x positions.
+     * n_samples >= 2; 33 (= 32 segments) recommended for ~0.001 max error.
+     */
+    static MilFragment pwl_activation_fragment(int C, int SP,
+                                                float x_min, float x_max,
+                                                const float* samples, int n_samples,
+                                                const std::string& in_var,
+                                                const std::string& out_var);
 
     /* ── Fused program assembly ──────────────────────────────────────────── */
 

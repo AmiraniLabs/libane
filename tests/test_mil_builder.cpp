@@ -35,15 +35,19 @@ TEST_CASE("TensorShape validation — height must be 1", "[mil][shape]") {
     REQUIRE_THROWS_AS(s.validate(), std::invalid_argument);
 }
 
-TEST_CASE("TensorShape validation — S must be multiple of 8", "[mil][shape]") {
+TEST_CASE("TensorShape validation — S must be multiple of 16", "[mil][shape]") {
     TensorShape s{1, 64, 1, 513};
     REQUIRE_THROWS_AS(s.validate(), std::invalid_argument);
 
-    TensorShape s2{1, 64, 1, 8};
+    TensorShape s2{1, 64, 1, 16};
     REQUIRE_NOTHROW(s2.validate());
 
     TensorShape s3{1, 64, 1, 0};
     REQUIRE_THROWS_AS(s3.validate(), std::invalid_argument);
+
+    // S=8 no longer valid (must be multiple of 16)
+    TensorShape s4{1, 64, 1, 8};
+    REQUIRE_THROWS_AS(s4.validate(), std::invalid_argument);
 }
 
 TEST_CASE("TensorShape validation — S <= 65536", "[mil][shape]") {
@@ -55,10 +59,10 @@ TEST_CASE("TensorShape validation — S <= 65536", "[mil][shape]") {
 }
 
 TEST_CASE("TensorShape validation — C <= 16384", "[mil][shape]") {
-    TensorShape s{1, 16384, 1, 8};
+    TensorShape s{1, 16384, 1, 16};
     REQUIRE_NOTHROW(s.validate());
 
-    TensorShape s2{1, 16385, 1, 8};
+    TensorShape s2{1, 16385, 1, 16};
     REQUIRE_THROWS_AS(s2.validate(), std::invalid_argument);
 }
 
@@ -218,7 +222,7 @@ TEST_CASE("MilBuilder::gelu produces tanh decomposition", "[mil][build]") {
 }
 
 TEST_CASE("MilBuilder::gelu rejects invalid shape", "[mil][build]") {
-    REQUIRE_THROWS_AS(MilBuilder::gelu(32, 7), std::invalid_argument); // S not mult of 8
+    REQUIRE_THROWS_AS(MilBuilder::gelu(32, 7), std::invalid_argument); // S not mult of 16
 }
 
 /* ── MilBuilder — softmax ───────────────────────────────────────────────── */
@@ -433,7 +437,7 @@ TEST_CASE("MilBuilder::transpose_cssc emits perm [0,3,2,1]", "[mil][build]") {
 
 TEST_CASE("MilBuilder::transpose_cssc rejects invalid dims", "[mil][build]") {
     // S and C swap roles in output: both must be valid ANE shapes
-    // If C=7 → output.seq=7 which is not a multiple of 8 → invalid
+    // If C=7 → output.seq=7 which is not a multiple of 16 → invalid
     REQUIRE_THROWS_AS(MilBuilder::transpose_cssc(7, 64), std::invalid_argument);
 }
 
@@ -623,4 +627,91 @@ TEST_CASE("select_fragment() emits cast + select", "[mil][select]") {
     CHECK_THAT(f.body, ContainsSubstring("select(cond="));
     CHECK_THAT(f.body, ContainsSubstring("a=t1"));
     CHECK_THAT(f.body, ContainsSubstring("b=t2"));
+}
+
+/* ── Activation fragments ────────────────────────────────────────────────── */
+
+TEST_CASE("relu_fragment emits relu op", "[mil][activation]") {
+    auto f = MilBuilder::relu_fragment(16, 64, "x", "y");
+    CHECK(f.input_name  == "x");
+    CHECK(f.output_name == "y");
+    CHECK_THAT(f.body, ContainsSubstring("relu(x=x)"));
+    CHECK(f.output_shape == (TensorShape{1, 16, 1, 64}));
+}
+
+TEST_CASE("tanh_fragment emits tanh op", "[mil][activation]") {
+    auto f = MilBuilder::tanh_fragment(16, 64, "x", "y");
+    CHECK_THAT(f.body, ContainsSubstring("tanh(x=x)"));
+    CHECK(f.output_shape == (TensorShape{1, 16, 1, 64}));
+}
+
+TEST_CASE("sigmoid_fragment emits sigmoid op", "[mil][activation]") {
+    auto f = MilBuilder::sigmoid_fragment(16, 64, "x", "y");
+    CHECK_THAT(f.body, ContainsSubstring("sigmoid(x=x)"));
+    CHECK(f.output_shape == (TensorShape{1, 16, 1, 64}));
+}
+
+TEST_CASE("hardswish_fragment emits relu-based clamp", "[mil][activation]") {
+    auto f = MilBuilder::hardswish_fragment(16, 64, "x", "y");
+    CHECK_THAT(f.body, ContainsSubstring("fp16(3.0)"));
+    CHECK_THAT(f.body, ContainsSubstring("fp16(6.0)"));
+    CHECK_THAT(f.body, ContainsSubstring("relu("));
+    CHECK_THAT(f.body, ContainsSubstring("fp16(0.16667)"));
+    CHECK(f.output_shape == (TensorShape{1, 16, 1, 64}));
+}
+
+TEST_CASE("leaky_relu_fragment emits leaky_relu op", "[mil][activation]") {
+    auto f = MilBuilder::leaky_relu_fragment(16, 64, "x", "y");
+    CHECK_THAT(f.body, ContainsSubstring("leaky_relu(alpha="));
+    CHECK_THAT(f.body, ContainsSubstring("fp16(0.01)"));
+    CHECK(f.output_shape == (TensorShape{1, 16, 1, 64}));
+}
+
+TEST_CASE("elu_fragment emits exp + select", "[mil][activation]") {
+    auto f = MilBuilder::elu_fragment(16, 64, "x", "y");
+    CHECK_THAT(f.body, ContainsSubstring("greater(x=x"));
+    CHECK_THAT(f.body, ContainsSubstring("exp(x=x)"));
+    CHECK_THAT(f.body, ContainsSubstring("select(cond="));
+    CHECK(f.output_shape == (TensorShape{1, 16, 1, 64}));
+}
+
+/* ── pixel_shuffle_fragment ──────────────────────────────────────────────── */
+
+TEST_CASE("pixel_shuffle_fragment emits reshape+transpose+reshape", "[mil][pixel_shuffle]") {
+    // Input [1, 32, 1, 64] (out_C=16, r=2) → Output [1, 16, 1, 128]
+    auto f = MilBuilder::pixel_shuffle_fragment(16, 64, 2, "x", "y");
+    CHECK(f.input_name  == "x");
+    CHECK(f.output_name == "y");
+    CHECK(f.output_shape == (TensorShape{1, 16, 1, 128}));
+    CHECK_THAT(f.body, ContainsSubstring("reshape("));
+    CHECK_THAT(f.body, ContainsSubstring("transpose("));
+    CHECK_THAT(f.body, ContainsSubstring("[0,1,3,2]"));
+    // Final output shape [1,16,1,128]
+    CHECK_THAT(f.body, ContainsSubstring("1,16,1,128"));
+}
+
+TEST_CASE("pixel_shuffle_fragment rejects r=0", "[mil][pixel_shuffle]") {
+    REQUIRE_THROWS_AS(MilBuilder::pixel_shuffle_fragment(16, 64, 0, "x", "y"),
+                      std::invalid_argument);
+}
+
+/* ── pwl_activation_fragment ─────────────────────────────────────────────── */
+
+TEST_CASE("pwl_activation_fragment emits piecewise linear chain", "[mil][pwl]") {
+    // 3 samples = 2 segments over [-1, 1]
+    float samples[] = {-0.5f, 0.0f, 0.5f};
+    auto f = MilBuilder::pwl_activation_fragment(16, 64, -1.0f, 1.0f, samples, 3, "x", "y");
+    CHECK(f.input_name  == "x");
+    CHECK(f.output_name == "y");
+    CHECK(f.output_shape == (TensorShape{1, 16, 1, 64}));
+    CHECK_THAT(f.body, ContainsSubstring("mul(x=x"));
+    CHECK_THAT(f.body, ContainsSubstring("less(x=x"));
+    CHECK_THAT(f.body, ContainsSubstring("select(cond="));
+}
+
+TEST_CASE("pwl_activation_fragment rejects < 2 samples", "[mil][pwl]") {
+    float s = 1.0f;
+    REQUIRE_THROWS_AS(
+        MilBuilder::pwl_activation_fragment(16, 64, -1.0f, 1.0f, &s, 1, "x", "y"),
+        std::invalid_argument);
 }

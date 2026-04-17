@@ -80,6 +80,20 @@ typedef enum {
     LIBANE_OP_LOG            = 38,
     LIBANE_OP_RSQRT          = 39,
     LIBANE_OP_SELECT         = 40,
+
+    /* ── Standalone activation ops ──────────────────────────────────────── */
+    LIBANE_OP_RELU           = 41,  /**< ReLU: max(x, 0) */
+    LIBANE_OP_TANH           = 42,  /**< Tanh */
+    LIBANE_OP_SIGMOID        = 43,  /**< Sigmoid */
+    LIBANE_OP_HARDSWISH      = 44,  /**< HardSwish: x * clamp(x+3, 0, 6) / 6 */
+    LIBANE_OP_LEAKY_RELU     = 45,  /**< Leaky ReLU (alpha=0.01) */
+    LIBANE_OP_ELU            = 46,  /**< ELU (alpha=1.0) */
+
+    /* ── Spatial reorganization ──────────────────────────────────────────── */
+    LIBANE_OP_PIXEL_SHUFFLE  = 47,  /**< Depth-to-space; upscale_factor encoded in weights[0..3] (int32) */
+
+    /* ── Learnable activation ────────────────────────────────────────────── */
+    LIBANE_OP_PWL_ACTIVATION = 48,  /**< Piecewise-linear custom activation; use libane_graph_add_pwl_activation() */
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */
@@ -87,7 +101,7 @@ typedef enum {
 /**
  * ANE tensors are always [1, C, 1, S] (NCHW with H=1).
  * dims[0] = batch (always 1 for ANE), dims[1] = C, dims[2] = 1, dims[3] = S.
- * S must be a multiple of 8 (ANE constraint #1).
+ * S must be a multiple of 16 (ANE constraint #1).
  *
  * For matmul(A[M,K], B[K,N]) the caller maps:
  *   A shape: {1, K, 1, M}   B shape: {1, N, 1, K}
@@ -328,7 +342,7 @@ libane_status_t libane_device_info(libane_device_info_t* out);
  *
  * max_seq       — maximum S dimension (must also be a multiple of seq_alignment).
  * max_channels  — maximum C dimension.
- * seq_alignment — S must be a multiple of this value (always 8).
+ * seq_alignment — S must be a multiple of this value (always 16).
  *
  * SRAM BUDGET WARNING:
  *   max_seq and max_channels are independent dimension caps, but the real
@@ -350,7 +364,7 @@ libane_status_t libane_device_info(libane_device_info_t* out);
 typedef struct {
     int32_t max_seq;        /**< maximum sequence / spatial dimension */
     int32_t max_channels;   /**< maximum channel dimension */
-    int32_t seq_alignment;  /**< S must be a multiple of this (always 8) */
+    int32_t seq_alignment;  /**< S must be a multiple of this (always 16) */
 } libane_shape_limits_t;
 
 /**
@@ -460,6 +474,31 @@ uint32_t libane_graph_add_op(libane_graph_t       g,
 libane_status_t libane_graph_mark_output(libane_graph_t g,
                                           uint32_t       tensor_id,
                                           const char*    name);
+
+/**
+ * Add a piecewise-linear custom activation op to the graph.
+ *
+ * Convenience wrapper around libane_graph_add_op(LIBANE_OP_PWL_ACTIVATION).
+ * Approximates any smooth activation over [x_min, x_max] using n_samples-1
+ * equal-width linear segments.  Outside the range, extrapolates linearly
+ * from the nearest endpoint segment.
+ *
+ * @param g            Graph handle.
+ * @param input_id     Input tensor ID.
+ * @param output_shape Must match input shape (same C and S).
+ * @param x_min        Left boundary of the approximation domain.
+ * @param x_max        Right boundary of the approximation domain.
+ * @param samples      n_samples output values at equal x spacing from x_min to x_max.
+ * @param n_samples    Number of sample points (≥ 2; 33 = 32 segments recommended).
+ * @return             Tensor ID of the output, or LIBANE_INVALID_TENSOR_ID on error.
+ */
+uint32_t libane_graph_add_pwl_activation(libane_graph_t g,
+                                          uint32_t       input_id,
+                                          libane_shape_t output_shape,
+                                          float          x_min,
+                                          float          x_max,
+                                          const float*   samples,
+                                          uint32_t       n_samples);
 
 /**
  * Validate, fuse, and compile the graph for ANE execution.

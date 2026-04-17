@@ -762,6 +762,38 @@ uint32_t libane_graph_add_op(libane_graph_t  g,
     }
 }
 
+uint32_t libane_graph_add_pwl_activation(libane_graph_t g,
+                                          uint32_t       input_id,
+                                          libane_shape_t output_shape,
+                                          float          x_min,
+                                          float          x_max,
+                                          const float*   samples,
+                                          uint32_t       n_samples) {
+    if (!g) {
+        set_error("libane_graph_add_pwl_activation: null graph");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    if (!samples || n_samples < 2) {
+        set_error("libane_graph_add_pwl_activation: need at least 2 sample points");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    // Encode: [x_min, x_max, samples[0..n_samples-1]] as float32 array
+    std::vector<float> packed;
+    packed.reserve(2 + n_samples);
+    packed.push_back(x_min);
+    packed.push_back(x_max);
+    for (uint32_t i = 0; i < n_samples; ++i)
+        packed.push_back(samples[i]);
+    try {
+        libane::mil::TensorShape ms = to_mil_shape(output_shape);
+        return g->graph.add_op(LIBANE_OP_PWL_ACTIVATION, {input_id}, ms,
+                               packed.data(), packed.size() * sizeof(float));
+    } catch (const std::exception& e) {
+        set_error("libane_graph_add_pwl_activation: %s", e.what());
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+}
+
 libane_status_t libane_graph_mark_output(libane_graph_t g,
                                           uint32_t       tensor_id,
                                           const char*    name) {

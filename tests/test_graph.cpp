@@ -41,7 +41,7 @@ TEST_CASE("add_input stores shape and name", "[graph][ir]") {
 TEST_CASE("add_input rejects bad ANE shape", "[graph][ir]") {
     AneGraph g;
 
-    // seq not multiple of 8
+    // seq not multiple of 16
     CHECK_THROWS_AS(g.add_input("bad", shape(512, 7)), std::invalid_argument);
 
     // batch != 1

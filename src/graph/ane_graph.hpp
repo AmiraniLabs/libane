@@ -93,7 +93,7 @@ public:
      * @return             TensorId of the new output tensor.
      *
      * Throws std::invalid_argument if any input TensorId is out of range or
-     * output_shape fails basic ANE constraints (seq % 8 == 0, batch == 1,
+     * output_shape fails basic ANE constraints (seq % 16 == 0, batch == 1,
      * height == 1).
      */
     TensorId add_op(libane_op_t op,

@@ -38,8 +38,8 @@ void TensorShape::validate() const {
     if (height != 1)
         throw std::invalid_argument("ANE: height must be 1, got " +
                                     std::to_string(height));
-    if (seq <= 0 || seq % 8 != 0)
-        throw std::invalid_argument("ANE: S must be > 0 and multiple of 8, got " +
+    if (seq <= 0 || seq % 16 != 0)
+        throw std::invalid_argument("ANE: S must be > 0 and multiple of 16, got " +
                                     std::to_string(seq));
     if (seq > 65536)
         throw std::invalid_argument("ANE: S must be ≤ 65536, got " +
@@ -2057,6 +2057,251 @@ MilFragment MilBuilder::reshape_fragment(int in_C, int in_SP,
     f.input_name   = in_var;
     f.output_name  = out_var;
     f.output_shape = out;
+    return f;
+}
+
+MilFragment MilBuilder::relu_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + out_var + " = relu(x=" + in_var + ")[name=string(\"" + p + "relu\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::tanh_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + out_var + " = tanh(x=" + in_var + ")[name=string(\"" + p + "tanh\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::sigmoid_fragment(int C, int SP,
+                                          const std::string& in_var,
+                                          const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + out_var + " = sigmoid(x=" + in_var + ")[name=string(\"" + p + "sig\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::hardswish_fragment(int C, int SP,
+                                            const std::string& in_var,
+                                            const std::string& out_var) {
+    // HardSwish(x) = x * clamp(x + 3, 0, 6) / 6
+    // Implemented via relu to avoid relying on MIL clip availability:
+    //   clamp(y, 0, 6) = relu(y) - relu(y - 6)
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        fp16 " + p + "c3   = const()[name=string(\"" + p + "c3\"),   val=fp16(3.0)];\n";
+    body += "        fp16 " + p + "c6   = const()[name=string(\"" + p + "c6\"),   val=fp16(6.0)];\n";
+    body += "        fp16 " + p + "inv6 = const()[name=string(\"" + p + "inv6\"), val=fp16(0.16667)];\n";
+    body += "        " + tt + " " + p + "sh  = add(x=" + in_var + ", y=" + p + "c3)[name=string(\"" + p + "sh\")];\n";
+    body += "        " + tt + " " + p + "r1  = relu(x=" + p + "sh)[name=string(\"" + p + "r1\")];\n";
+    body += "        " + tt + " " + p + "sh2 = add(x=" + in_var + ", y=" + p + "c3)[name=string(\"" + p + "sh2\")];\n";
+    body += "        " + tt + " " + p + "d6  = sub(x=" + p + "sh2, y=" + p + "c6)[name=string(\"" + p + "d6\")];\n";
+    body += "        " + tt + " " + p + "r2  = relu(x=" + p + "d6)[name=string(\"" + p + "r2\")];\n";
+    body += "        " + tt + " " + p + "cl  = sub(x=" + p + "r1, y=" + p + "r2)[name=string(\"" + p + "cl\")];\n";
+    body += "        " + tt + " " + p + "sc  = mul(x=" + p + "cl, y=" + p + "inv6)[name=string(\"" + p + "sc\")];\n";
+    body += "        " + tt + " " + out_var + " = mul(x=" + in_var + ", y=" + p + "sc)[name=string(\"" + p + "hsw\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::leaky_relu_fragment(int C, int SP,
+                                             const std::string& in_var,
+                                             const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        fp16 " + p + "alpha = const()[name=string(\"" + p + "alpha\"), val=fp16(0.01)];\n";
+    body += "        " + tt + " " + out_var + " = leaky_relu(alpha=" + p + "alpha, x=" + in_var + ")[name=string(\"" + p + "lrelu\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::elu_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var) {
+    // ELU(x) = x if x > 0, else exp(x) - 1  (alpha=1.0)
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+    std::string body;
+    body += "        fp16 " + p + "zero = const()[name=string(\"" + p + "zero\"), val=fp16(0.0)];\n";
+    body += "        fp16 " + p + "one  = const()[name=string(\"" + p + "one\"),  val=fp16(1.0)];\n";
+    body += "        " + tb + " " + p + "mask = greater(x=" + in_var + ", y=" + p + "zero)[name=string(\"" + p + "mask\")];\n";
+    body += "        " + tt + " " + p + "ex   = exp(x=" + in_var + ")[name=string(\"" + p + "ex\")];\n";
+    body += "        " + tt + " " + p + "em1  = sub(x=" + p + "ex, y=" + p + "one)[name=string(\"" + p + "em1\")];\n";
+    body += "        " + tt + " " + out_var + " = select(cond=" + p + "mask, a=" + in_var + ", b=" + p + "em1)[name=string(\"" + p + "elu\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::pixel_shuffle_fragment(int out_C, int in_SP, int r,
+                                                const std::string& in_var,
+                                                const std::string& out_var) {
+    // Input:  [1, out_C * r, 1, in_SP] → Output: [1, out_C, 1, in_SP * r]
+    // Depth-to-space via reshape + transpose + reshape:
+    //   [1, out_C*r, 1, in_SP] → reshape → [1, out_C, r, in_SP]
+    //   → transpose [0,1,3,2] → [1, out_C, in_SP, r]
+    //   → reshape → [1, out_C, 1, in_SP*r]
+    if (r <= 0)
+        throw std::invalid_argument("pixel_shuffle_fragment: upscale_factor must be > 0");
+    int in_C = out_C * r;
+    int out_SP = in_SP * r;
+    TensorShape in_shape {1, in_C,  1, in_SP};
+    TensorShape out_shape{1, out_C, 1, out_SP};
+    in_shape.validate();
+    out_shape.validate();
+    const std::string p = out_var + "_";
+    std::string tin  = tensor_type(in_shape);
+    std::string tout = tensor_type(out_shape);
+    std::string body;
+    // Step 1: reshape [1, out_C*r, 1, in_SP] → [1, out_C, r, in_SP]
+    body += "        tensor<int32, [4]> " + p + "sh1 = const()[name=string(\"" + p + "sh1\"), val=tensor<int32, [4]>([1," +
+            std::to_string(out_C) + "," + std::to_string(r) + "," + std::to_string(in_SP) + "])];\n";
+    body += "        tensor<fp16, [1, " + std::to_string(out_C) + ", " + std::to_string(r) + ", " + std::to_string(in_SP) + "]> " +
+            p + "r1 = reshape(shape=" + p + "sh1, x=" + in_var + ")[name=string(\"" + p + "r1\")];\n";
+    // Step 2: transpose [0,1,3,2] → [1, out_C, in_SP, r]
+    body += "        tensor<int32, [4]> " + p + "pm = const()[name=string(\"" + p + "pm\"), val=tensor<int32, [4]>([0,1,3,2])];\n";
+    body += "        tensor<fp16, [1, " + std::to_string(out_C) + ", " + std::to_string(in_SP) + ", " + std::to_string(r) + "]> " +
+            p + "tr = transpose(perm=" + p + "pm, x=" + p + "r1)[name=string(\"" + p + "tr\")];\n";
+    // Step 3: reshape [1, out_C, in_SP, r] → [1, out_C, 1, out_SP]
+    body += "        tensor<int32, [4]> " + p + "sh2 = const()[name=string(\"" + p + "sh2\"), val=tensor<int32, [4]>([1," +
+            std::to_string(out_C) + ",1," + std::to_string(out_SP) + "])];\n";
+    body += "        " + tout + " " + out_var + " = reshape(shape=" + p + "sh2, x=" + p + "tr)[name=string(\"" + p + "ps\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = out_shape;
+    return f;
+}
+
+MilFragment MilBuilder::pwl_activation_fragment(int C, int SP,
+                                                  float x_min, float x_max,
+                                                  const float* samples, int n_samples,
+                                                  const std::string& in_var,
+                                                  const std::string& out_var) {
+    // Piecewise linear approximation with n_samples-1 segments.
+    // Samples are at equally-spaced x values from x_min to x_max.
+    // For x outside [x_min, x_max]: linearly extrapolates from nearest segment.
+    if (n_samples < 2)
+        throw std::invalid_argument("pwl_activation_fragment: need at least 2 sample points");
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    int N = n_samples - 1;
+    float dx = (x_max - x_min) / static_cast<float>(N);
+    float dx_inv = 1.0f / dx;
+
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string tb = "tensor<bool, [1, " + std::to_string(C) + ", 1, " + std::to_string(SP) + "]>";
+
+    // Precompute slope (a) and intercept (b) for each segment i:
+    //   a[i] = (s[i+1] - s[i]) / dx
+    //   b[i] = s[i] - a[i] * (x_min + i*dx)
+    std::vector<float> a(N), b(N);
+    for (int i = 0; i < N; ++i) {
+        a[i] = (samples[i + 1] - samples[i]) * dx_inv;
+        b[i] = samples[i] - a[i] * (x_min + i * dx);
+    }
+
+    auto fp16_lit = [](float v) -> std::string {
+        // Emit enough precision for fp16 round-trip
+        std::ostringstream ss;
+        ss << std::setprecision(6) << v;
+        return ss.str();
+    };
+
+    std::string body;
+
+    // Start with innermost segment (N-1): lerp_{N-1}(x) = a[N-1]*x + b[N-1]
+    // This is always a tensor because x * a[N-1] is tensor * scalar → tensor.
+    std::string cur = p + "cr" + std::to_string(N - 1);
+    body += "        fp16 " + p + "a" + std::to_string(N-1) + " = const()[name=string(\"" + p + "a" + std::to_string(N-1) + "\"), val=fp16(" + fp16_lit(a[N-1]) + ")];\n";
+    body += "        fp16 " + p + "b" + std::to_string(N-1) + " = const()[name=string(\"" + p + "b" + std::to_string(N-1) + "\"), val=fp16(" + fp16_lit(b[N-1]) + ")];\n";
+    body += "        " + tt + " " + p + "t" + std::to_string(N-1) + " = mul(x=" + in_var + ", y=" + p + "a" + std::to_string(N-1) + ")[name=string(\"" + p + "t" + std::to_string(N-1) + "\")];\n";
+    body += "        " + tt + " " + cur + " = add(x=" + p + "t" + std::to_string(N-1) + ", y=" + p + "b" + std::to_string(N-1) + ")[name=string(\"" + cur + "\")];\n";
+
+    // Wrap segments N-2 down to 0
+    for (int i = N - 2; i >= 0; --i) {
+        std::string ai  = p + "a" + std::to_string(i);
+        std::string bi  = p + "b" + std::to_string(i);
+        std::string ti  = p + "t" + std::to_string(i);
+        std::string yi  = p + "y" + std::to_string(i);
+        std::string thr = p + "th" + std::to_string(i);
+        std::string msk = p + "mk" + std::to_string(i);
+        std::string nxt = p + "cr" + std::to_string(i);
+        // Upper boundary of segment i:  x_min + (i+1)*dx
+        float upper = x_min + (i + 1) * dx;
+        body += "        fp16 " + ai  + " = const()[name=string(\"" + ai  + "\"), val=fp16(" + fp16_lit(a[i]) + ")];\n";
+        body += "        fp16 " + bi  + " = const()[name=string(\"" + bi  + "\"), val=fp16(" + fp16_lit(b[i]) + ")];\n";
+        body += "        " + tt + " " + ti + " = mul(x=" + in_var + ", y=" + ai + ")[name=string(\"" + ti + "\")];\n";
+        body += "        " + tt + " " + yi + " = add(x=" + ti + ", y=" + bi + ")[name=string(\"" + yi + "\")];\n";
+        body += "        fp16 " + thr + " = const()[name=string(\"" + thr + "\"), val=fp16(" + fp16_lit(upper) + ")];\n";
+        body += "        " + tb + " " + msk + " = less(x=" + in_var + ", y=" + thr + ")[name=string(\"" + msk + "\")];\n";
+        body += "        " + tt + " " + nxt + " = select(cond=" + msk + ", a=" + yi + ", b=" + cur + ")[name=string(\"" + nxt + "\")];\n";
+        cur = nxt;
+    }
+
+    // Assign final result
+    if (cur != out_var) {
+        body += "        " + tt + " " + out_var + " = identity(x=" + cur + ")[name=string(\"" + p + "pwl\")];\n";
+    }
+
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
     return f;
 }
 

@@ -168,10 +168,10 @@ TEST_CASE("libane_execute softmax produces valid probabilities", "[api]") {
         return;
     }
 
-    // Shape [1, C=8, 1, S=8]: axis=1 softmax normalises over C channels.
+    // Shape [1, C=8, 1, S=16]: axis=1 softmax normalises over C channels.
     // For each S position the C channel values must sum to 1.0.
     libane_shape_t shape;
-    shape.dims[0]=1; shape.dims[1]=8; shape.dims[2]=1; shape.dims[3]=8; shape.ndim=4;
+    shape.dims[0]=1; shape.dims[1]=8; shape.dims[2]=1; shape.dims[3]=16; shape.ndim=4;
 
     auto h = libane_compile(LIBANE_OP_SOFTMAX, shape, nullptr, 0);
     if (!h) { WARN("ANE compile limit reached — skipping: " << libane_last_error()); return; }
@@ -179,18 +179,18 @@ TEST_CASE("libane_execute softmax produces valid probabilities", "[api]") {
 
     using fp16_t = libane_f16_t;
     // Each S position gets the same C values [1..8]; after channel softmax they sum to 1.0.
-    std::vector<fp16_t> in(8*8), out(8*8);
+    std::vector<fp16_t> in(8*16), out(8*16);
     float vals[] = {1.0f,2.0f,3.0f,4.0f,5.0f,6.0f,7.0f,8.0f};
     for (int c = 0; c < 8; ++c)
-        for (int s = 0; s < 8; ++s)
-            in[c * 8 + s] = f16(vals[c]);
+        for (int s = 0; s < 16; ++s)
+            in[c * 16 + s] = f16(vals[c]);
 
     libane_status_t st = libane_execute(h, in.data(), out.data(), shape);
     CHECK(st == LIBANE_OK);
 
     // Check one S position: sum of C=8 channel values must be ~1.0
     float sum = 0.0f;
-    for (int c = 0; c < 8; ++c) sum += f32(out[c * 8 + 0]);
+    for (int c = 0; c < 8; ++c) sum += f32(out[c * 16 + 0]);
     CHECK(std::abs(sum - 1.0f) < 0.05f); // fp16 precision
 
     libane_release(h);
@@ -206,16 +206,17 @@ TEST_CASE("libane_execute gelu output matches expected", "[api]") {
     }
 
     libane_shape_t shape;
-    shape.dims[0]=1; shape.dims[1]=1; shape.dims[2]=1; shape.dims[3]=8; shape.ndim=4;
+    shape.dims[0]=1; shape.dims[1]=1; shape.dims[2]=1; shape.dims[3]=16; shape.ndim=4;
 
     auto h = libane_compile(LIBANE_OP_GELU, shape, nullptr, 0);
     if (!h) { WARN("ANE compile limit reached — skipping: " << libane_last_error()); return; }
     REQUIRE(h != nullptr);
 
     using fp16_t = libane_f16_t;
-    std::vector<fp16_t> in(8), out(8);
-    float vals[] = {0.0f, 1.0f, -1.0f, 2.0f, -2.0f, 0.5f, -0.5f, 3.0f};
-    for (int i = 0; i < 8; ++i) in[i] = f16(vals[i]);
+    std::vector<fp16_t> in(16), out(16);
+    float vals[] = {0.0f, 1.0f, -1.0f, 2.0f, -2.0f, 0.5f, -0.5f, 3.0f,
+                    0.0f, 0.0f,  0.0f, 0.0f,  0.0f, 0.0f,  0.0f, 0.0f};
+    for (int i = 0; i < 16; ++i) in[i] = f16(vals[i]);
 
     libane_status_t st = libane_execute(h, in.data(), out.data(), shape);
     if (st != LIBANE_OK) {
@@ -250,12 +251,12 @@ TEST_CASE("libane_execute with null input returns error", "[api]") {
     }
 
     libane_shape_t shape;
-    shape.dims[0]=1; shape.dims[1]=1; shape.dims[2]=1; shape.dims[3]=8; shape.ndim=4;
+    shape.dims[0]=1; shape.dims[1]=1; shape.dims[2]=1; shape.dims[3]=16; shape.ndim=4;
     auto h = libane_compile(LIBANE_OP_GELU, shape, nullptr, 0);
     if (!h) { WARN("ANE compile limit reached — skipping: " << libane_last_error()); return; }
     REQUIRE(h != nullptr);
 
-    std::vector<libane_f16_t> out(8);
+    std::vector<libane_f16_t> out(16);
     auto st = libane_execute(h, nullptr, out.data(), shape);
     CHECK(st == LIBANE_ERR_INVALID_ARG);
 
@@ -915,13 +916,13 @@ TEST_CASE("libane_compile_batch handles mixed success and failure", "[api][batch
     valid_shape.ndim = 4;
 
     libane_shape_t bad_shape{};
-    bad_shape.dims[0] = 1; bad_shape.dims[1] = 8; bad_shape.dims[2] = 1; bad_shape.dims[3] = 1;  // seq < 8
+    bad_shape.dims[0] = 1; bad_shape.dims[1] = 8; bad_shape.dims[2] = 1; bad_shape.dims[3] = 1;  // seq < 16
     bad_shape.ndim = 4;
 
     // Mix of valid and invalid requests
     libane_compile_request_t requests[3] = {
         {LIBANE_OP_SOFTMAX, valid_shape, nullptr, 0},  // valid
-        {LIBANE_OP_GELU,    bad_shape,   nullptr, 0},  // invalid (seq < 8)
+        {LIBANE_OP_GELU,    bad_shape,   nullptr, 0},  // invalid (seq < 16)
         {LIBANE_OP_SILU,    valid_shape, nullptr, 0},  // valid
     };
 

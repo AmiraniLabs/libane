@@ -49,6 +49,14 @@ bool FusionRules::op_supported(libane_op_t op) {
     case LIBANE_OP_TRANSPOSE:
     case LIBANE_OP_RESHAPE:
     case LIBANE_OP_SELECT:
+    case LIBANE_OP_RELU:
+    case LIBANE_OP_TANH:
+    case LIBANE_OP_SIGMOID:
+    case LIBANE_OP_HARDSWISH:
+    case LIBANE_OP_LEAKY_RELU:
+    case LIBANE_OP_ELU:
+    case LIBANE_OP_PIXEL_SHUFFLE:
+    case LIBANE_OP_PWL_ACTIVATION:
         return true;
     case LIBANE_OP_CONV2D:
     case LIBANE_OP_CAST:

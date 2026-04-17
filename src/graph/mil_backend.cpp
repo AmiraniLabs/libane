@@ -10,8 +10,10 @@
 #include "../core/mil_builder.hpp"
 #include "../../include/libane.h"
 
+#include <cstring>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace libane {
 namespace graph {
@@ -209,6 +211,54 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
     case LIBANE_OP_RSQRT:
         return mil::MilBuilder::rsqrt_fragment(
             out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_RELU:
+        return mil::MilBuilder::relu_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_TANH:
+        return mil::MilBuilder::tanh_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_SIGMOID:
+        return mil::MilBuilder::sigmoid_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_HARDSWISH:
+        return mil::MilBuilder::hardswish_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_LEAKY_RELU:
+        return mil::MilBuilder::leaky_relu_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_ELU:
+        return mil::MilBuilder::elu_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_PIXEL_SHUFFLE: {
+        int32_t r = 0;
+        if (node.weights.size() == 4)
+            std::memcpy(&r, node.weights.data(), 4);
+        int out_C = out_shape.channels;
+        int in_SP = in_shape.seq;
+        return mil::MilBuilder::pixel_shuffle_fragment(out_C, in_SP, r, in_var, out_var);
+    }
+
+    case LIBANE_OP_PWL_ACTIVATION: {
+        // weights layout: [x_min, x_max, samples...] as float32
+        const auto& w = node.weights;
+        int n_floats = static_cast<int>(w.size()) / 4;
+        std::vector<float> fv(n_floats);
+        std::memcpy(fv.data(), w.data(), w.size());
+        float x_min   = fv[0];
+        float x_max   = fv[1];
+        int n_samples = n_floats - 2;
+        return mil::MilBuilder::pwl_activation_fragment(
+            out_shape.channels, out_shape.seq,
+            x_min, x_max, fv.data() + 2, n_samples,
+            in_var, out_var);
+    }
 
     default:
         throw std::runtime_error(

@@ -397,9 +397,9 @@ TEST_CASE("build_plan: throws on graph with no outputs", "[compiler][error]") {
     CHECK_THROWS_AS(GraphCompiler::build_plan(g), std::runtime_error);
 }
 
-TEST_CASE("build_plan: throws on bad shape (seq not multiple of 8)", "[compiler][error]") {
+TEST_CASE("build_plan: throws on bad shape (seq not multiple of 16)", "[compiler][error]") {
     AneGraph g;
-    // Shape S(512, 100) — seq=100 is not a multiple of 8
+    // Shape S(512, 100) — seq=100 is not a multiple of 16
     CHECK_THROWS(g.add_input("x", {1, 512, 1, 100}));
 }
 
