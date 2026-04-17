@@ -8,9 +8,9 @@ from 8 to 512 and plots tokens/sec for a single matmul, helping you pick the
 right batching strategy for your model.
 
 Practical guide:
-  - Autoregressive decoding (seq=1): use seq=8 minimum (ANE constraint)
+  - Autoregressive decoding (seq=1): use seq=16 minimum (ANE constraint: S % 16 == 0)
   - Prefill (long prompts): sweet spot usually around 128–256
-  - Batched decoding: pad to next multiple of 8, batch until ANE is saturated
+  - Batched decoding: pad to next multiple of 16, batch until ANE is saturated
 """
 import time
 import numpy as np
@@ -21,7 +21,7 @@ D = 2048   # matmul dim — typical transformer projection
 rng = np.random.default_rng(8)
 W   = (rng.standard_normal((D, D)) * 0.02).astype(np.float16)
 
-SEQ_LENS = [8, 16, 32, 64, 128, 256, 512]
+SEQ_LENS = [16, 32, 64, 128, 256, 512]
 N_RUNS   = 50
 
 print(f"Matmul[{D}×{D}]  throughput sweep")
@@ -61,7 +61,7 @@ print()
 print(f"Peak throughput: {best[2]:.0f} tokens/sec at seq={best[0]}")
 print(f"Peak compute   : {best[3]:.1f} GFLOP/s")
 
-# Latency for autoregressive decoding (smallest valid seq=8)
+# Latency for autoregressive decoding (smallest valid seq=16)
 ar = results[0]
 print()
-print(f"Autoregressive decoding (seq=8): {ar[1]:.3f} ms/step → {ar[2]:.0f} tok/s")
+print(f"Autoregressive decoding (seq=16): {ar[1]:.3f} ms/step → {ar[2]:.0f} tok/s")
