@@ -28,6 +28,7 @@ set(LIBANE_SOURCES
     src/graph/graph_validator.cpp
     src/graph/fusion_rules.cpp
     src/graph/graph_compiler.cpp
+    src/graph/mil_backend.cpp
     src/graph/graph_executor.cpp
     src/libane.cpp
 )

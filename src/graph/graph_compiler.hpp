@@ -29,7 +29,7 @@
 
 #include "ane_graph.hpp"
 #include "fusion_rules.hpp"
-#include "../core/mil_builder.hpp"
+#include "compiler_backend.hpp"
 #include "../core/buffer_manager.hpp"
 #include "../runtime/ane_runtime.hpp"
 #include "../../include/libane.h"
@@ -145,9 +145,14 @@ public:
      * Full compile: validate, fuse, compile all groups to ANE programs, and
      * pre-allocate ANE buffers for all group outputs.
      *
+     * The backend translates each FusionGroup into a loaded AneProgram.
+     * The no-argument overload uses MilBackend (Path A, the default).
+     *
      * Returns nullptr on failure (validation error, ANE unavailable, or any
-     * ane_compile() call fails).  Never throws.
+     * compile_group() call fails).  Never throws.
      */
+    static std::unique_ptr<CompiledGraph> compile(const AneGraph& graph,
+                                                   CompilerBackend& backend);
     static std::unique_ptr<CompiledGraph> compile(const AneGraph& graph);
 };
 
