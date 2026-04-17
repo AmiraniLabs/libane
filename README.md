@@ -47,7 +47,7 @@ import ane
 import numpy as np
 
 print(ane.available())   # True on Apple Silicon
-print(ane.version())     # "0.8.1"
+print(ane.version())     # "0.8.2"
 
 # Single-op matmul
 A = np.random.randn(128, 512).astype(np.float16)
@@ -216,7 +216,7 @@ Full op documentation with constraints and notes: [docs/graph-ir.md](docs/graph-
 ## Known Limitations
 
 - **Experimental / research-use only.** Not production-supported.
-- **Private Apple framework dependency.** Uses `AppleNeuralEngine.framework` via `dlopen`. Not App Store safe.
+- **Private Apple framework dependency.** Uses `AppleNeuralEngine.framework` via `dlopen`. Uses private API — intentional.
 - **Constrained tensor layout.** Graph API requires `[1, C, 1, S]` (NCHW with batch=1, height=1). Arbitrary shapes are not supported.
 - **Channel cap.** Graph API validation enforces `C ≤ 16384`. Larger channel counts (e.g. vocabulary projections) require raw MIL emission and are not exposed through the graph API.
 - **fp16 only.** No quantization (int8, int4) support. Weights and activations are fp16 throughout.

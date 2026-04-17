@@ -1,9 +1,8 @@
 """
-ane — Apple Neural Engine Python bindings (libane v0.7.1)
+ane — Apple Neural Engine Python bindings (libane v0.8.2)
 
-ANE-accelerated ML operations with automatic CPU fallback.
+Run ML graphs directly on the Apple Neural Engine from Python.
 Uses AppleNeuralEngine.framework via dlopen — private API, intentional.
-Not for App Store submission.
 """
 
 from __future__ import annotations
@@ -50,6 +49,17 @@ COSH: int
 TAN: int
 ASIN: int
 ACOS: int
+SELECT: int
+RELU: int
+TANH: int
+SIGMOID: int
+HARDSWISH: int
+LEAKY_RELU: int
+ELU: int
+PIXEL_SHUFFLE: int
+CAST: int
+CONV2D: int
+PWL_ACTIVATION: int
 
 # ── Log level constants ───────────────────────────────────────────────────────
 
@@ -66,11 +76,41 @@ def available() -> bool:
     ...
 
 def version() -> str:
-    """libane version string (e.g. '0.7.1')."""
+    """libane version string (e.g. '0.8.2')."""
     ...
 
 def last_error() -> str:
     """Last error message from the library."""
+    ...
+
+def device_info() -> dict:
+    """
+    ANE hardware capabilities.
+
+    Returns:
+        dict with keys:
+            architecture (str): chip generation string, e.g. 'h15g' (M3), 'h16g' (M4).
+            core_count   (int): number of ANE inference cores.
+            num_anes     (int): number of ANE units.
+            available   (bool): False if _ANEDeviceInfo could not be queried.
+    """
+    ...
+
+def shape_limits() -> dict:
+    """
+    ANE tensor shape limits for the current chip.
+
+    Returns:
+        dict with keys:
+            max_seq       (int): maximum S dimension.
+            max_channels  (int): maximum C dimension.
+            seq_alignment (int): S must be a multiple of this value (always 16).
+
+    Note:
+        max_seq and max_channels cannot be reached simultaneously — the real
+        constraint is on-chip SRAM (~32 MB on M3). Use these as per-dimension
+        guards only.
+    """
     ...
 
 def set_backend(backend: Optional[str]) -> None:
@@ -100,7 +140,7 @@ def cache_size_bytes() -> int:
     """Return the current size of the compiled program cache in bytes."""
     ...
 
-# ── Single-op API ─────────────────────────────────────────────────────────────
+# ── Single-op convenience ─────────────────────────────────────────────────────
 
 def matmul(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     """
@@ -134,8 +174,7 @@ def softmax(x: np.ndarray) -> np.ndarray:
     """
     ANE softmax over the channel (C) dimension.
 
-    Input is interpreted as [1, C, 1, S] where C = product of all but the last
-    dimension and S = last dimension. Falls back to numpy for unsupported shapes.
+    Falls back to numpy for unsupported shapes.
 
     Args:
         x: Array of any shape; last dimension is S (must be multiple of 8 and ≤ 65536
@@ -161,14 +200,114 @@ def gelu(x: np.ndarray) -> np.ndarray:
     """
     ...
 
-# ── Raw MIL probe API ────────────────────────────────────────────────────────
+# ── Compiled single-op handle ─────────────────────────────────────────────────
+
+class CompiledOp:
+    """
+    Compiled single-op ANE program. Returned by ``compile()`` and ``compile_batch()``.
+
+    Wraps a ``libane_handle_t``. Released on garbage collection.
+    """
+
+    def execute(self, x: np.ndarray, shape: list[int]) -> np.ndarray:
+        """
+        Execute with one input.
+
+        Args:
+            x:     Input array (converted to float16 internally).
+            shape: Runtime shape [1, C, 1, S] — must match compiled shape.
+
+        Returns:
+            Flat np.float16 array of C*S elements.
+        """
+        ...
+
+    def execute2(self, x0: np.ndarray, x1: np.ndarray, shape: list[int]) -> np.ndarray:
+        """
+        Execute with two inputs (e.g. elementwise ADD, MUL).
+
+        Inputs must be in alphabetical order of their MIL parameter names
+        (ANE constraint #13).
+
+        Args:
+            x0, x1: Input arrays (converted to float16 internally).
+            shape:  Runtime shape [1, C, 1, S].
+
+        Returns:
+            Flat np.float16 array.
+        """
+        ...
+
+    def delta_reload(self) -> None:
+        """
+        Reload the compiled program into ANE SRAM without recompiling.
+
+        ~8.5× faster than a full compile. Use after an unload to restore
+        execution without paying the full compile cost.
+
+        Note: weights are baked into the compiled binary and cannot be
+        changed with this call. Use ``compile()`` with new weights instead.
+        """
+        ...
+
+
+def compile(
+    op: int,
+    shape: list[int],
+    weights: Optional[np.ndarray] = None,
+) -> CompiledOp:
+    """
+    Compile a single op. Returns a ``CompiledOp`` handle.
+
+    Args:
+        op:      Op constant (e.g. ``ane.SOFTMAX``, ``ane.MATMUL``).
+        shape:   Output/activation shape [1, C, 1, S].
+        weights: Weight array for weight-bearing ops (MATMUL, RMSNORM, etc.).
+                 Converted to float16 internally.
+
+    Returns:
+        ``CompiledOp`` ready for ``.execute()`` or ``.execute2()``.
+
+    Raises:
+        RuntimeError if compilation fails. Check ``ane.last_error()``.
+
+    Note:
+        Activation ops (RELU, TANH, SIGMOID, etc.) are only available through
+        the Graph API — use ``Graph.add_op()`` for those.
+    """
+    ...
+
+
+def compile_batch(
+    requests: list[tuple[int, list[int], Optional[np.ndarray]]],
+) -> list[Optional[CompiledOp]]:
+    """
+    Compile multiple ops in one call.
+
+    Args:
+        requests: List of (op, shape, weights_or_None) tuples.
+
+    Returns:
+        List of ``CompiledOp | None`` — ``None`` for any that failed.
+        Check ``ane.last_error()`` on partial failure.
+    """
+    ...
+
+# ── Raw MIL API ───────────────────────────────────────────────────────────────
 
 class CompiledMil:
     """
     Compiled raw MIL program. Returned by ``compile_mil()`` and
     ``compile_mil_with_weights()``.
+    """
 
-    Use :mod:`probe` for a higher-level interface.
+    sram_spill: bool
+    """
+    True if the compiled program requires DRAM-backed intermediate buffers.
+
+    Non-zero ``intermediateBufferHandle`` means activations spilled past
+    on-chip SRAM (~32 MB on M3). Expect ~30% throughput penalty.
+    Always False for single-op programs (no inter-layer intermediates).
     """
 
     def run(
@@ -177,7 +316,7 @@ class CompiledMil:
         output_sizes: list[int],
     ) -> list[np.ndarray]:
         """
-        Execute the compiled MIL program.
+        Execute the MIL program.
 
         Args:
             inputs:       Input arrays (converted to float16 internally).
@@ -192,6 +331,28 @@ class CompiledMil:
         """
         ...
 
+    def run_stats(
+        self,
+        inputs: list[np.ndarray],
+        output_sizes: list[int],
+    ) -> tuple[list[np.ndarray], dict]:
+        """
+        Execute and return IOReport hardware counters.
+
+        Args:
+            inputs, output_sizes: Same as ``run()``.
+
+        Returns:
+            (outputs, stats) where stats is a dict with keys:
+                ane_bw_utilization (float): DCS bus utilization fraction (0.0–1.0).
+                avg_bw_state       (float): mean bandwidth histogram state (0–31).
+                peak_bw_state        (int): peak bandwidth state observed.
+                ane_energy_units     (int): raw IOReport energy units.
+                throttle_ns          (int): total throttle residency in nanoseconds.
+                available           (bool): False if IOReport sampling failed.
+        """
+        ...
+
 
 def compile_mil(mil_text: str) -> CompiledMil:
     """
@@ -201,7 +362,7 @@ def compile_mil(mil_text: str) -> CompiledMil:
         mil_text: UTF-8 MIL source text (complete program including buildInfo header).
 
     Returns:
-        ``CompiledMil`` ready for ``.run()``.
+        ``CompiledMil`` ready for ``.run()`` or ``.run_stats()``.
 
     Raises:
         RuntimeError if ANE is unavailable or compilation fails.
@@ -222,7 +383,7 @@ def compile_mil_with_weights(
                   Filenames must match ``file()`` references in the MIL text.
 
     Returns:
-        ``CompiledMil`` ready for ``.run()``.
+        ``CompiledMil`` ready for ``.run()`` or ``.run_stats()``.
 
     Raises:
         RuntimeError if ANE is unavailable or compilation fails.
@@ -276,7 +437,7 @@ class Graph:
         Add an operation node.
 
         Args:
-            op:           Op constant (e.g. ``ane.MATMUL``, ``ane.RMSNORM``).
+            op:           Op constant (e.g. ``ane.MATMUL``, ``ane.RELU``).
             inputs:       List of input tensor IDs.
             output_shape: 4-element list [1, C_out, 1, S_out].
             weights:      Weight array (required for MATMUL, RMSNORM, LAYERNORM).
@@ -284,6 +445,39 @@ class Graph:
 
         Returns:
             Output tensor ID (uint32).
+        """
+        ...
+
+    def add_pwl_activation(
+        self,
+        input_id: int,
+        output_shape: list[int],
+        x_min: float,
+        x_max: float,
+        samples: np.ndarray,
+    ) -> int:
+        """
+        Add a piecewise-linear custom activation.
+
+        Approximates an arbitrary smooth function over [x_min, x_max] using
+        n_samples-1 linear segments. 32 segments (33 samples) gives < 0.1%
+        mean relative error for typical smooth activations.
+
+        Args:
+            input_id:     Tensor ID of the input.
+            output_shape: [1, C, 1, S] — must match input shape.
+            x_min, x_max: Domain of the approximation.
+            samples:      np.float32 array of length n_samples.
+                          Values are fn(np.linspace(x_min, x_max, n_samples)).
+
+        Returns:
+            Output tensor ID (uint32).
+
+        Example::
+
+            xs = np.linspace(-3, 3, 33, dtype=np.float32)
+            samples = x * scipy.special.expit(x)   # Swish
+            t = g.add_pwl_activation(xi, [1, C, 1, S], -3.0, 3.0, samples)
         """
         ...
 

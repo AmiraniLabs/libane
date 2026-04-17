@@ -157,4 +157,4 @@ Single-layer programs always return 0 — they have no inter-layer intermediates
 
 Device info and shape limits are not yet exposed in the Python bindings. Use the C API via ctypes or cffi for these in the interim, or check `ane.available()` + `ane.version()` for basic runtime checks.
 
-Performance stats are available through `libane_mil_execute_stats` via the C API only in v0.8.1.
+Performance stats are available through `libane_mil_execute_stats` via the C API only in v0.8.2.

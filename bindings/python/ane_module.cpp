@@ -1,29 +1,48 @@
 /**
- * Python bindings for libane v0.8.1.
+ * Python bindings for libane v0.8.2.
  *
  * PyPI package: ane · Install: pip install ane
  * Requires: pybind11, numpy
  *
- * Single-op API:
+ * Utility:
  *   ane.available()               → bool
  *   ane.version()                 → str
- *   ane.matmul(A, B)              → np.ndarray (fp16)
- *   ane.matmul_f32(A, B)          → np.ndarray (fp32)
- *   ane.softmax(x)                → np.ndarray (fp16)
- *   ane.gelu(x)                   → np.ndarray (fp16)
+ *   ane.device_info()             → dict (architecture, core_count, num_anes, available)
+ *   ane.shape_limits()            → dict (max_seq, max_channels, seq_alignment)
  *   ane.set_backend(name)         → None
  *   ane.set_log_level(level)      → None
  *   ane.cache_flush()             → None
  *   ane.cache_size_bytes()        → int
  *
+ * Single-op convenience:
+ *   ane.matmul(A, B)              → np.ndarray (fp16)
+ *   ane.matmul_f32(A, B)         → np.ndarray (fp32)
+ *   ane.softmax(x)               → np.ndarray (fp16)
+ *   ane.gelu(x)                  → np.ndarray (fp16)
+ *
+ * Compiled single-op handle (CompiledOp):
+ *   h = ane.compile(op, shape, weights=None)  → CompiledOp
+ *   h.execute(x)                              → np.ndarray (fp16)
+ *   h.execute2(x0, x1)                        → np.ndarray (fp16)
+ *   h.delta_reload()                           → None
+ *   ane.compile_batch([(op, shape, weights), ...]) → list[CompiledOp | None]
+ *
  * Graph API:
  *   g = ane.Graph()
  *   x = g.add_input("x", [1, 512, 1, 128])
  *   t = g.add_op(ane.MATMUL, [x], [1, 256, 1, 128], weights=W_np)
+ *   t = g.add_pwl_activation(x, [1,C,1,S], x_min, x_max, samples_np)
  *   g.mark_output(t)
  *   cg = g.compile()             → ane.CompiledGraph
  *   out = cg(x_np)               → np.ndarray (fp16)  [single-input]
  *   out = cg([a_np, b_np])       → list[np.ndarray]   [multi-input/output]
+ *
+ * MIL API:
+ *   prog = ane.compile_mil(mil_text)                    → CompiledMil
+ *   prog = ane.compile_mil_with_weights(mil, weights)   → CompiledMil
+ *   prog.run(inputs, output_sizes)                      → list[np.ndarray]
+ *   prog.sram_spill                                     → bool
+ *   prog.run_stats(inputs, output_sizes)                → (list[np.ndarray], dict)
  */
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -196,6 +215,150 @@ static py::array py_gelu(py::array x) {
     return py::array(out.attr("reshape")(x.attr("shape")));
 }
 
+/* ── device_info / shape_limits ─────────────────────────────────────────── */
+
+static py::dict py_device_info() {
+    libane_device_info_t d{};
+    libane_device_info(&d);
+    py::dict out;
+    out["architecture"] = std::string(d.architecture);
+    out["core_count"]   = d.core_count;
+    out["num_anes"]     = d.num_anes;
+    out["available"]    = d.available != 0;
+    return out;
+}
+
+static py::dict py_shape_limits() {
+    libane_shape_limits_t lim = libane_get_shape_limits();
+    py::dict out;
+    out["max_seq"]       = lim.max_seq;
+    out["max_channels"]  = lim.max_channels;
+    out["seq_alignment"] = lim.seq_alignment;
+    return out;
+}
+
+/* ── CompiledOp class (single-op handle) ────────────────────────────────── */
+
+class PyCompiledOp {
+public:
+    explicit PyCompiledOp(libane_handle_t h) : h_(h) {}
+    ~PyCompiledOp() { if (h_) libane_release(h_); }
+
+    PyCompiledOp(const PyCompiledOp&)            = delete;
+    PyCompiledOp& operator=(const PyCompiledOp&) = delete;
+
+    py::array execute(py::array x_in, const std::vector<int>& shape) {
+        py::module_ np = py::module_::import("numpy");
+        py::array x = np.attr("ascontiguousarray")(
+            np.attr("asarray")(x_in, "dtype"_a="float16"));
+        auto xb = x.request();
+        libane_shape_t s = to_shape(shape);
+        size_t numel = (size_t)s.dims[0]*s.dims[1]*s.dims[2]*s.dims[3];
+        py::array out = np.attr("empty")(py::make_tuple(numel), "dtype"_a="float16");
+        auto ob = out.request();
+        libane_status_t st = libane_execute(h_, xb.ptr, ob.ptr, s);
+        if (st != LIBANE_OK)
+            throw std::runtime_error(std::string("execute failed: ") + libane_last_error());
+        return out;
+    }
+
+    py::array execute2(py::array x0_in, py::array x1_in, const std::vector<int>& shape) {
+        py::module_ np = py::module_::import("numpy");
+        py::array x0 = np.attr("ascontiguousarray")(
+            np.attr("asarray")(x0_in, "dtype"_a="float16"));
+        py::array x1 = np.attr("ascontiguousarray")(
+            np.attr("asarray")(x1_in, "dtype"_a="float16"));
+        auto x0b = x0.request();
+        auto x1b = x1.request();
+        libane_shape_t s = to_shape(shape);
+        size_t numel = (size_t)s.dims[0]*s.dims[1]*s.dims[2]*s.dims[3];
+        py::array out = np.attr("empty")(py::make_tuple(numel), "dtype"_a="float16");
+        auto ob = out.request();
+        libane_status_t st = libane_execute2(h_, x0b.ptr, x1b.ptr, ob.ptr, s);
+        if (st != LIBANE_OK)
+            throw std::runtime_error(std::string("execute2 failed: ") + libane_last_error());
+        return out;
+    }
+
+    void delta_reload() {
+        libane_status_t st = libane_delta_reload(h_);
+        if (st != LIBANE_OK)
+            throw std::runtime_error(std::string("delta_reload failed: ") + libane_last_error());
+    }
+
+private:
+    libane_handle_t h_;
+};
+
+static PyCompiledOp* py_compile_op(int op_int,
+                                    const std::vector<int>& shape,
+                                    py::object weights_obj) {
+    py::module_ np = py::module_::import("numpy");
+    libane_shape_t s = to_shape(shape);
+    const void* wptr = nullptr;
+    size_t wlen = 0;
+    py::array w_arr;
+    if (!weights_obj.is_none()) {
+        w_arr = np.attr("ascontiguousarray")(
+            np.attr("asarray")(weights_obj, "dtype"_a="float16"));
+        auto wb = w_arr.request();
+        wptr = wb.ptr;
+        wlen = static_cast<size_t>(wb.size) * wb.itemsize;
+    }
+    libane_handle_t h = libane_compile(static_cast<libane_op_t>(op_int), s, wptr, wlen);
+    if (!h)
+        throw std::runtime_error(std::string("compile failed: ") + libane_last_error());
+    return new PyCompiledOp(h);
+}
+
+static py::list py_compile_batch(py::list requests) {
+    py::module_ np = py::module_::import("numpy");
+
+    // Build C-side arrays — keep Python objects alive
+    std::vector<libane_compile_request_t> reqs;
+    std::vector<py::array>  w_arrays;
+    std::vector<py::buffer_info> w_bufs;
+
+    reqs.reserve(requests.size());
+    w_arrays.reserve(requests.size());
+    w_bufs.reserve(requests.size());
+
+    for (auto item : requests) {
+        py::tuple t = item.cast<py::tuple>();
+        int op_int      = t[0].cast<int>();
+        auto shape      = t[1].cast<std::vector<int>>();
+        py::object wobj = t[2];
+
+        libane_compile_request_t r{};
+        r.op    = static_cast<libane_op_t>(op_int);
+        r.shape = to_shape(shape);
+
+        if (!wobj.is_none()) {
+            w_arrays.push_back(np.attr("ascontiguousarray")(
+                np.attr("asarray")(wobj, "dtype"_a="float16")));
+            w_bufs.push_back(w_arrays.back().request());
+            r.weights     = w_bufs.back().ptr;
+            r.weights_len = static_cast<size_t>(w_bufs.back().size) *
+                            w_bufs.back().itemsize;
+        } else {
+            w_arrays.emplace_back();
+            w_bufs.emplace_back();
+        }
+        reqs.push_back(r);
+    }
+
+    std::vector<libane_handle_t> handles(reqs.size(), nullptr);
+    libane_compile_batch(reqs.data(), reqs.size(), handles.data());
+
+    py::list out;
+    for (auto h : handles) {
+        if (h) out.append(py::cast(new PyCompiledOp(h),
+                                    py::return_value_policy::take_ownership));
+        else   out.append(py::none());
+    }
+    return out;
+}
+
 /* ── CompiledMil class ───────────────────────────────────────────────────── */
 
 class PyMilProgram {
@@ -215,6 +378,68 @@ public:
      * @param out_numel    Number of fp16 elements expected for each output.
      * @return             List of np.float16 arrays, one per output.
      */
+    bool sram_spill() const {
+        return libane_mil_sram_spill(h_) != 0;
+    }
+
+    std::pair<py::list, py::dict> run_stats(const std::vector<py::array>& inputs_raw,
+                                             const std::vector<size_t>&    out_numel) {
+        py::module_ np = py::module_::import("numpy");
+
+        std::vector<py::array>       in_f16;
+        std::vector<py::buffer_info> in_bufs;
+        std::vector<const void*>     in_ptrs;
+        std::vector<size_t>          in_sizes;
+        in_f16.reserve(inputs_raw.size());
+        for (auto& a : inputs_raw) {
+            in_f16.push_back(np.attr("ascontiguousarray")(
+                np.attr("asarray")(a, "dtype"_a="float16")));
+            in_bufs.push_back(in_f16.back().request());
+            in_ptrs.push_back(in_bufs.back().ptr);
+            in_sizes.push_back(static_cast<size_t>(in_bufs.back().size) *
+                                in_bufs.back().itemsize);
+        }
+
+        std::vector<py::array> out_arrays;
+        std::vector<void*>     out_ptrs;
+        std::vector<size_t>    out_sizes;
+        out_arrays.reserve(out_numel.size());
+        for (size_t n : out_numel) {
+            out_arrays.push_back(
+                np.attr("empty")(py::make_tuple(n), "dtype"_a="float16"));
+            auto ob = out_arrays.back().request();
+            out_ptrs.push_back(ob.ptr);
+            out_sizes.push_back(n * 2);
+        }
+
+        libane_perf_stats_t stats{};
+        libane_status_t st = libane_mil_execute_stats(
+            h_,
+            in_ptrs.empty()  ? nullptr : in_ptrs.data(),
+            in_sizes.empty() ? nullptr : in_sizes.data(),
+            in_ptrs.size(),
+            out_ptrs.empty()  ? nullptr : out_ptrs.data(),
+            out_sizes.empty() ? nullptr : out_sizes.data(),
+            out_ptrs.size(),
+            &stats);
+
+        if (st != LIBANE_OK)
+            throw std::runtime_error(
+                std::string("mil execute_stats failed: ") + libane_last_error());
+
+        py::list outputs;
+        for (auto& a : out_arrays) outputs.append(a);
+
+        py::dict s;
+        s["ane_bw_utilization"] = stats.ane_bw_utilization;
+        s["avg_bw_state"]       = stats.avg_bw_state;
+        s["peak_bw_state"]      = stats.peak_bw_state;
+        s["ane_energy_units"]   = stats.ane_energy_units;
+        s["throttle_ns"]        = stats.throttle_ns;
+        s["available"]          = stats.available != 0;
+        return {outputs, s};
+    }
+
     py::list run(const std::vector<py::array>& inputs_raw,
                  const std::vector<size_t>&    out_numel) {
         py::module_ np = py::module_::import("numpy");
@@ -368,6 +593,25 @@ public:
         return id;
     }
 
+    uint32_t add_pwl_activation(uint32_t input_id,
+                                const std::vector<int>& output_shape,
+                                float x_min, float x_max,
+                                py::array samples_in) {
+        py::module_ np = py::module_::import("numpy");
+        py::array s = np.attr("ascontiguousarray")(
+            np.attr("asarray")(samples_in, "dtype"_a="float32"));
+        auto sb = s.request();
+        libane_shape_t out_s = to_shape(output_shape);
+        uint32_t id = libane_graph_add_pwl_activation(
+            g_, input_id, out_s, x_min, x_max,
+            static_cast<const float*>(sb.ptr),
+            static_cast<uint32_t>(sb.size));
+        if (id == LIBANE_INVALID_TENSOR_ID)
+            throw std::invalid_argument(
+                std::string("add_pwl_activation failed: ") + libane_last_error());
+        return id;
+    }
+
     void mark_output(uint32_t tensor_id, const std::string& name = "") {
         libane_status_t st = libane_graph_mark_output(
             g_, tensor_id, name.empty() ? nullptr : name.c_str());
@@ -509,23 +753,26 @@ static PyCompiledGraph* py_compile(PyGraph& g) {
 
 PYBIND11_MODULE(ane, m) {
     m.doc() = R"(
-ane — Apple Neural Engine Python bindings (libane v0.8.1)
+ane — Apple Neural Engine Python bindings (libane v0.8.2)
 Amirani Labs
 
-ANE-accelerated ML operations with automatic CPU fallback.
+Run ML graphs directly on the Apple Neural Engine from Python.
 Uses AppleNeuralEngine.framework via dlopen — private API, intentional.
-Not for App Store submission.
 )";
 
     libane_set_log_level(LIBANE_LOG_ERROR);
 
     /* ── Utility ──────────────────────────────────────────────────────── */
-    m.def("available", []() { return libane_available() != 0; },
+    m.def("available",    []() { return libane_available() != 0; },
           "True if the Apple Neural Engine is accessible.");
-    m.def("version",   []() { return std::string(libane_version()); },
+    m.def("version",      []() { return std::string(libane_version()); },
           "libane version string.");
-    m.def("last_error",[]() { return std::string(libane_last_error()); },
+    m.def("last_error",   []() { return std::string(libane_last_error()); },
           "Last error message.");
+    m.def("device_info",  &py_device_info,
+          "ANE hardware info: architecture, core_count, num_anes, available.");
+    m.def("shape_limits", &py_shape_limits,
+          "ANE tensor shape limits: max_seq, max_channels, seq_alignment.");
     m.def("set_backend", [](py::object b) {
         if (b.is_none()) libane_set_backend(nullptr);
         else libane_set_backend(py::str(b).cast<std::string>().c_str());
@@ -537,15 +784,45 @@ Not for App Store submission.
     m.def("cache_flush",      &libane_cache_flush);
     m.def("cache_size_bytes", &libane_cache_size_bytes);
 
+    /* ── CompiledOp ───────────────────────────────────────────────────── */
+    py::class_<PyCompiledOp>(m, "CompiledOp")
+        .def("execute",      &PyCompiledOp::execute,
+             py::arg("x"), py::arg("shape"),
+             "Execute with one input. shape=[B,C,H,S].")
+        .def("execute2",     &PyCompiledOp::execute2,
+             py::arg("x0"), py::arg("x1"), py::arg("shape"),
+             "Execute with two inputs (alphabetical MIL parameter order).")
+        .def("delta_reload", &PyCompiledOp::delta_reload,
+             "Reload compiled program into ANE SRAM without recompiling (~8.5× faster than compile).");
+
+    m.def("compile",
+          &py_compile_op,
+          py::arg("op"), py::arg("shape"), py::arg("weights") = py::none(),
+          py::return_value_policy::take_ownership,
+          "Compile a single op. Returns CompiledOp. op = ane.MATMUL etc.");
+
+    m.def("compile_batch",
+          &py_compile_batch,
+          py::arg("requests"),
+          R"(Compile multiple ops in one call.
+
+Args:
+    requests: list of (op, shape, weights_or_None) tuples.
+
+Returns:
+    list of CompiledOp | None — None for any that failed.
+    Check ane.last_error() on partial failure.
+)");
+
     /* ── Single-op ────────────────────────────────────────────────────── */
     m.def("matmul",    &py_matmul,    py::arg("A"), py::arg("B"),
-          "ANE fp16 matmul: C = A @ B.  Falls back to BLAS.");
+          "ANE fp16 matmul: C = A @ B.");
     m.def("matmul_f32",&py_matmul_f32,py::arg("A"), py::arg("B"),
           "ANE fp32 matmul (fp32→fp16→fp32 internally).");
     m.def("softmax",   &py_softmax,   py::arg("x"),
-          "ANE softmax over last dimension. Falls back to numpy.");
+          "ANE softmax over last dimension.");
     m.def("gelu",      &py_gelu,      py::arg("x"),
-          "ANE GELU (tanh approximation). Falls back to numpy.");
+          "ANE GELU (tanh approximation).");
 
     /* ── Graph API ────────────────────────────────────────────────────── */
     py::class_<PyGraph>(m, "Graph", R"(
@@ -568,6 +845,21 @@ Example::
              py::arg("op"), py::arg("inputs"), py::arg("output_shape"),
              py::arg("weights") = py::none(),
              "Add an operation. inputs = list of tensor IDs. Returns output tensor ID.")
+        .def("add_pwl_activation", &PyGraph::add_pwl_activation,
+             py::arg("input_id"), py::arg("output_shape"),
+             py::arg("x_min"), py::arg("x_max"), py::arg("samples"),
+             R"(Add a piecewise-linear custom activation.
+
+Args:
+    input_id:     Tensor ID of the input.
+    output_shape: [1, C, 1, S] — must match input shape.
+    x_min, x_max: Domain of the approximation.
+    samples:      np.float32 array of length n_samples (n_samples-1 linear segments).
+                  Values are fn(linspace(x_min, x_max, n_samples)).
+
+Returns:
+    Output tensor ID.
+)")
         .def("mark_output", &PyGraph::mark_output,
              py::arg("tensor_id"), py::arg("name") = "",
              "Mark tensor_id as a graph output.")
@@ -637,7 +929,20 @@ Returns:
 
 Raises:
     RuntimeError on ANE dispatch failure.
-)");
+)")
+        .def("run_stats", &PyMilProgram::run_stats,
+             py::arg("inputs"), py::arg("output_sizes"),
+             R"(Execute and return IOReport hardware counters.
+
+Returns:
+    (outputs, stats) where outputs is a list of np.float16 arrays and
+    stats is a dict with keys: ane_bw_utilization (float, 0–1),
+    avg_bw_state (float), peak_bw_state (int), ane_energy_units (int),
+    throttle_ns (int), available (bool).
+)")
+        .def_property_readonly("sram_spill", &PyMilProgram::sram_spill,
+             "True if the compiled program requires DRAM-backed intermediate buffers "
+             "(SRAM spill). Always False for single-op programs.");
 
     m.def("compile_mil", &py_compile_mil,
           py::arg("mil_text"),
@@ -711,6 +1016,17 @@ Raises:
     m.attr("TAN")       = static_cast<int>(LIBANE_OP_TAN);
     m.attr("ASIN")      = static_cast<int>(LIBANE_OP_ASIN);
     m.attr("ACOS")      = static_cast<int>(LIBANE_OP_ACOS);
+    m.attr("SELECT")    = static_cast<int>(LIBANE_OP_SELECT);
+    m.attr("RELU")      = static_cast<int>(LIBANE_OP_RELU);
+    m.attr("TANH")      = static_cast<int>(LIBANE_OP_TANH);
+    m.attr("SIGMOID")   = static_cast<int>(LIBANE_OP_SIGMOID);
+    m.attr("HARDSWISH") = static_cast<int>(LIBANE_OP_HARDSWISH);
+    m.attr("LEAKY_RELU")= static_cast<int>(LIBANE_OP_LEAKY_RELU);
+    m.attr("ELU")       = static_cast<int>(LIBANE_OP_ELU);
+    m.attr("PIXEL_SHUFFLE") = static_cast<int>(LIBANE_OP_PIXEL_SHUFFLE);
+    m.attr("CAST")      = static_cast<int>(LIBANE_OP_CAST);
+    m.attr("CONV2D")    = static_cast<int>(LIBANE_OP_CONV2D);
+    m.attr("PWL_ACTIVATION") = static_cast<int>(LIBANE_OP_PWL_ACTIVATION);
 
     /* ── Log level constants ──────────────────────────────────────────── */
     m.attr("LOG_SILENT") = static_cast<int>(LIBANE_LOG_SILENT);
