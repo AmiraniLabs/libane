@@ -267,6 +267,12 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
     }
 }
 
+/* ── MilBackend::owns ────────────────────────────────────────────────────── */
+
+bool MilBackend::owns(const AneGraph&, const FusionGroup&) const {
+    return true;  // catch-all — must be last in any priority list
+}
+
 /* ── MilBackend::compile_group ───────────────────────────────────────────── */
 
 runtime::AneProgram* MilBackend::compile_group(const AneGraph&    graph,

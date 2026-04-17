@@ -145,8 +145,12 @@ public:
      * Full compile: validate, fuse, compile all groups to ANE programs, and
      * pre-allocate ANE buffers for all group outputs.
      *
-     * The backend translates each FusionGroup into a loaded AneProgram.
-     * The no-argument overload uses MilBackend (Path A, the default).
+     * Two-argument overload: single backend, no routing.  Used by tests that
+     * want to target a specific backend directly.
+     *
+     * No-argument overload: routes each FusionGroup to the highest-priority
+     * backend that owns() it.  Priority order: HwxBackend → MilBackend
+     * (EspressoBackend will be inserted once implemented).
      *
      * Returns nullptr on failure (validation error, ANE unavailable, or any
      * compile_group() call fails).  Never throws.

@@ -39,7 +39,6 @@
 
 #include "compiler_backend.hpp"
 #include "hwx_emitter.hpp"
-#include "mil_backend.hpp"
 
 namespace libane {
 namespace graph {
@@ -48,13 +47,19 @@ class HwxBackend final : public CompilerBackend {
 public:
     HwxBackend() = default;
 
+    /**
+     * Owns single-node, weight-free activation groups.
+     * Multi-node groups, weight-bearing ops, and unrecognised ops are
+     * routed to the next backend in the priority list.
+     */
+    bool owns(const AneGraph& graph, const FusionGroup& group) const override;
+
     runtime::AneProgram* compile_group(const AneGraph&    graph,
                                        const FusionGroup& group,
                                        const std::string& debug_name) override;
 
 private:
     HwxEmitter emitter_;
-    MilBackend mil_;
 
     static bool is_hwx_eligible(libane_op_t op);
 };

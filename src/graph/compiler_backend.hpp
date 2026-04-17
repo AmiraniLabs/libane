@@ -1,11 +1,14 @@
 /**
  * CompilerBackend — abstract interface for per-group compilation.
  *
- * GraphCompiler::compile() calls compile_group() once per FusionGroup.
- * Everything above (build_plan, fusion, tensor sizing) and below
- * (buffer allocation, execution) is backend-agnostic.
+ * GraphCompiler uses a RoutingBackend (priority-ordered list of backends)
+ * to compile each FusionGroup.  Each backend declares the groups it owns
+ * via owns(); the router calls compile_group() only on the first match.
  *
- * The only current implementation is MilBackend (Path A: MIL text → ANE).
+ * Implementations:
+ *   MilBackend      (Path A) — MIL text → ANE via _ANEInMemoryModel
+ *   HwxBackend      (Path C) — BEEFFACE HWX cache + swap loader
+ *   EspressoBackend (Path B) — raw .mlmodelc → aned → IOSurface dispatch
  */
 #pragma once
 
@@ -21,7 +24,18 @@ namespace graph {
 class CompilerBackend {
 public:
     /**
+     * Return true if this backend owns the given fusion group.
+     *
+     * Called by the router in priority order; the first backend that returns
+     * true receives the group.  MilBackend returns true unconditionally and
+     * must therefore be last in any priority list.
+     */
+    virtual bool owns(const AneGraph&    graph,
+                      const FusionGroup& group) const = 0;
+
+    /**
      * Compile one fusion group into a loaded AneProgram ready for dispatch.
+     * Only called when owns() returned true for this backend.
      *
      * @param graph       The source graph (read-only — shapes, weights, ops).
      * @param group       The fusion group to compile.

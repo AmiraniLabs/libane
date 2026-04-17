@@ -1,4 +1,5 @@
 #include "hwx_backend.hpp"
+#include "mil_backend.hpp"
 #include "../runtime/ane_runtime.hpp"
 
 #include <string>
@@ -24,22 +25,20 @@ bool HwxBackend::is_hwx_eligible(libane_op_t op) {
     }
 }
 
+bool HwxBackend::owns(const AneGraph& graph, const FusionGroup& group) const {
+    if (group.node_ids.size() != 1) return false;
+    return is_hwx_eligible(graph.node(group.node_ids[0]).op);
+}
+
 runtime::AneProgram* HwxBackend::compile_group(const AneGraph&    graph,
                                                 const FusionGroup& group,
                                                 const std::string& debug_name) {
-    // Only single-node groups with weight-free activation ops qualify for Path C
-    if (group.node_ids.size() != 1)
-        return mil_.compile_group(graph, group, debug_name);
-
-    const GraphNode& node = graph.node(group.node_ids[0]);
-    if (!is_hwx_eligible(node.op))
-        return mil_.compile_group(graph, group, debug_name);
-
+    const GraphNode&        node      = graph.node(group.node_ids[0]);
     const mil::TensorShape& out_shape = graph.tensor(node.output).shape;
     const int C = out_shape.channels;
     const int S = out_shape.seq;
 
-    // Path C: emit from cache and load without recompilation
+    // Warm path: emit patched HWX from cache
     if (emitter_.can_emit(C, S, node.op)) {
         auto hwx = emitter_.emit(C, S, node.op);
         if (!hwx.empty()) {
@@ -49,12 +48,12 @@ runtime::AneProgram* HwxBackend::compile_group(const AneGraph&    graph,
                 tvar(node.output),
                 debug_name);
             if (prog) return prog;
-            // ane_load_hwx failure → fall through to MilBackend
         }
     }
 
-    // Bootstrap: compile via MilBackend, then capture the HWX for future use
-    runtime::AneProgram* prog = mil_.compile_group(graph, group, debug_name);
+    // Cold path: bootstrap via MilBackend, capture resulting HWX for future use
+    MilBackend mil;
+    runtime::AneProgram* prog = mil.compile_group(graph, group, debug_name);
     if (prog && !prog->model_dir.empty())
         emitter_.capture_from_model_dir(prog->model_dir, C, S, node.op);
     return prog;

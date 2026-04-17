@@ -4,10 +4,13 @@
 #include "graph_compiler.hpp"
 #include "graph_validator.hpp"
 #include "hwx_backend.hpp"
+#include "mil_backend.hpp"
 
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <algorithm>
+#include <vector>
 
 #ifdef __APPLE__
 #  include <IOSurface/IOSurface.h>
@@ -135,11 +138,40 @@ std::unique_ptr<CompiledGraph> GraphCompiler::compile(const AneGraph& graph,
     return cg;
 }
 
-/* ── GraphCompiler::compile (default MilBackend overload) ────────────────── */
+/* ── RoutingBackend ──────────────────────────────────────────────────────── */
+
+// Priority-ordered list of backends.  For each FusionGroup, the first backend
+// whose owns() returns true receives the group.  Never exposed in the header —
+// it is an implementation detail of the default compile() overload.
+class RoutingBackend final : public CompilerBackend {
+public:
+    explicit RoutingBackend(std::vector<CompilerBackend*> backends)
+        : backends_(std::move(backends)) {}
+
+    bool owns(const AneGraph&, const FusionGroup&) const override {
+        return true;  // top-level router owns everything
+    }
+
+    runtime::AneProgram* compile_group(const AneGraph&    graph,
+                                       const FusionGroup& group,
+                                       const std::string& debug_name) override {
+        for (CompilerBackend* b : backends_)
+            if (b->owns(graph, group))
+                return b->compile_group(graph, group, debug_name);
+        return nullptr;  // unreachable: MilBackend is always last and owns all
+    }
+
+private:
+    std::vector<CompilerBackend*> backends_;
+};
+
+/* ── GraphCompiler::compile (default routed overload) ───────────────────── */
 
 std::unique_ptr<CompiledGraph> GraphCompiler::compile(const AneGraph& graph) {
-    thread_local HwxBackend backend;
-    return compile(graph, backend);
+    thread_local HwxBackend      hwx;
+    thread_local MilBackend      mil;
+    thread_local RoutingBackend  router({&hwx, &mil});
+    return compile(graph, router);
 }
 
 } // namespace graph
