@@ -86,6 +86,7 @@ struct AneProgram {
     void*  objc_inner_model  = nullptr;  ///< ObjC _ANEModel* (retained), for processRequest:
     uint64_t model_string_id = 0;        ///< string_id of the inner _ANEModel
     size_t size_bytes        = 0;        ///< Approximate memory footprint
+    bool   sram_spill        = false;    ///< true if model exceeded SRAM (intermediateBufferHandle != 0)
     std::string debug_name;
     std::string model_dir;          ///< Temp dir path for delta compilation
     std::vector<WeightEntry> weights;  ///< stored for delta reload
@@ -97,6 +98,36 @@ struct AneProgram {
     /// Output variable names extracted from MIL return type (outputs in declaration order).
     /// Used for constraint #3 validation (alphabetical output ordering).
     std::vector<std::string> output_var_names;
+};
+
+/* ── Device info ─────────────────────────────────────────────────────────── */
+
+/**
+ * Hardware capabilities queried once at initialization from _ANEDeviceInfo.
+ * All fields are zero/empty if _ANEDeviceInfo is unavailable (fallback or
+ * older firmware that doesn't expose the class).
+ */
+struct AneDeviceInfo {
+    char     architecture[32] = "";   ///< e.g. "h15g" (M3), "h16g" (M4); "" if unavailable
+    uint32_t core_count       = 0;    ///< number of ANE inference cores (+numANECores); 0 if unavailable
+    uint32_t num_anes         = 0;    ///< number of ANE units (+numANEs); 0 if unavailable
+    bool     available        = false;///< true if _ANEDeviceInfo was successfully queried
+};
+
+/* ── Performance stats ───────────────────────────────────────────────────── */
+
+/**
+ * Per-execution hardware counters from IOReport (libIOReport.dylib).
+ * Populated by ane_execute_multi when stats_out != nullptr.
+ * available == 0 if IOReport could not be sampled.
+ */
+struct AnePerfStats {
+    float ane_bw_utilization = 0.0f;
+    float avg_bw_state       = 0.0f;
+    int   peak_bw_state      = 0;
+    long  ane_energy_units   = 0;
+    long  throttle_ns        = 0;
+    int   available          = 0;
 };
 
 /* ── Core primitives ─────────────────────────────────────────────────────── */
@@ -155,21 +186,29 @@ bool ane_execute(AneProgram* program,
  */
 bool ane_execute_multi(AneProgram* program,
                        const std::vector<IOSurfaceRef>& inputs,
-                       const std::vector<IOSurfaceRef>& outputs);
+                       const std::vector<IOSurfaceRef>& outputs,
+                       AnePerfStats* stats_out = nullptr);
 #else
 bool ane_execute(AneProgram* program, void* input, void* output);
 #endif
 
 /**
- * Reload a compiled program with new weights WITHOUT recompiling.
- * 8.5x faster than ane_compile() per Orion Table 6 (494ms vs 4,200ms).
+ * Re-load a compiled program into SRAM without recompiling.
  *
- * @param program    Handle from ane_compile() — model_dir must still exist.
- * @param new_weights  New weight entries. Must match the filenames in program->weights.
- * @return true on success. On failure the program is in an undefined state — caller must ane_unload() and ane_compile() fresh.
+ * Useful after ane_unload() to restore a program to SRAM quickly.
+ * Load-only is ~8.5x faster than a full ane_compile() (494 ms vs 4,200 ms).
+ *
+ * NOTE: Weight values cannot be changed after compilation.
+ * Confirmed via probe_delta_reload (2026-04-16, M3 Pro / macOS 26.3.1):
+ * overwriting the on-disk weight file has zero effect on execution —
+ * the ANE bakes weights into the compiled HWX at compileWithQoS: time.
+ * Any caller expecting ane_delta_reload() to update weights will silently
+ * execute stale values. Use ane_compile() to change weights.
+ *
+ * @param program  Handle from ane_compile() — model_dir must still exist.
+ * @return true on success. On failure call ane_unload() + ane_compile().
  */
-bool ane_delta_reload(AneProgram* program,
-                      const std::vector<WeightEntry>& new_weights);
+bool ane_delta_reload(AneProgram* program);
 
 /**
  * Unload a compiled ANE program and release its resources.
@@ -181,6 +220,12 @@ void ane_unload(AneProgram* program);
 
 /** Last error string from the ANE runtime (thread-local). */
 const char* ane_last_error();
+
+/**
+ * Return cached device info (populated during initialize()).
+ * Thread-safe after initialize() completes.
+ */
+AneDeviceInfo device_info();
 
 } // namespace runtime
 } // namespace libane

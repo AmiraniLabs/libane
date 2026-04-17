@@ -146,6 +146,46 @@ size_t libane_cache_size_bytes(void) {
     return cache().size_bytes();
 }
 
+/* ── Device introspection ────────────────────────────────────────────────── */
+
+libane_status_t libane_device_info(libane_device_info_t* out) {
+    if (!out) {
+        set_error("libane_device_info: null output pointer");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+    libane::runtime::initialize();
+    auto di = libane::runtime::device_info();
+    std::memcpy(out->architecture, di.architecture, sizeof(out->architecture));
+    out->core_count = di.core_count;
+    out->num_anes   = di.num_anes;
+    out->available  = di.available ? 1 : 0;
+    return LIBANE_OK;
+}
+
+libane_shape_limits_t libane_get_shape_limits(void) {
+    libane::runtime::initialize();
+    auto di = libane::runtime::device_info();
+
+    libane_shape_limits_t lim;
+    lim.seq_alignment = 8;   // constant: ANE constraint #1
+
+    // Chip-adaptive limits.  Conservative universally-safe values are used
+    // when device info is unavailable or the architecture is unrecognised.
+    // h16g (M4 family) has demonstrated stable operation at 2× the M3 limits.
+    if (di.available && di.architecture[0] != '\0') {
+        // h16g = M4 — relaxed limits confirmed via external research
+        if (std::strncmp(di.architecture, "h16", 3) == 0) {
+            lim.max_seq      = 131072;
+            lim.max_channels = 16384;
+            return lim;
+        }
+    }
+    // Conservative default (safe for h15g / M3 and earlier)
+    lim.max_seq      = 65536;
+    lim.max_channels = 16384;
+    return lim;
+}
+
 /* ── Compile ─────────────────────────────────────────────────────────────── */
 
 libane_handle_t libane_compile(libane_op_t op,
@@ -479,11 +519,9 @@ libane_status_t libane_execute2(libane_handle_t h,
 
 /* ── Delta reload ────────────────────────────────────────────────────────── */
 
-libane_status_t libane_delta_reload(libane_handle_t h,
-                                     const void* new_weights,
-                                     size_t weights_len) {
-    if (!h || !new_weights || weights_len == 0) {
-        set_error("libane_delta_reload: null or empty argument");
+libane_status_t libane_delta_reload(libane_handle_t h) {
+    if (!h) {
+        set_error("libane_delta_reload: null handle");
         return LIBANE_ERR_INVALID_ARG;
     }
     auto& entry = *h->entry;
@@ -493,22 +531,7 @@ libane_status_t libane_delta_reload(libane_handle_t h,
     }
 
     auto* prog = static_cast<libane::runtime::AneProgram*>(entry.backend_handle);
-    if (prog->weights.empty()) {
-        set_error("libane_delta_reload: program has no stored weight entries (weight-free ops cannot be reloaded)");
-        return LIBANE_ERR_INVALID_ARG;
-    }
-
-    // Build new weight blob from raw fp16 input
-    auto new_blob = libane::mil::WeightBlob::from_fp16(new_weights, weights_len);
-
-    // Build WeightEntry using the filename from the original compile
-    std::vector<libane::runtime::WeightEntry> new_entries;
-    new_entries.push_back({prog->weights[0].filename, new_blob.data});
-
-    // Update cache key with new weight hash
-    entry.key.weight_hash = new_blob.hash;
-
-    bool ok = libane::runtime::ane_delta_reload(prog, new_entries);
+    bool ok = libane::runtime::ane_delta_reload(prog);
     if (!ok) {
         set_error("libane_delta_reload failed: %s", libane::runtime::ane_last_error());
         return LIBANE_ERR_EXECUTE_FAILED;
@@ -916,6 +939,88 @@ libane_status_t libane_mil_execute(libane_mil_handle_t h,
         return LIBANE_ERR_EXECUTE_FAILED;
     }
     return LIBANE_OK;
+}
+
+libane_status_t libane_mil_execute_stats(libane_mil_handle_t h,
+                                          const void**         in_data,
+                                          const size_t*        in_sizes,
+                                          size_t               num_inputs,
+                                          void**               out_data,
+                                          const size_t*        out_sizes,
+                                          size_t               num_outputs,
+                                          libane_perf_stats_t* stats_out) {
+    if (!h || !h->prog) {
+        set_error("libane_mil_execute_stats: null handle");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+    if (num_inputs  > 0 && (!in_data  || !in_sizes)) {
+        set_error("libane_mil_execute_stats: null input arrays");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+    if (num_outputs > 0 && (!out_data || !out_sizes)) {
+        set_error("libane_mil_execute_stats: null output arrays");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+
+    libane::runtime::AnePerfStats rt_stats;
+
+    static constexpr size_t kMinIOS = 49152;
+    size_t max_in  = kMinIOS;
+    size_t max_out = kMinIOS;
+    for (size_t i = 0; i < num_inputs;  ++i) max_in  = std::max(max_in,  in_sizes[i]);
+    for (size_t i = 0; i < num_outputs; ++i) max_out = std::max(max_out, out_sizes[i]);
+
+    auto& pool = libane::global_buffer_pool();
+
+    std::vector<std::unique_ptr<libane::AneBuffer>> in_bufs, out_bufs;
+    std::vector<IOSurfaceRef> in_ios, out_ios;
+
+    for (size_t i = 0; i < num_inputs; ++i) {
+        auto buf = pool.acquire(max_in);
+        buf->copy_from(in_data[i], in_sizes[i]);
+        in_ios.push_back(buf->iosurface());
+        in_bufs.push_back(std::move(buf));
+    }
+    for (size_t i = 0; i < num_outputs; ++i) {
+        auto buf = pool.acquire(max_out);
+        out_ios.push_back(buf->iosurface());
+        out_bufs.push_back(std::move(buf));
+    }
+
+    bool ok = libane::runtime::ane_execute_multi(
+        h->prog, in_ios, out_ios,
+        stats_out ? &rt_stats : nullptr);
+
+    if (ok) {
+        for (size_t i = 0; i < num_outputs; ++i)
+            out_bufs[i]->copy_to(out_data[i], out_sizes[i]);
+        if (stats_out) {
+            stats_out->ane_bw_utilization = rt_stats.ane_bw_utilization;
+            stats_out->avg_bw_state       = rt_stats.avg_bw_state;
+            stats_out->peak_bw_state      = rt_stats.peak_bw_state;
+            stats_out->ane_energy_units   = rt_stats.ane_energy_units;
+            stats_out->throttle_ns        = rt_stats.throttle_ns;
+            stats_out->available          = rt_stats.available;
+        }
+    }
+
+    for (auto& b : in_bufs)  pool.release(std::move(b));
+    for (auto& b : out_bufs) pool.release(std::move(b));
+
+    if (!ok) {
+        const char* rt = libane::runtime::ane_last_error();
+        if (rt && rt[0] != '\0')
+            set_error("libane_mil_execute_stats: %s", rt);
+        else
+            set_error("libane_mil_execute_stats: execution failed");
+        return LIBANE_ERR_EXECUTE_FAILED;
+    }
+    return LIBANE_OK;
+}
+
+int libane_mil_sram_spill(libane_mil_handle_t h) {
+    if (!h || !h->prog) return -1;
+    return h->prog->sram_spill ? 1 : 0;
 }
 
 void libane_mil_release(libane_mil_handle_t h) {

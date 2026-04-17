@@ -74,11 +74,14 @@ static constexpr const char* kFrameworkPath =
     "/System/Library/PrivateFrameworks/AppleNeuralEngine.framework/AppleNeuralEngine";
 
 struct AneSymbols {
-    // ObjC classes
+    // ObjC classes (required)
     Class cls_Descriptor    = nil;   // _ANEInMemoryModelDescriptor
     Class cls_Model         = nil;   // _ANEInMemoryModel
     Class cls_IOSurfaceObj  = nil;   // _ANEIOSurfaceObject
     Class cls_Request       = nil;   // _ANERequest
+
+    // ObjC classes (optional — non-nil if successfully resolved)
+    Class cls_DeviceInfo    = nil;   // _ANEDeviceInfo
 
     // Selectors (resolved lazily once)
     SEL sel_modelWithMILText   = nullptr;  // modelWithMILText:weights:optionsPlist:
@@ -99,6 +102,173 @@ static AneSymbols     g_syms;
 static std::once_flag g_init_flag;
 static std::atomic<AneState> g_state{AneState::Uninitialized};
 static char g_fallback_reason[512] = "";
+static AneDeviceInfo  g_device_info;
+
+/* ── IOReport perf sampler ───────────────────────────────────────────────── */
+// Translates ane-perf's Python Sampler to C. Uses libIOReport.dylib which
+// requires no entitlements and no root — bandwidth histograms and energy
+// counters are available to any userspace process on Apple Silicon.
+
+typedef CFTypeRef (*IOReportCopyChannelsInGroupFn)(CFStringRef, CFStringRef, CFDictionaryRef);
+typedef CFTypeRef (*IOReportCreateSubscriptionFn)(void*, CFTypeRef, CFTypeRef*, uint64_t, CFTypeRef);
+typedef CFTypeRef (*IOReportCreateSamplesFn)(CFTypeRef, CFTypeRef, CFTypeRef);
+typedef CFTypeRef (*IOReportCreateSamplesDeltaFn)(CFTypeRef, CFTypeRef, CFTypeRef);
+typedef int       (*IOReportChannelGetFormatFn)(CFTypeRef);
+typedef CFStringRef (*IOReportChannelGetChannelNameFn)(CFTypeRef);
+typedef CFStringRef (*IOReportChannelGetSubGroupFn)(CFTypeRef);
+typedef long      (*IOReportSimpleGetIntegerValueFn)(CFTypeRef);
+typedef int       (*IOReportStateGetCountFn)(CFTypeRef);
+typedef uint64_t  (*IOReportStateGetResidencyFn)(CFTypeRef, int);
+
+struct IOReportSyms {
+    IOReportCopyChannelsInGroupFn    CopyChannelsInGroup    = nullptr;
+    IOReportCreateSubscriptionFn     CreateSubscription     = nullptr;
+    IOReportCreateSamplesFn          CreateSamples          = nullptr;
+    IOReportCreateSamplesDeltaFn     CreateSamplesDelta     = nullptr;
+    IOReportChannelGetFormatFn       ChannelGetFormat       = nullptr;
+    IOReportChannelGetChannelNameFn  ChannelGetChannelName  = nullptr;
+    IOReportChannelGetSubGroupFn     ChannelGetSubGroup     = nullptr;
+    IOReportSimpleGetIntegerValueFn  SimpleGetIntegerValue  = nullptr;
+    IOReportStateGetCountFn          StateGetCount          = nullptr;
+    IOReportStateGetResidencyFn      StateGetResidency      = nullptr;
+    bool available = false;
+};
+
+struct IOReportSub {
+    CFTypeRef subscription = nullptr;
+    CFTypeRef channels     = nullptr;
+};
+
+static IOReportSyms              g_ior;
+static std::vector<IOReportSub>  g_ior_subs;
+static std::once_flag            g_ior_init_flag;
+
+static void init_ioreport() {
+    void* lib = dlopen("/usr/lib/libIOReport.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) return;
+
+#define LOAD_IOR(fn) \
+    g_ior.fn = (IOReport##fn##Fn)dlsym(lib, "IOReport" #fn); \
+    if (!g_ior.fn) { dlclose(lib); return; }
+    LOAD_IOR(CopyChannelsInGroup)
+    LOAD_IOR(CreateSubscription)
+    LOAD_IOR(CreateSamples)
+    LOAD_IOR(CreateSamplesDelta)
+    LOAD_IOR(ChannelGetFormat)
+    LOAD_IOR(ChannelGetChannelName)
+    LOAD_IOR(ChannelGetSubGroup)
+    LOAD_IOR(SimpleGetIntegerValue)
+    LOAD_IOR(StateGetCount)
+    LOAD_IOR(StateGetResidency)
+#undef LOAD_IOR
+
+    const char* groups[] = {"Energy Model", "SoC Stats", "PMP"};
+    for (const char* grp : groups) {
+        CFStringRef gstr = CFStringCreateWithCString(nullptr, grp, kCFStringEncodingUTF8);
+        CFTypeRef ch = g_ior.CopyChannelsInGroup(gstr, nullptr, nullptr);
+        CFRelease(gstr);
+        if (!ch) continue;
+
+        CFMutableDictionaryRef mch = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0,
+                                                                    (CFDictionaryRef)ch);
+        CFRelease(ch);
+
+        CFTypeRef out_sub = nullptr;
+        CFTypeRef sub = g_ior.CreateSubscription(nullptr, mch, &out_sub, 0, nullptr);
+        if (sub) {
+            IOReportSub s;
+            s.subscription = sub;
+            s.channels     = out_sub ? out_sub : (CFTypeRef)mch;
+            g_ior_subs.push_back(s);
+        }
+    }
+
+    g_ior.available = !g_ior_subs.empty();
+}
+
+struct IOReportSnapshot {
+    std::vector<CFTypeRef> samples;
+};
+
+static IOReportSnapshot ioreport_capture() {
+    IOReportSnapshot snap;
+    for (auto& s : g_ior_subs) {
+        CFTypeRef samp = g_ior.CreateSamples(s.subscription, s.channels, nullptr);
+        snap.samples.push_back(samp);
+    }
+    return snap;
+}
+
+static void ioreport_delta(const IOReportSnapshot& before,
+                           const IOReportSnapshot& after,
+                           AnePerfStats* out) {
+    if (before.samples.size() != after.samples.size()) return;
+
+    CFStringRef key_ch = CFSTR("IOReportChannels");
+    bool found_bw = false;
+
+    for (size_t i = 0; i < before.samples.size(); i++) {
+        CFTypeRef s1 = before.samples[i];
+        CFTypeRef s2 = after.samples[i];
+        if (!s1 || !s2) continue;
+
+        CFTypeRef delta = g_ior.CreateSamplesDelta(s1, s2, nullptr);
+        if (!delta) continue;
+
+        CFArrayRef arr = (CFArrayRef)CFDictionaryGetValue((CFDictionaryRef)delta, key_ch);
+        if (!arr) { CFRelease(delta); continue; }
+
+        CFIndex count = CFArrayGetCount(arr);
+        for (CFIndex j = 0; j < count; j++) {
+            CFTypeRef ch  = (CFTypeRef)CFArrayGetValueAtIndex(arr, j);
+            int fmt       = g_ior.ChannelGetFormat(ch);
+            CFStringRef cfname = g_ior.ChannelGetChannelName(ch);
+            CFStringRef cfsg   = g_ior.ChannelGetSubGroup(ch);
+
+            char name[64] = "", sg[64] = "";
+            if (cfname) CFStringGetCString(cfname, name, sizeof(name), kCFStringEncodingUTF8);
+            if (cfsg)   CFStringGetCString(cfsg,   sg,   sizeof(sg),   kCFStringEncodingUTF8);
+
+            // Energy counter (fmt == 1, integer)
+            if (fmt == 1 && strcmp(name, "ANE") == 0)
+                out->ane_energy_units = g_ior.SimpleGetIntegerValue(ch);
+
+            // Bandwidth histogram (fmt == 2, state histogram)
+            if (fmt == 2 && strcmp(name, "ANE0 RD+WR") == 0 && strcmp(sg, "DCS BW") == 0) {
+                int nstates = g_ior.StateGetCount(ch);
+                uint64_t total = 0, active = 0;
+                double weighted = 0.0;
+                int peak = 0;
+                for (int s = 0; s < nstates; s++) {
+                    uint64_t r = g_ior.StateGetResidency(ch, s);
+                    total += r;
+                    if (s > 0) { active += r; if (r > 0) peak = s; }
+                    weighted += (double)s * r;
+                }
+                if (total > 0) {
+                    out->ane_bw_utilization = (float)active / (float)total;
+                    out->avg_bw_state       = (float)(weighted / (double)total);
+                    out->peak_bw_state      = peak;
+                    found_bw = true;
+                }
+            }
+
+            // Throttle residency
+            if (fmt == 2 && strstr(name, "THROTTLE")) {
+                int nstates = g_ior.StateGetCount(ch);
+                for (int s = 1; s < nstates; s++)
+                    out->throttle_ns += (long)g_ior.StateGetResidency(ch, s);
+            }
+        }
+        CFRelease(delta);
+    }
+
+    // Release snapshots
+    for (auto p : before.samples) if (p) CFRelease(p);
+    for (auto p : after.samples)  if (p) CFRelease(p);
+
+    out->available = found_bw ? 1 : 0;
+}
 
 /* ── Initialize ──────────────────────────────────────────────────────────── */
 
@@ -162,6 +332,55 @@ static void do_initialize() {
     }
 
     g_syms.loaded = true;
+
+    // ── Optional: _ANEDeviceInfo ───────────────────────────────────────────
+    // _ANEDeviceInfo exposes ONLY class methods (no instance methods).
+    // Call them directly on the Class object — do NOT alloc/init an instance.
+    //
+    // Confirmed class method inventory on M3 (probe_device_info, 2026-04-16):
+    //   +aneArchitectureType   → NSString  ("h15g", "h16g", …)
+    //   +numANECores           → unsigned int  (number of inference cores)
+    //   +numANEs               → unsigned int  (number of ANE units)
+    //   +aneBoardType          → int64_t
+    //   +aneSubType            → NSString
+    //   +productName           → NSString
+    //   +hasANE                → BOOL
+    @try {
+        g_syms.cls_DeviceInfo = NSClassFromString(@"_ANEDeviceInfo");
+        if (g_syms.cls_DeviceInfo) {
+            Class cls = g_syms.cls_DeviceInfo;
+
+            // Architecture type: "h15g" (M3), "h16g" (M4), etc.
+            SEL sel_arch = sel_registerName("aneArchitectureType");
+            if ([cls respondsToSelector:sel_arch]) {
+                NSString* arch = ((NSString*(*)(Class,SEL))objc_msgSend)(cls, sel_arch);
+                if (arch && arch.length > 0 && arch.length < 32) {
+                    strncpy(g_device_info.architecture, [arch UTF8String], 31);
+                    g_device_info.architecture[31] = '\0';
+                }
+            }
+
+            // Core count — returns unsigned int (type encoding 'I')
+            SEL sel_cores = sel_registerName("numANECores");
+            if ([cls respondsToSelector:sel_cores]) {
+                g_device_info.core_count =
+                    ((unsigned int(*)(Class,SEL))objc_msgSend)(cls, sel_cores);
+            }
+
+            // Number of ANE units (usually 1, but exposed for completeness)
+            SEL sel_num_anes = sel_registerName("numANEs");
+            if ([cls respondsToSelector:sel_num_anes]) {
+                g_device_info.num_anes =
+                    ((unsigned int(*)(Class,SEL))objc_msgSend)(cls, sel_num_anes);
+            }
+
+            g_device_info.available = true;
+        }
+    } @catch (...) {
+        // Non-fatal: leave g_device_info in its zero-initialized state
+        g_device_info = AneDeviceInfo{};
+    }
+
     g_state = AneState::Available;
 }
 
@@ -176,6 +395,10 @@ AneState state() {
 
 const char* fallback_reason() {
     return g_fallback_reason;
+}
+
+AneDeviceInfo device_info() {
+    return g_device_info;
 }
 
 const char* ane_last_error() {
@@ -409,11 +632,38 @@ AneProgram* ane_compile(const std::string& mil_text,
             return nullptr;
         }
 
+        // --- Step 5b: Detect SRAM spill via intermediateBufferHandle ---
+        // After loadWithQoS: the firmware sets intermediateBufferHandle on
+        // _ANEInMemoryModel to a non-zero IOSurface handle if the model's
+        // intermediate activations exceeded ~32 MB on-chip SRAM and were
+        // spilled to DRAM.  DRAM-backed intermediates incur ~30% throughput
+        // penalty.  Read before retain so the field is available before first
+        // execute.
+        bool sram_spill = false;
+        @try {
+            SEL sel_ibh = sel_registerName("intermediateBufferHandle");
+            if ([model respondsToSelector:sel_ibh]) {
+                uint64_t ibh = ((uint64_t(*)(id,SEL))objc_msgSend)(model, sel_ibh);
+                if (ibh != 0) {
+                    sram_spill = true;
+                    fprintf(stderr,
+                            "libane: WARNING: SRAM spill detected "
+                            "(intermediateBufferHandle=%llu) — model '%s' "
+                            "exceeds ~32 MB SRAM; expect ~30%% throughput drop\n",
+                            (unsigned long long)ibh,
+                            debug_name.empty() ? "(unnamed)" : debug_name.c_str());
+                }
+            }
+        } @catch (...) {
+            // Non-fatal: intermediateBufferHandle unavailable on this firmware
+        }
+
         // Retain the model (manual retain — MRC, not ARC)
         [model retain];
 
         auto* prog       = new AneProgram{};
         prog->objc_model = (void*)model;
+        prog->sram_spill = sram_spill;
 
         // Extract _ANEProgramForEvaluation for fast-path dispatch (processRequest:).
         // Accessed via KVC: model → inner _ANEModel → _ANEProgramForEvaluation.
@@ -455,7 +705,8 @@ AneProgram* ane_compile(const std::string& mil_text,
 #ifdef __APPLE__
 bool ane_execute_multi(AneProgram* program,
                        const std::vector<IOSurfaceRef>& inputs,
-                       const std::vector<IOSurfaceRef>& outputs) {
+                       const std::vector<IOSurfaceRef>& outputs,
+                       AnePerfStats* stats_out) {
     if (!program || !program->objc_model || g_state != AneState::Available) {
         set_error("ane_execute_multi: invalid program or ANE unavailable");
         return false;
@@ -593,20 +844,23 @@ bool ane_execute_multi(AneProgram* program,
         id request = ((ReqFn)objc_msgSend)(
             g_syms.cls_Request,
             g_syms.sel_buildRequest,
-            input_objs,     // inputs
-            input_idxs,     // inputIndices
-            output_objs,    // outputs
-            output_idxs,    // outputIndices
-            nil,            // weightsBuffer
-            nil,            // perfStats
-            (NSUInteger)0); // procedureIndex
+            input_objs,    // inputs
+            input_idxs,    // inputIndices
+            output_objs,   // outputs
+            output_idxs,   // outputIndices
+            nil,           // weightsBuffer
+            nil,           // perfStats (unused — IOReport samples externally)
+            (NSUInteger)0);
 
-        if (!request) {
-            set_error("_ANERequest creation failed");
-            return false;
-        }
+        if (!request) { set_error("_ANERequest creation failed"); return false; }
 
-        // --- Step 9: Evaluate ---
+        // --- Step 9: IOReport pre-sample + Evaluate ---
+        // Sample IOReport before dispatch so we get a clean per-execute delta.
+        std::call_once(g_ior_init_flag, init_ioreport);
+        IOReportSnapshot before_snap;
+        if (stats_out && g_ior.available)
+            before_snap = ioreport_capture();
+
         // Fast path: processRequest: on _ANEProgramForEvaluation — ~13% lower latency
         // by bypassing _ANEInMemoryModel dispatch overhead.
         // Falls back to evaluateWithQoS: if fast-path objects are unavailable.
@@ -622,9 +876,9 @@ bool ane_execute_multi(AneProgram* program,
                 request,
                 inner_model,
                 kQoS,
-                (uint64_t)0,               // qIndex
-                program->model_string_id,  // modelStringID
-                @{},                       // options
+                (uint64_t)0,
+                program->model_string_id,
+                @{},
                 &ret_val,
                 &error);
             if (!ok || error) {
@@ -640,6 +894,16 @@ bool ane_execute_multi(AneProgram* program,
                 set_error("ANE evaluate failed: %s",
                           error ? [[error localizedDescription] UTF8String] : "unknown");
                 return false;
+            }
+        }
+
+        // --- Step 10 (optional): IOReport post-sample and delta ---
+        if (stats_out) {
+            if (g_ior.available) {
+                IOReportSnapshot after_snap = ioreport_capture();
+                ioreport_delta(before_snap, after_snap, stats_out);
+            } else {
+                stats_out->available = 0;
             }
         }
 
@@ -661,47 +925,33 @@ bool ane_execute(AneProgram*, void*, void*) {
 
 /* ── Delta reload ────────────────────────────────────────────────────────── */
 
-bool ane_delta_reload(AneProgram* program,
-                      const std::vector<WeightEntry>& new_weights) {
+// NOTE ON WEIGHT UPDATES — confirmed via probe_delta_reload (2026-04-16):
+// ANE bakes weights into the compiled HWX at compileWithQoS: time.
+// Writing new weight blobs to disk before loadWithQoS: has zero effect
+// on execution. Weight values cannot be changed without a full recompile.
+// This function therefore only performs unload + load (no disk writes).
+bool ane_delta_reload(AneProgram* program) {
     if (!program || !program->objc_model || g_state != AneState::Available) {
         set_error("ane_delta_reload: invalid program or ANE unavailable");
         return false;
     }
     if (program->model_dir.empty()) {
-        set_error("ane_delta_reload: model_dir not set (compiled before delta support)");
+        set_error("ane_delta_reload: model_dir not set");
         return false;
     }
 
     @autoreleasepool {
         id model = (id)program->objc_model;
-        NSString* model_dir = [NSString stringWithUTF8String:program->model_dir.c_str()];
 
-        // Step 1: Unload from SRAM
+        // Unload from SRAM
         if (g_syms.loaded) {
             NSError* err = nil;
             typedef BOOL (*UnloadFn)(id, SEL, unsigned int, NSError**);
             ((UnloadFn)objc_msgSend)(model, g_syms.sel_unload, kQoS, &err);
-            // Ignore errors on unload — proceed to write + reload
+            // Ignore errors on unload — proceed to reload
         }
 
-        // Step 2: Write new weight blobs to disk (overwrite existing files)
-        NSFileManager* fm = [NSFileManager defaultManager];
-        for (const auto& w : new_weights) {
-            NSString* rel_path = [NSString stringWithFormat:@"weights/%s", w.filename.c_str()];
-            NSString* full_path = [model_dir stringByAppendingPathComponent:rel_path];
-            NSString* dir = [full_path stringByDeletingLastPathComponent];
-            [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-            NSData* data = [NSData dataWithBytes:w.data.data() length:w.data.size()];
-            if (![data writeToFile:full_path atomically:YES]) {
-                set_error("ane_delta_reload: failed to write %s", w.filename.c_str());
-                return false;
-            }
-        }
-
-        // Update stored weights for future delta reloads
-        program->weights = new_weights;
-
-        // Step 3: Load (no compile — reuses the existing E5 bytecode)
+        // Reload (no compile — reuses the existing compiled HWX bytecode)
         NSError* err = nil;
         typedef BOOL (*QoSFn3)(id, SEL, unsigned int, id, NSError**);
         BOOL ok = ((QoSFn3)objc_msgSend)(model, g_syms.sel_load, kQoS, @{}, &err);

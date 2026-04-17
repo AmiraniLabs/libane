@@ -68,6 +68,17 @@ typedef enum {
     LIBANE_OP_TAN        = 26,
     LIBANE_OP_ASIN       = 27,
     LIBANE_OP_ACOS       = 28,
+    LIBANE_OP_RESHAPE        = 29,
+    LIBANE_OP_CONCAT         = 30,
+    LIBANE_OP_SLICE_BY_INDEX = 31,
+    LIBANE_OP_REDUCE_SUM     = 32,
+    LIBANE_OP_REDUCE_MEAN    = 33,
+    LIBANE_OP_REDUCE_MAX     = 34,
+    LIBANE_OP_SUB            = 35,
+    LIBANE_OP_REAL_DIV       = 36,
+    LIBANE_OP_SQRT           = 37,
+    LIBANE_OP_LOG            = 38,
+    LIBANE_OP_RSQRT          = 39,
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */
@@ -200,24 +211,26 @@ libane_status_t libane_execute2(libane_handle_t h,
                                 libane_shape_t shape);
 
 /**
- * Reload a compiled program with updated weights without recompiling.
+ * Re-load a compiled program into ANE SRAM without recompiling.
  *
- * 8.5x faster than libane_compile() + libane_release() for weight updates
- * (Orion: ~494ms reload vs ~4,200ms recompile per layer).
+ * Useful after an internal unload (e.g., to temporarily free SRAM for another
+ * model) when you want to restore the program quickly.  Load-only is ~8.5×
+ * faster than a full recompile (~494 ms vs ~4,200 ms).
  *
- * The weight data format is identical to libane_compile() — raw fp16 bytes,
- * NOT including the 128-byte ANE blob header (the library adds that).
+ * IMPORTANT — weight values are read-only after compilation:
+ *   ANE bakes weights into the compiled HWX bytecode at compile time.
+ *   This function does NOT accept new weights and cannot update them.
+ *   Confirmed empirically: overwriting on-disk weight files has zero effect
+ *   on execution (probe_delta_reload, M3 Pro / macOS 26.3.1, 2026-04-16).
+ *   To change weights, call libane_release() + libane_compile() with new data.
  *
- * @param h           Handle from libane_compile(). Must be an ANE-compiled handle.
- * @param new_weights New weight data (fp16, same layout as original compile).
- * @param weights_len Byte length of new_weights.
+ * @param h  Handle from libane_compile(). Must be an ANE-compiled handle.
  * @return LIBANE_OK on success.
  *         LIBANE_ERR_UNAVAILABLE if handle is not ANE-compiled.
- *         LIBANE_ERR_EXECUTE_FAILED if the reload fails (handle is then invalid — call libane_release()).
+ *         LIBANE_ERR_EXECUTE_FAILED if the reload fails (handle is then
+ *         invalid — call libane_release() + libane_compile()).
  */
-libane_status_t libane_delta_reload(libane_handle_t h,
-                                     const void* new_weights,
-                                     size_t weights_len);
+libane_status_t libane_delta_reload(libane_handle_t h);
 
 /**
  * Release a compiled program handle and return resources to the pool.
@@ -276,6 +289,104 @@ void libane_cache_flush(void);
 
 /** Return current cache usage in bytes. */
 size_t libane_cache_size_bytes(void);
+
+/* ── Device introspection ────────────────────────────────────────────────── */
+
+/**
+ * ANE hardware capabilities, queried at initialization from _ANEDeviceInfo.
+ *
+ * All fields are zero/empty if _ANEDeviceInfo is unavailable on the current
+ * firmware.  Check libane_device_info_t::available before using the values.
+ *
+ * architecture  — chip generation string, e.g. "h15g" (M3) or "h16g" (M4).
+ * core_count    — number of ANE inference cores; 0 if unavailable.
+ * sram_bytes    — on-chip SRAM capacity in bytes; 0 if unavailable.
+ * available     — 1 if _ANEDeviceInfo was successfully queried, 0 otherwise.
+ */
+typedef struct {
+    char     architecture[32];  /**< e.g. "h15g" (M3), "h16g" (M4); "" if unavailable */
+    uint32_t core_count;        /**< ANE inference cores (+numANECores); 0 if unavailable */
+    uint32_t num_anes;          /**< number of ANE units (+numANEs); 0 if unavailable */
+    int      available;         /**< 1 if _ANEDeviceInfo queried successfully, 0 otherwise */
+} libane_device_info_t;
+
+/**
+ * Fill *out with ANE hardware capabilities.
+ *
+ * libane_available() need not be called first — this function initializes
+ * the runtime if necessary.
+ *
+ * @return LIBANE_OK on success (even when available==0, the struct is filled
+ *         with zeros and the call succeeds).
+ *         LIBANE_ERR_INVALID_ARG if out is NULL.
+ */
+libane_status_t libane_device_info(libane_device_info_t* out);
+
+/**
+ * Per-chip ANE tensor shape limits.
+ *
+ * max_seq       — maximum S dimension (must also be a multiple of seq_alignment).
+ * max_channels  — maximum C dimension.
+ * seq_alignment — S must be a multiple of this value (always 8).
+ *
+ * SRAM BUDGET WARNING:
+ *   max_seq and max_channels are independent dimension caps, but the real
+ *   binding constraint is on-chip SRAM.  Activations at [1, C, 1, S] consume
+ *   roughly C × S × 2 bytes of SRAM per live buffer, and the ANE holds at
+ *   least input + output simultaneously (2 × C × S × 2 bytes minimum).
+ *   For M3 (h15g) the SRAM is approximately 32 MB.
+ *
+ *   A shape at max_seq × max_channels (131072 × 16384 = ~4 GB of fp16) is
+ *   far beyond SRAM on any current chip.  Both max_seq and max_channels can
+ *   be reached individually in isolation but NOT simultaneously.
+ *
+ *   The compile will fail at runtime (LIBANE_ERR_COMPILE_FAILED) if the
+ *   combined tensor size spills past firmware SRAM limits — the firmware
+ *   enforces Orion constraint #5.  Use these limits as per-dimension guards
+ *   only; validate total tensor footprint against your known SRAM budget
+ *   before submission.
+ */
+typedef struct {
+    int32_t max_seq;        /**< maximum sequence / spatial dimension */
+    int32_t max_channels;   /**< maximum channel dimension */
+    int32_t seq_alignment;  /**< S must be a multiple of this (always 8) */
+} libane_shape_limits_t;
+
+/**
+ * Return the tensor shape limits for the current ANE hardware.
+ *
+ * Limits are chip-adaptive when _ANEDeviceInfo is available, and fall back
+ * to conservative universally-safe values otherwise.  See the SRAM BUDGET
+ * WARNING on libane_shape_limits_t — both limits cannot be hit simultaneously.
+ */
+libane_shape_limits_t libane_get_shape_limits(void);
+
+/* ── Performance statistics ──────────────────────────────────────────────── */
+
+/**
+ * Per-execution ANE hardware counters sampled via IOReport.
+ *
+ * Populated by libane_execute_with_stats(). Requires no entitlements or root.
+ * If IOReport is unavailable (non-Apple-Silicon target), available == 0 and
+ * all numeric fields are zero.
+ *
+ * ane_bw_utilization — fraction of time ANE DCS bus was active (0.0–1.0).
+ *   0.0 may mean the op was too small to register or ran on CPU fallback.
+ * avg_bw_state       — mean bandwidth histogram state (0–31 scale).
+ * peak_bw_state      — highest bandwidth state observed during this execute.
+ * ane_energy_units   — ANE energy in raw IOReport units (not millijoules).
+ * throttle_ns        — total nanoseconds ANE spent in any throttle state.
+ * available          — 1 if IOReport sampling succeeded, 0 otherwise.
+ */
+typedef struct {
+    float ane_bw_utilization; /**< DCS bus utilization fraction (0.0–1.0) */
+    float avg_bw_state;       /**< mean BW histogram state (0–31) */
+    int   peak_bw_state;      /**< peak BW histogram state seen */
+    long  ane_energy_units;   /**< ANE energy (raw IOReport units) */
+    long  throttle_ns;        /**< total throttle residency in ns */
+    int   available;          /**< 1 if IOReport sampling succeeded */
+} libane_perf_stats_t;
+
 
 /* ── Graph API ───────────────────────────────────────────────────────────── */
 
@@ -443,6 +554,59 @@ libane_status_t libane_mil_execute(libane_mil_handle_t h,
                                     void**        out_data,
                                     const size_t* out_sizes,
                                     size_t        num_outputs);
+
+/**
+ * Execute a compiled MIL program and return hardware performance counters.
+ *
+ * Identical to libane_mil_execute() but populates *stats_out after execution.
+ * Pass stats_out = NULL to skip stat collection (equivalent to libane_mil_execute).
+ *
+ * _ANEPerformanceStats may require private entitlements on some firmware
+ * versions.  If unavailable, stats_out->hw_execution_time_ms will be -1.0
+ * and execution proceeds normally (not an error).
+ *
+ * @param h           Handle from libane_mil_compile().
+ * @param in_data     Array of pointers to fp16 input data.
+ * @param in_sizes    Byte sizes of each input buffer.
+ * @param num_inputs  Length of in_data / in_sizes.
+ * @param out_data    Caller-allocated destination buffers (fp16).
+ * @param out_sizes   Byte sizes of each output buffer.
+ * @param num_outputs Length of out_data / out_sizes.
+ * @param stats_out   Receives hardware counters after execution; may be NULL.
+ *
+ * @return LIBANE_OK on success, negative status on failure.
+ */
+libane_status_t libane_mil_execute_stats(libane_mil_handle_t h,
+                                          const void**         in_data,
+                                          const size_t*        in_sizes,
+                                          size_t               num_inputs,
+                                          void**               out_data,
+                                          const size_t*        out_sizes,
+                                          size_t               num_outputs,
+                                          libane_perf_stats_t* stats_out);
+
+/**
+ * Return whether the last ANE load for this program spilled to DRAM.
+ *
+ * After libane_mil_compile(), the firmware sets
+ * _ANEInMemoryModel.intermediateBufferHandle to a non-zero IOSurface handle
+ * when the model's inter-layer intermediate activations exceed on-chip SRAM
+ * and must be backed by DRAM.  DRAM-backed intermediates incur ~30% throughput
+ * penalty.
+ *
+ * NOTE: this only fires for multi-operation fused programs.  Single-layer
+ * programs (one conv, one matmul) have no inter-layer intermediates and will
+ * always return 0 regardless of tensor size.  Confirmed via probe_sram_spill
+ * (M3 Pro / macOS 26.3.1, 2026-04-16): a [1,4096,1,4096] single conv loaded
+ * cleanly with intermediateBufferHandle == 0.
+ *
+ * A spill cannot be resolved without redesigning the model (fewer simultaneous
+ * live activations, smaller tile sizes, or splitting into multiple programs).
+ *
+ * @param h  Handle from libane_mil_compile().
+ * @return   1 if SRAM spill was detected, 0 if not, -1 on null handle.
+ */
+int libane_mil_sram_spill(libane_mil_handle_t h);
 
 /**
  * Free a compiled MIL program.  Safe to call with NULL.

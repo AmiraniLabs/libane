@@ -509,6 +509,50 @@ public:
                                       const std::string& in_var,
                                       const std::string& out_var);
 
+    static MilFragment sub_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& side_var,
+                                     const std::string& out_var);
+
+    static MilFragment real_div_fragment(int C, int SP,
+                                          const std::string& in_var,
+                                          const std::string& side_var,
+                                          const std::string& out_var);
+
+    static MilFragment sqrt_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
+    static MilFragment log_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& out_var);
+
+    static MilFragment rsqrt_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var);
+
+    static MilFragment concat_fragment(int in0_C, int in1_C, int SP,
+                                        const std::string& in_var,
+                                        const std::string& side_var,
+                                        const std::string& out_var);
+
+    static MilFragment slice_by_index_fragment(int in_C, int in_SP,
+                                                int out_C, int out_SP,
+                                                const std::string& in_var,
+                                                const std::string& out_var);
+
+    static MilFragment reduce_sum_fragment(int in_C, int SP,
+                                            const std::string& in_var,
+                                            const std::string& out_var);
+
+    static MilFragment reduce_mean_fragment(int in_C, int SP,
+                                             const std::string& in_var,
+                                             const std::string& out_var);
+
+    static MilFragment reduce_max_fragment(int in_C, int SP,
+                                            const std::string& in_var,
+                                            const std::string& out_var);
+
     static MilFragment transpose_fragment(int C, int SP,
                                            const std::string& in_var,
                                            const std::string& out_var);
