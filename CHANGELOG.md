@@ -1,5 +1,76 @@
 # Changelog
 
+## v0.8.0 — 2026-04-17
+
+### Added
+
+- **Device introspection** — `libane_device_info()` returns ANE hardware capabilities
+  queried from `_ANEDeviceInfo`: chip architecture string (e.g. `"h15g"` for M3,
+  `"h16g"` for M4), inference core count, and ANE unit count.
+
+- **Shape limits API** — `libane_get_shape_limits()` returns chip-adaptive
+  `max_seq`, `max_channels`, and `seq_alignment` (always 16). Falls back to
+  conservative universally-safe values when `_ANEDeviceInfo` is unavailable.
+
+- **Performance statistics** — `libane_mil_execute_stats()` populates a
+  `libane_perf_stats_t` after execution via IOReport: DCS bus utilization fraction,
+  mean/peak bandwidth histogram state, raw energy units, and throttle residency.
+  No entitlements or root required. `available == 0` when IOReport is unavailable;
+  execution proceeds normally.
+
+- **SRAM spill detection** — `libane_mil_sram_spill()` returns 1 if the compiled
+  program's inter-layer intermediate activations spilled to DRAM (>30% throughput
+  penalty). Checked via `_ANEInMemoryModel.intermediateBufferHandle` after compile.
+  Always 0 for single-layer programs.
+
+- **New activation ops** — `RELU`, `TANH`, `SIGMOID`, `HARDSWISH`, `LEAKY_RELU`
+  (alpha=0.01), `ELU` (alpha=1.0).
+
+- **Piecewise-linear custom activation** — `LIBANE_OP_PWL_ACTIVATION` and its
+  convenience wrapper `libane_graph_add_pwl_activation()`. Approximates any
+  smooth activation over `[x_min, x_max]` using equal-width linear segments.
+  Recommended: 33 sample points (32 segments).
+
+- **Trigonometric ops** — `SINH`, `COSH`, `TAN`, `ASIN`, `ACOS`.
+
+- **Math ops** — `NEG`, `MOD`.
+
+- **Reduce ops** — `REDUCE_SUM`, `REDUCE_MEAN`, `REDUCE_MAX`, `REDUCE_PROD`.
+
+- **Structural ops** — `RESHAPE`, `CONCAT` (along C), `SLICE_BY_INDEX`.
+
+- **Pooling ops** — `AVG_POOL`, `MAX_POOL`.
+
+- **Logical ops** — `LOGICAL_AND`, `LOGICAL_OR`, `LOGICAL_XOR`.
+
+- **Scatter / gather ops** — `SCATTER`, `GATHER`, `SCATTER_ND`, `SCATTER_ALONG_AXIS`.
+
+- **`libane_execute2()`** — two-input variant of the single-op execute path for
+  elementwise ops (ADD, MUL, etc.) without going through the Graph API.
+
+- **`libane_compile_batch()`** — compiles multiple operations in a single call.
+  Supports partial success: on `LIBANE_ERR_COMPILE_FAILED`, successful handles are
+  non-null and valid.
+
+- **Documentation** — `docs/api-c.md`, `docs/api-python.md`, `docs/graph-ir.md`,
+  `docs/hardware-introspection.md`.
+
+### Fixed
+
+- **CI: ASan on macOS ARM64** — `detect_leaks=1` is not supported on macOS ARM64
+  (LSan unavailable); changed to `detect_leaks=0` to prevent all 409 tests aborting.
+- **CI: clang-tidy** — Homebrew LLVM's `clang-tidy` does not inherit the macOS SDK
+  path; added `xcrun --show-sdk-path` passed via `--extra-arg=--sysroot` so standard
+  headers resolve.
+- **Python bindings** — removed duplicate `PyMilProgram` class and helper functions
+  that were a merge artifact; `ane_module.cpp` previously failed to compile with
+  "redefinition of 'PyMilProgram'".
+- **Graph integration tests** — `LIBANE_OP_SINH`, `LIBANE_OP_COSH`, `LIBANE_OP_TAN`,
+  `LIBANE_OP_ASIN`, `LIBANE_OP_ACOS` tests now `SKIP` when the ANE compiler rejects
+  the op on the current firmware (instead of `REQUIRE`-failing).
+
+---
+
 ## v0.7.1 — 2026-04-16
 
 ### Added

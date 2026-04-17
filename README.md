@@ -47,7 +47,7 @@ import ane
 import numpy as np
 
 print(ane.available())   # True on Apple Silicon
-print(ane.version())     # "0.7.1"
+print(ane.version())     # "0.8.0"
 
 # Single-op matmul
 A = np.random.randn(128, 512).astype(np.float16)
@@ -78,6 +78,17 @@ print(result.shape)   # (1, 512, 1, 128)
 
 See [`examples/ffn_inference.py`](examples/ffn_inference.py) for a timed
 end-to-end example.
+
+---
+
+## Documentation
+
+| | |
+|---|---|
+| [C API reference](docs/api-c.md) | All `libane_*` functions, types, and status codes |
+| [Python API reference](docs/api-python.md) | `ane.*`, `Graph`, `CompiledGraph`, `CompiledMil` |
+| [Graph IR](docs/graph-ir.md) | Tensor layout, op table, fusion rules, shape limits |
+| [Hardware introspection](docs/hardware-introspection.md) | Device info, shape limits, performance stats |
 
 ---
 
@@ -165,7 +176,12 @@ libane
 │   │   ├── graph_validator   7-check validation pass
 │   │   ├── fusion_rules      Greedy linear-chain fusion
 │   │   ├── graph_compiler    build_plan() + compile()
-│   │   └── graph_executor    Per-group ANE dispatch
+│   │   ├── graph_executor    Per-group ANE dispatch
+│   │   ├── mil_backend       MIL-path graph lowering
+│   │   ├── hwx_backend       HWX-path graph lowering
+│   │   ├── hwx_emitter       HWX bytecode emission
+│   │   ├── espresso_backend  Espresso-path graph lowering
+│   │   └── espresso_builder  Espresso program construction
 │   ├── runtime/
 │   │   └── ane_runtime.mm    AppleNeuralEngine.framework wrapper
 │   └── fallback/             Accelerate BLAS CPU fallback
@@ -180,16 +196,20 @@ dispatches instead of 6, eliminating intermediate DRAM round-trips.
 
 ## Supported ops
 
-| Op | Notes |
+| Category | Ops |
 |---|---|
-| `MATMUL` | conv1×1 internally; 3× faster than MIL matmul on ANE |
-| `RMSNORM` | rsqrt + mul, scale broadcast |
-| `LAYERNORM` | normalise + gamma/beta affine |
-| `GELU` | tanh approximation only |
-| `SILU` | x × sigmoid(x) |
-| `SOFTMAX` | over C (channel) dimension; axis=1 |
-| `ADD` / `MUL` | elementwise binary; shapes must match |
-| `TRANSPOSE` | [0,3,2,1] only: [1,C,1,S] → [1,S,1,C] |
+| Linear | `MATMUL` (conv1×1; ~3× faster than MIL matmul) |
+| Normalization | `RMSNORM`, `LAYERNORM` |
+| Activations | `GELU`, `SILU`, `RELU`, `TANH`, `SIGMOID`, `HARDSWISH`, `LEAKY_RELU`, `ELU`, `PWL_ACTIVATION` |
+| Elementwise | `ADD`, `SUB`, `MUL`, `REAL_DIV`, `NEG`, `MOD` |
+| Math | `SQRT`, `LOG`, `RSQRT`, `SINH`, `COSH`, `TAN`, `ASIN`, `ACOS` |
+| Reduce | `SOFTMAX`, `REDUCE_SUM`, `REDUCE_MEAN`, `REDUCE_MAX`, `REDUCE_PROD` |
+| Pooling | `AVG_POOL`, `MAX_POOL` |
+| Structural | `TRANSPOSE`, `RESHAPE`, `CONCAT`, `SLICE_BY_INDEX` |
+| Logical | `LOGICAL_AND`, `LOGICAL_OR`, `LOGICAL_XOR` |
+| Scatter/Gather | `SCATTER`, `GATHER`, `SCATTER_ND`, `SCATTER_ALONG_AXIS` |
+
+Full op documentation with constraints and notes: [docs/graph-ir.md](docs/graph-ir.md).
 
 ---
 
