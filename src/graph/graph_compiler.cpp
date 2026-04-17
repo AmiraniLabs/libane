@@ -4,6 +4,7 @@
 #include "graph_compiler.hpp"
 #include "graph_validator.hpp"
 #include "hwx_backend.hpp"
+#include "espresso_backend.hpp"
 #include "mil_backend.hpp"
 
 #include <initializer_list>
@@ -169,8 +170,9 @@ private:
 
 std::unique_ptr<CompiledGraph> GraphCompiler::compile(const AneGraph& graph) {
     thread_local HwxBackend      hwx;
+    thread_local EspressoBackend espresso;
     thread_local MilBackend      mil;
-    thread_local RoutingBackend  router({&hwx, &mil});
+    thread_local RoutingBackend  router({&hwx, &espresso, &mil});
     return compile(graph, router);
 }
 

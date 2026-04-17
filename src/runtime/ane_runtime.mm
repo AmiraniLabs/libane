@@ -96,6 +96,21 @@ struct AneSymbols {
     SEL sel_processRequest     = nullptr;  // processRequest:model:qos:qIndex:modelStringID:options:returnValue:error:
 
     bool loaded = false;
+
+    // ── Path B (_ANEClient + standalone _ANEModel) — optional ─────────────
+    Class cls_ANEClient       = nil;
+    Class cls_ANEModel_b      = nil;  // standalone _ANEModel (not _ANEInMemoryModel)
+    SEL sel_sharedConnection  = nullptr;
+    SEL sel_compileModelOpts  = nullptr; // compileModel:options:qos:error:
+    SEL sel_loadModel         = nullptr;
+    SEL sel_doUnloadModel     = nullptr;
+    SEL sel_doEvalDirect      = nullptr; // doEvaluateDirectWithModel:options:request:qos:error:
+    SEL sel_mapIOSurfaces     = nullptr; // mapIOSurfacesWithModel:request:cacheInference:error:
+    SEL sel_unmapIOSurfaces   = nullptr; // unmapIOSurfacesWithModel:request:
+    SEL sel_modelAtURLKey     = nullptr; // modelAtURL:key:
+    SEL sel_initWithSurface_b = nullptr; // initWithIOSurface:startOffset:shouldRetain:
+    SEL sel_initRequest_b     = nullptr; // initWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:sharedEvents:transactionHandle:
+    bool path_b_loaded        = false;
 };
 
 static AneSymbols     g_syms;
@@ -381,6 +396,27 @@ static void do_initialize() {
         g_device_info = AneDeviceInfo{};
     }
 
+    // ── Optional: Path B (_ANEClient / Espresso .mlmodelc) ───────────────
+    @try {
+        g_syms.cls_ANEClient  = NSClassFromString(@"_ANEClient");
+        g_syms.cls_ANEModel_b = NSClassFromString(@"_ANEModel");
+        if (g_syms.cls_ANEClient && g_syms.cls_ANEModel_b) {
+            g_syms.sel_sharedConnection  = sel_registerName("sharedConnection");
+            g_syms.sel_compileModelOpts  = sel_registerName("compileModel:options:qos:error:");
+            g_syms.sel_loadModel         = sel_registerName("loadModel:options:qos:error:");
+            g_syms.sel_doUnloadModel     = sel_registerName("doUnloadModel:options:qos:error:");
+            g_syms.sel_doEvalDirect      = sel_registerName("doEvaluateDirectWithModel:options:request:qos:error:");
+            g_syms.sel_mapIOSurfaces     = sel_registerName("mapIOSurfacesWithModel:request:cacheInference:error:");
+            g_syms.sel_unmapIOSurfaces   = sel_registerName("unmapIOSurfacesWithModel:request:");
+            g_syms.sel_modelAtURLKey     = sel_registerName("modelAtURL:key:");
+            g_syms.sel_initWithSurface_b = sel_registerName("initWithIOSurface:startOffset:shouldRetain:");
+            g_syms.sel_initRequest_b     = sel_registerName("initWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:sharedEvents:transactionHandle:");
+            g_syms.path_b_loaded = true;
+        }
+    } @catch (...) {
+        g_syms.path_b_loaded = false;
+    }
+
     g_state = AneState::Available;
 }
 
@@ -403,6 +439,10 @@ AneDeviceInfo device_info() {
 
 const char* ane_last_error() {
     return tl_error;
+}
+
+bool path_b_available() {
+    return g_syms.path_b_loaded;
 }
 
 /* ── MIL Parameter Extraction ────────────────────────────────────────────── */
@@ -1073,27 +1113,357 @@ AneProgram* ane_load_hwx(const std::vector<uint8_t>& hwx_bytes,
     }
 }
 
+/* ── ane_load_mlmodelc (Path B) ──────────────────────────────────────────── */
+
+AneProgram* ane_load_mlmodelc(const std::string& model_dir_path,
+                               int in_channels, int in_seq,
+                               int out_channels, int out_seq,
+                               const std::string& debug_name) {
+    if (g_state != AneState::Available) {
+        set_error("ane_load_mlmodelc: ANE not available: %s", g_fallback_reason);
+        return nullptr;
+    }
+    if (!g_syms.path_b_loaded) {
+        set_error("ane_load_mlmodelc: Path B symbols not available");
+        return nullptr;
+    }
+
+    @autoreleasepool {
+        // 1. _ANEClient.sharedConnection — retained so it survives the autorelease pool
+        typedef id (*ClassMsgFn)(Class, SEL);
+        id client = ((ClassMsgFn)objc_msgSend)(
+            g_syms.cls_ANEClient, g_syms.sel_sharedConnection);
+        if (!client) {
+            set_error("ane_load_mlmodelc: _ANEClient.sharedConnection returned nil");
+            return nullptr;
+        }
+        [client retain];
+
+        // 2. Create _ANEModel from directory
+        NSString* dir_ns  = [NSString stringWithUTF8String:model_dir_path.c_str()];
+        NSURL*    dir_url = [NSURL fileURLWithPath:dir_ns];
+
+        typedef id (*ModelAtURLFn)(Class, SEL, NSURL*, NSString*);
+        id model_b = ((ModelAtURLFn)objc_msgSend)(
+            g_syms.cls_ANEModel_b, g_syms.sel_modelAtURLKey, dir_url, dir_ns);
+        if (!model_b) {
+            [client release];
+            set_error("ane_load_mlmodelc: _ANEModel modelAtURL:key: returned nil");
+            return nullptr;
+        }
+        [model_b retain];
+
+        // 3. Compile via _ANEClient
+        NSError* error = nil;
+        typedef BOOL (*CompileFn)(id, SEL, id, id, unsigned int, NSError**);
+        BOOL ok = ((CompileFn)objc_msgSend)(
+            client, g_syms.sel_compileModelOpts, model_b, @{}, kQoS, &error);
+        if (!ok || error) {
+            [model_b release]; [client release];
+            set_error("ane_load_mlmodelc: compileModel failed: %s",
+                      error ? [[error localizedDescription] UTF8String] : "unknown");
+            return nullptr;
+        }
+
+        // 4. Load via _ANEClient
+        {
+            NSError* load_err = nil;
+            typedef BOOL (*LoadFn)(id, SEL, id, id, unsigned int, NSError**);
+            BOOL loaded = [client respondsToSelector:g_syms.sel_loadModel]
+                ? ((LoadFn)objc_msgSend)(client, g_syms.sel_loadModel,
+                                         model_b, @{}, kQoS, &load_err)
+                : YES;  // assume loaded if method absent (some firmware versions)
+            if (!loaded || load_err) {
+                [model_b release]; [client release];
+                set_error("ane_load_mlmodelc: loadModel failed: %s",
+                          load_err ? [[load_err localizedDescription] UTF8String] : "NO");
+                return nullptr;
+            }
+        }
+
+        // 5. Compute stride fallbacks (used when modelAttributes KVC fails)
+        auto round64 = [](size_t x) -> size_t {
+            return ((x + 63) / 64) * 64;
+        };
+
+        auto* prog = new AneProgram{};
+        prog->objc_ane_client     = (void*)client;
+        prog->objc_client_model   = (void*)model_b;
+        prog->client_in_channels  = in_channels;
+        prog->client_out_channels = out_channels;
+        prog->client_in_seq       = in_seq;
+        prog->client_out_seq      = out_seq;
+        prog->debug_name          = debug_name;
+
+        // ANE requires 64-byte plane alignment; plane stride = round64(seq * sizeof(fp16)).
+        const size_t in_ps_fallback  = round64((size_t)in_seq  * 2);
+        const size_t out_ps_fallback = round64((size_t)out_seq * 2);
+
+        prog->client_in_plane_stride  = in_ps_fallback;
+        prog->client_out_plane_stride = out_ps_fallback;
+        prog->client_in_batch_stride  = round64(
+            std::max((size_t)in_channels  * in_ps_fallback,  (size_t)49152));
+        prog->client_out_batch_stride = round64(
+            std::max((size_t)out_channels * out_ps_fallback, (size_t)49152));
+
+        // 6. Read authoritative strides + SRAM spill from _ANEModel (KVC)
+        @try {
+            // intermediateBufferHandle: non-zero = SRAM spill to DRAM
+            SEL sel_ibh = sel_registerName("intermediateBufferHandle");
+            if ([model_b respondsToSelector:sel_ibh]) {
+                uint64_t ibh =
+                    ((uint64_t(*)(id,SEL))objc_msgSend)(model_b, sel_ibh);
+                if (ibh != 0) {
+                    prog->sram_spill = true;
+                    fprintf(stderr,
+                            "libane: WARNING: Path B SRAM spill "
+                            "(intermediateBufferHandle=%llu) — model '%s' "
+                            "exceeds SRAM; expect throughput drop\n",
+                            (unsigned long long)ibh,
+                            debug_name.empty() ? "(unnamed)" : debug_name.c_str());
+                }
+            }
+
+            // modelAttributes → networkStatusList[0] → liveInputList/liveOutputList
+            id attrs = [model_b valueForKey:@"modelAttributes"];
+            if (attrs) {
+                NSArray* net_list = [attrs valueForKey:@"networkStatusList"];
+                if (net_list && [net_list count] > 0) {
+                    id net = [net_list objectAtIndex:0];
+                    NSArray* in_list  = [net valueForKey:@"liveInputList"];
+                    NSArray* out_list = [net valueForKey:@"liveOutputList"];
+                    if (in_list && [in_list count] > 0) {
+                        id in0 = [in_list objectAtIndex:0];
+                        size_t bs = [[in0 valueForKey:@"batchStride"] unsignedLongValue];
+                        size_t ps = [[in0 valueForKey:@"planeStride"] unsignedLongValue];
+                        if (bs > 0) prog->client_in_batch_stride = bs;
+                        if (ps > 0) prog->client_in_plane_stride = ps;
+                    }
+                    if (out_list && [out_list count] > 0) {
+                        id out0 = [out_list objectAtIndex:0];
+                        size_t bs = [[out0 valueForKey:@"batchStride"] unsignedLongValue];
+                        size_t ps = [[out0 valueForKey:@"planeStride"] unsignedLongValue];
+                        if (bs > 0) prog->client_out_batch_stride = bs;
+                        if (ps > 0) prog->client_out_plane_stride = ps;
+                    }
+                }
+            }
+        } @catch (...) {
+            // Non-fatal: computed fallback strides remain in effect
+        }
+
+        // 7. Pre-allocate persistent IOSurfaces — reused on every ane_execute_client call.
+        //    On first execute they are mapped with cacheInference:YES so that subsequent
+        //    doEvaluateDirectWithModel: calls skip IOSurface marshal/unmarshal overhead.
+        NSDictionary* in_props = @{
+            (__bridge NSString*)kIOSurfaceAllocSize: @(prog->client_in_batch_stride),
+        };
+        NSDictionary* out_props = @{
+            (__bridge NSString*)kIOSurfaceAllocSize: @(prog->client_out_batch_stride),
+        };
+
+        IOSurfaceRef in_surf  = IOSurfaceCreate((__bridge CFDictionaryRef)in_props);
+        IOSurfaceRef out_surf = IOSurfaceCreate((__bridge CFDictionaryRef)out_props);
+
+        if (!in_surf || !out_surf) {
+            if (in_surf)  CFRelease(in_surf);
+            if (out_surf) CFRelease(out_surf);
+            delete prog;
+            [model_b release]; [client release];
+            set_error("ane_load_mlmodelc: IOSurface creation failed");
+            return nullptr;
+        }
+
+        prog->client_in_surf  = (void*)in_surf;   // CFRetained by IOSurfaceCreate
+        prog->client_out_surf = (void*)out_surf;
+
+        return prog;
+    }
+}
+
+/* ── ane_execute_client (Path B) ─────────────────────────────────────────── */
+
+#ifdef __APPLE__
+bool ane_execute_client(AneProgram* program,
+                        const void* input_fp16,
+                        void*       output_fp16) {
+    if (!program || !program->objc_ane_client || !program->objc_client_model
+        || !program->client_in_surf || !program->client_out_surf) {
+        set_error("ane_execute_client: invalid program");
+        return false;
+    }
+    if (g_state != AneState::Available) {
+        set_error("ane_execute_client: ANE not available");
+        return false;
+    }
+
+    @autoreleasepool {
+        id client  = (id)program->objc_ane_client;
+        id model_b = (id)program->objc_client_model;
+
+        IOSurfaceRef in_surf  = (IOSurfaceRef)program->client_in_surf;
+        IOSurfaceRef out_surf = (IOSurfaceRef)program->client_out_surf;
+
+        const size_t in_ps  = program->client_in_plane_stride;
+        const int    in_ch  = program->client_in_channels;
+        const int    in_seq = program->client_in_seq;
+
+        const size_t out_ps  = program->client_out_plane_stride;
+        const int    out_ch  = program->client_out_channels;
+        const int    out_seq = program->client_out_seq;
+
+        // Fill input surface: scatter fp16 channels into PlaneStride-spaced slots.
+        // Channel j at base + j*PlaneStride; each channel is in_seq fp16 values.
+        IOSurfaceLock(in_surf, 0, nullptr);
+        {
+            uint8_t*       dst     = (uint8_t*)IOSurfaceGetBaseAddress(in_surf);
+            const uint8_t* src     = (const uint8_t*)input_fp16;
+            const size_t   ch_bytes = (size_t)in_seq * 2;
+            for (int j = 0; j < in_ch; ++j)
+                memcpy(dst + (size_t)j * in_ps, src + (size_t)j * ch_bytes, ch_bytes);
+        }
+        IOSurfaceUnlock(in_surf, 0, nullptr);
+
+        // Lazy warm-path setup: done once per AneProgram lifetime.
+        if (!program->client_mapped) {
+            // Wrap persistent IOSurfaces in _ANEIOSurfaceObject (Path B alloc+init)
+            typedef id (*InitSurfFn)(id, SEL, IOSurfaceRef, NSUInteger, BOOL);
+
+            id in_obj  = [g_syms.cls_IOSurfaceObj alloc];
+            in_obj  = ((InitSurfFn)objc_msgSend)(
+                in_obj,  g_syms.sel_initWithSurface_b, in_surf,  (NSUInteger)0, (BOOL)YES);
+
+            id out_obj = [g_syms.cls_IOSurfaceObj alloc];
+            out_obj = ((InitSurfFn)objc_msgSend)(
+                out_obj, g_syms.sel_initWithSurface_b, out_surf, (NSUInteger)0, (BOOL)YES);
+
+            if (!in_obj || !out_obj) {
+                if (in_obj)  [in_obj release];
+                if (out_obj) [out_obj release];
+                set_error("ane_execute_client: _ANEIOSurfaceObject init failed");
+                return false;
+            }
+
+            // Build _ANERequest (9-arg Path B init: sharedEvents + transactionHandle = nil)
+            typedef id (*InitReqFn)(id, SEL,
+                                    NSArray*, NSArray*,
+                                    NSArray*, NSArray*,
+                                    id, id, NSUInteger, id, id);
+            id request = [g_syms.cls_Request alloc];
+            request = ((InitReqFn)objc_msgSend)(
+                request, g_syms.sel_initRequest_b,
+                @[in_obj],  @[@0],
+                @[out_obj], @[@0],
+                nil, nil,
+                (NSUInteger)0,
+                nil, nil);
+
+            if (!request) {
+                [in_obj release]; [out_obj release];
+                set_error("ane_execute_client: _ANERequest init failed");
+                return false;
+            }
+
+            // mapIOSurfaces:cacheInference:YES — registers handles with the ANE kernel
+            // once.  doEvaluateDirectWithModel: will then use fastConn on all subsequent
+            // calls, bypassing the XPC marshal/unmarshal overhead entirely.
+            NSError* map_err = nil;
+            typedef BOOL (*MapFn)(id, SEL, id, id, BOOL, NSError**);
+            BOOL ok = ((MapFn)objc_msgSend)(
+                client, g_syms.sel_mapIOSurfaces,
+                model_b, request, (BOOL)YES, &map_err);
+            if (!ok || map_err) {
+                [request release]; [in_obj release]; [out_obj release];
+                set_error("ane_execute_client: mapIOSurfaces failed: %s",
+                          map_err ? [[map_err localizedDescription] UTF8String] : "NO");
+                return false;
+            }
+
+            program->client_in_surf_obj  = (void*)in_obj;
+            program->client_out_surf_obj = (void*)out_obj;
+            program->client_request      = (void*)request;
+            program->client_mapped       = true;
+        }
+
+        // Execute via fastConn warm path
+        id request = (id)program->client_request;
+        NSError* error = nil;
+        typedef BOOL (*EvalDirectFn)(id, SEL, id, id, id, unsigned int, NSError**);
+        BOOL ok = ((EvalDirectFn)objc_msgSend)(
+            client, g_syms.sel_doEvalDirect, model_b, @{}, request, kQoS, &error);
+        if (!ok || error) {
+            set_error("ane_execute_client: doEvaluateDirect failed: %s",
+                      error ? [[error localizedDescription] UTF8String] : "unknown");
+            return false;
+        }
+
+        // Drain output: gather PlaneStride-spaced channels into flat fp16
+        IOSurfaceLock(out_surf, kIOSurfaceLockReadOnly, nullptr);
+        {
+            const uint8_t* src     = (const uint8_t*)IOSurfaceGetBaseAddress(out_surf);
+            uint8_t*       dst     = (uint8_t*)output_fp16;
+            const size_t   ch_bytes = (size_t)out_seq * 2;
+            for (int j = 0; j < out_ch; ++j)
+                memcpy(dst + (size_t)j * ch_bytes, src + (size_t)j * out_ps, ch_bytes);
+        }
+        IOSurfaceUnlock(out_surf, kIOSurfaceLockReadOnly, nullptr);
+
+        return true;
+    }
+}
+#endif
+
 /* ── Unload ──────────────────────────────────────────────────────────────── */
 
 void ane_unload(AneProgram* program) {
     if (!program) return;
 
+    // Path B cleanup
+    if (program->objc_client_model) {
+        @autoreleasepool {
+            id client  = (id)program->objc_ane_client;
+            id model_b = (id)program->objc_client_model;
+
+            // Unmap cached IOSurfaces from the ANE kernel before releasing
+            if (program->client_mapped && client && g_syms.path_b_loaded
+                && [client respondsToSelector:g_syms.sel_unmapIOSurfaces]) {
+                id request = (id)program->client_request;
+                typedef void (*UnmapFn)(id, SEL, id, id);
+                ((UnmapFn)objc_msgSend)(
+                    client, g_syms.sel_unmapIOSurfaces, model_b, request);
+            }
+
+            if (program->client_request)      [(id)program->client_request release];
+            if (program->client_in_surf_obj)  [(id)program->client_in_surf_obj release];
+            if (program->client_out_surf_obj) [(id)program->client_out_surf_obj release];
+
+            if (program->client_in_surf)  CFRelease((IOSurfaceRef)program->client_in_surf);
+            if (program->client_out_surf) CFRelease((IOSurfaceRef)program->client_out_surf);
+
+            if (client && g_syms.path_b_loaded
+                && [client respondsToSelector:g_syms.sel_doUnloadModel]) {
+                typedef BOOL (*UnloadFn)(id, SEL, id, id, unsigned int, NSError**);
+                ((UnloadFn)objc_msgSend)(client, g_syms.sel_doUnloadModel,
+                                          model_b, @{}, kQoS, nil);
+            }
+            [model_b release];
+            if (client) [client release];
+        }
+        program->objc_client_model = nullptr;
+        program->objc_ane_client   = nullptr;
+    }
+
+    // Path A cleanup
     if (program->objc_model) {
         @autoreleasepool {
             id model = (id)program->objc_model;
-
-            // Step 10: unload from SRAM (enables delta compilation)
             if (g_syms.loaded) {
                 NSError* error = nil;
                 typedef BOOL (*UnloadFn)(id, SEL, unsigned int, NSError**);
                 ((UnloadFn)objc_msgSend)(model, g_syms.sel_unload, kQoS, &error);
-                // Ignore errors — best effort unload
             }
-
-            // Release fast-path objects before releasing the parent model
             if (program->objc_program)     [(id)program->objc_program release];
             if (program->objc_inner_model) [(id)program->objc_inner_model release];
-
             [model release];
         }
         program->objc_model = nullptr;

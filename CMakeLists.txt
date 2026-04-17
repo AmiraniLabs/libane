@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(libane VERSION 0.7.1 LANGUAGES CXX OBJCXX)
+project(libane VERSION 0.8.0 LANGUAGES CXX OBJCXX)
 
 # ── C++ standard ─────────────────────────────────────────────────────────────
 set(CMAKE_CXX_STANDARD 17)
@@ -27,11 +27,12 @@ set(LIBANE_SOURCES
     src/graph/ane_graph.cpp
     src/graph/graph_validator.cpp
     src/graph/fusion_rules.cpp
-    src/graph/graph_compiler.cpp
     src/graph/mil_backend.cpp
     src/graph/hwx_emitter.cpp
     src/graph/hwx_backend.cpp
     src/graph/espresso_builder.cpp
+    src/graph/espresso_backend.cpp
+    src/graph/graph_compiler.cpp
     src/graph/graph_executor.cpp
     src/libane.cpp
 )

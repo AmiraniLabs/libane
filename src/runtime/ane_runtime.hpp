@@ -78,26 +78,47 @@ struct WeightEntry {
 
 /**
  * Opaque handle to a compiled ANE model.
- * Created by ane_compile(), destroyed by ane_unload().
+ * Created by ane_compile() or ane_load_mlmodelc(), destroyed by ane_unload().
+ *
+ * Path A fields (objc_model*): populated by ane_compile() / ane_load_hwx().
+ * Path B fields (objc_client_model / objc_ane_client): populated by ane_load_mlmodelc().
+ * Exactly one path is active per AneProgram instance.
  */
 struct AneProgram {
-    void*  objc_model        = nullptr;  ///< ObjC _ANEInMemoryModel* (retained)
-    void*  objc_program      = nullptr;  ///< ObjC _ANEProgramForEvaluation* (retained), nil if unavailable
-    void*  objc_inner_model  = nullptr;  ///< ObjC _ANEModel* (retained), for processRequest:
-    uint64_t model_string_id = 0;        ///< string_id of the inner _ANEModel
-    size_t size_bytes        = 0;        ///< Approximate memory footprint
-    bool   sram_spill        = false;    ///< true if model exceeded SRAM (intermediateBufferHandle != 0)
+    // ── Path A (_ANEInMemoryModel) ─────────────────────────────────────────
+    void*    objc_model        = nullptr;  ///< ObjC _ANEInMemoryModel* (retained)
+    void*    objc_program      = nullptr;  ///< ObjC _ANEProgramForEvaluation* (retained)
+    void*    objc_inner_model  = nullptr;  ///< ObjC _ANEModel* (retained), for processRequest:
+    uint64_t model_string_id   = 0;        ///< string_id of the inner _ANEModel
+    size_t   size_bytes        = 0;        ///< Approximate memory footprint
+    bool     sram_spill        = false;    ///< true if intermediateBufferHandle != 0 after load
     std::string debug_name;
-    std::string model_dir;          ///< Temp dir path for delta compilation
-    std::vector<WeightEntry> weights;  ///< stored for delta reload
-
-    /// Parameter names extracted from MIL function signature (inputs in declaration order).
-    /// Used for constraint #13 validation (alphabetical input ordering).
+    std::string model_dir;               ///< Temp dir path for delta compilation
+    std::vector<WeightEntry> weights;    ///< stored for delta reload
     std::vector<std::string> input_param_names;
-
-    /// Output variable names extracted from MIL return type (outputs in declaration order).
-    /// Used for constraint #3 validation (alphabetical output ordering).
     std::vector<std::string> output_var_names;
+
+    // ── Path B (_ANEClient / Espresso .mlmodelc) ───────────────────────────
+    // IOSurfaces and ObjC wrappers are created once in ane_load_mlmodelc and
+    // reused across all ane_execute_client calls.  On first execute, they are
+    // mapped with cacheInference:YES so that subsequent doEvaluateDirect: calls
+    // use the fastConn warm path and skip IOSurface marshal/unmarshal overhead.
+    void*    objc_ane_client        = nullptr; ///< _ANEClient* (retained)
+    void*    objc_client_model      = nullptr; ///< _ANEModel* (retained)
+    void*    client_in_surf         = nullptr; ///< IOSurfaceRef (CFRetained) — input surface
+    void*    client_out_surf        = nullptr; ///< IOSurfaceRef (CFRetained) — output surface
+    void*    client_in_surf_obj     = nullptr; ///< _ANEIOSurfaceObject* (retained)
+    void*    client_out_surf_obj    = nullptr; ///< _ANEIOSurfaceObject* (retained)
+    void*    client_request         = nullptr; ///< _ANERequest* (retained)
+    bool     client_mapped          = false;   ///< true after mapIOSurfaces:cacheInference:YES
+    size_t   client_in_batch_stride  = 0;
+    size_t   client_out_batch_stride = 0;
+    size_t   client_in_plane_stride  = 0;
+    size_t   client_out_plane_stride = 0;
+    int      client_in_channels      = 0;
+    int      client_out_channels     = 0;
+    int      client_in_seq           = 0;
+    int      client_out_seq          = 0;
 };
 
 /* ── Device info ─────────────────────────────────────────────────────────── */
@@ -253,6 +274,56 @@ AneProgram* ane_load_hwx(const std::vector<uint8_t>& hwx_bytes,
                           const std::string&          input_name  = "x",
                           const std::string&          output_name = "y",
                           const std::string&          debug_name  = "");
+
+/**
+ * Return true if Path B (_ANEClient / Espresso .mlmodelc) symbols were
+ * successfully resolved during initialize().  Always false in Fallback mode.
+ */
+bool path_b_available();
+
+/**
+ * Load a pre-built Espresso .mlmodelc bundle via _ANEClient (Path B).
+ *
+ * Calls _ANEClient.sharedConnection, creates _ANEModel from the directory,
+ * compiles and loads it, reads BatchStride/PlaneStride from modelAttributes,
+ * checks intermediateBufferHandle for SRAM spill, and pre-allocates the
+ * persistent IOSurfaces that ane_execute_client reuses on every call.
+ *
+ * @param model_dir_path  Path to the .mlmodelc directory.
+ * @param in_channels     Input tensor channels.
+ * @param in_seq          Input tensor seq.
+ * @param out_channels    Output tensor channels.
+ * @param out_seq         Output tensor seq.
+ * @param debug_name      Optional label.
+ * @return                Loaded AneProgram* (caller calls ane_unload()), or nullptr.
+ */
+AneProgram* ane_load_mlmodelc(const std::string& model_dir_path,
+                               int in_channels, int in_seq,
+                               int out_channels, int out_seq,
+                               const std::string& debug_name = "");
+
+#ifdef __APPLE__
+/**
+ * Execute a Path B program loaded via ane_load_mlmodelc().
+ *
+ * On the first call: creates _ANEIOSurfaceObject wrappers, builds _ANERequest,
+ * calls mapIOSurfacesWithModel:cacheInference:YES to register the IOSurface
+ * handles with the ANE kernel once.  All subsequent calls use the cached
+ * mapping via fastConn — no IOSurface marshal/unmarshal overhead.
+ *
+ * Every call: fills client_in_surf with a PlaneStride-aware scatter of the
+ * input fp16 data, fires doEvaluateDirectWithModel:, drains client_out_surf
+ * with the inverse gather into the output buffer.
+ *
+ * @param program     Handle from ane_load_mlmodelc().
+ * @param input_fp16  Flat fp16 input [C, S] channel-first row-major.
+ * @param output_fp16 Output buffer for flat fp16 result (same layout).
+ * @return            true on success.
+ */
+bool ane_execute_client(AneProgram* program,
+                        const void* input_fp16,
+                        void*       output_fp16);
+#endif
 
 } // namespace runtime
 } // namespace libane

@@ -56,6 +56,67 @@ bool GraphExecutor::execute(const CompiledGraph&            cg,
 
 #ifdef __APPLE__
     for (const auto& group : cg.groups()) {
+        runtime::AneProgram* program = group.program;
+
+        // Path B — _ANEClient warm-path dispatch
+        if (program->objc_client_model) {
+            TensorId in_tid = group.inputs[0];
+            const auto* in_shape  = cg.tensor_shape(in_tid);
+            const auto* out_shape = cg.tensor_shape(group.output);
+            if (!in_shape || !out_shape) return false;
+
+            const int in_ch      = in_shape->channels;
+            const int out_ch     = out_shape->channels;
+            const int g_in_seq   = in_shape->seq;
+            const int g_out_seq  = out_shape->seq;
+            const int cl_in_seq  = program->client_in_seq;
+            const int cl_out_seq = program->client_out_seq;
+
+            // Read full graph input buffer: [in_ch][g_in_seq] fp16
+            size_t full_in_bytes = static_cast<size_t>(in_ch) * g_in_seq * 2;
+            std::vector<uint8_t> full_in(full_in_bytes);
+            {
+                auto tmp_it = tmp_input_bufs.find(in_tid);
+                if (tmp_it != tmp_input_bufs.end())
+                    tmp_it->second->copy_to(full_in.data(), full_in_bytes);
+                else {
+                    AneBuffer* buf = cg.ane_buf(in_tid);
+                    if (!buf) return false;
+                    buf->copy_to(full_in.data(), full_in_bytes);
+                }
+            }
+
+            // Stride-extract: take first cl_in_seq fp16s from each channel.
+            // Converts [in_ch][g_in_seq] → [in_ch][cl_in_seq] (column-0 slice).
+            const size_t cl_in_ch_bytes = static_cast<size_t>(cl_in_seq) * 2;
+            std::vector<uint8_t> cl_in(static_cast<size_t>(in_ch) * cl_in_ch_bytes);
+            for (int c = 0; c < in_ch; ++c)
+                std::memcpy(cl_in.data()  + c * cl_in_ch_bytes,
+                            full_in.data() + c * (static_cast<size_t>(g_in_seq) * 2),
+                            cl_in_ch_bytes);
+
+            // Execute via _ANEClient
+            const size_t cl_out_ch_bytes = static_cast<size_t>(cl_out_seq) * 2;
+            std::vector<uint8_t> cl_out(static_cast<size_t>(out_ch) * cl_out_ch_bytes);
+            if (!runtime::ane_execute_client(program, cl_in.data(), cl_out.data()))
+                return false;
+
+            // Stride-insert: write cl_out_seq fp16s back to position 0 of each channel,
+            // zero-fill the remainder. Converts [out_ch][cl_out_seq] → [out_ch][g_out_seq].
+            size_t full_out_bytes = static_cast<size_t>(out_ch) * g_out_seq * 2;
+            std::vector<uint8_t> full_out(full_out_bytes, 0);
+            for (int j = 0; j < out_ch; ++j)
+                std::memcpy(full_out.data() + j * (static_cast<size_t>(g_out_seq) * 2),
+                            cl_out.data()   + j * cl_out_ch_bytes,
+                            cl_out_ch_bytes);
+
+            AneBuffer* out_buf = cg.ane_buf(group.output);
+            if (!out_buf) return false;
+            out_buf->copy_from(full_out.data(), full_out_bytes);
+            continue;
+        }
+
+        // Path A — IOSurface-based dispatch
         std::vector<IOSurfaceRef> in_surfs;
         in_surfs.reserve(group.inputs.size());
 

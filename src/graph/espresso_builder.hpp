@@ -161,15 +161,17 @@ public:
                                       float beta  = 0.0f);
 
     /**
-     * Build an inner_product graph: [1, 1, 1, in_ch] → [1, 1, 1, out_ch].
+     * Build an inner_product graph for @p seq positions: [1, 1, seq, in_ch] → [1, 1, seq, out_ch].
      * @param weights  Row-major FP32 matrix [out_ch × in_ch].
      * @param bias     Optional FP32 bias [out_ch]; if non-null, v4 weight format.
+     * @param seq      Sequence length (number of independent FC positions); default 16.
      */
     static EspressoBuilder inner_product(int         in_ch,
                                           int         out_ch,
                                           const float* weights,
                                           const float* bias       = nullptr,
-                                          bool         fused_relu = false);
+                                          bool         fused_relu = false,
+                                          int          seq        = 16);
 
 private:
     std::vector<std::string>      layer_jsons_;

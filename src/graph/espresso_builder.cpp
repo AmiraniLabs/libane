@@ -371,7 +371,8 @@ EspressoBuilder EspressoBuilder::activation(const std::string& input_name,
 EspressoBuilder EspressoBuilder::inner_product(int in_ch, int out_ch,
                                                 const float* weights,
                                                 const float* bias,
-                                                bool fused_relu) {
+                                                bool fused_relu,
+                                                int  seq) {
     EspressoBuilder b;
 
     const bool has_bias     = (bias != nullptr);
@@ -382,11 +383,12 @@ EspressoBuilder EspressoBuilder::inner_product(int in_ch, int out_ch,
                         blob_weights, has_bias, fused_relu,
                         /*is_output=*/true);
 
-    b.add_shape("input",  {1, 1, 1, in_ch});
-    b.add_shape("output", {1, 1, 1, out_ch});
+    // NHWK: n=1, h=1, w=seq, k=channels
+    b.add_shape("input",  {1, 1, seq, in_ch});
+    b.add_shape("output", {1, 1, seq, out_ch});
 
-    b.set_inputs ({std::vector<IOTensor>{{"input",  {in_ch,  1, 1}}}});
-    b.set_outputs({std::vector<IOTensor>{{"output", {out_ch, 1, 1}}}});
+    b.set_inputs ({std::vector<IOTensor>{{"input",  {in_ch,  1, seq}}}});
+    b.set_outputs({std::vector<IOTensor>{{"output", {out_ch, 1, seq}}}});
 
     if (weights) b.add_weight_blob(weights, static_cast<size_t>(in_ch) * out_ch);
 

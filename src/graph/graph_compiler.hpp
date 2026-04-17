@@ -28,8 +28,8 @@
 #pragma once
 
 #include "ane_graph.hpp"
-#include "fusion_rules.hpp"
 #include "compiler_backend.hpp"
+#include "fusion_rules.hpp"
 #include "../core/buffer_manager.hpp"
 #include "../runtime/ane_runtime.hpp"
 #include "../../include/libane.h"
@@ -148,9 +148,8 @@ public:
      * Two-argument overload: single backend, no routing.  Used by tests that
      * want to target a specific backend directly.
      *
-     * No-argument overload: routes each FusionGroup to the highest-priority
-     * backend that owns() it.  Priority order: HwxBackend → MilBackend
-     * (EspressoBackend will be inserted once implemented).
+     * One-argument overload: routes each group through the priority router
+     * (HwxBackend → EspressoBackend → MilBackend).
      *
      * Returns nullptr on failure (validation error, ANE unavailable, or any
      * compile_group() call fails).  Never throws.
