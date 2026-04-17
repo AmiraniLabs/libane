@@ -861,9 +861,21 @@ bool ane_execute_multi(AneProgram* program,
         if (stats_out && g_ior.available)
             before_snap = ioreport_capture();
 
-        // Fast path: processRequest: on _ANEProgramForEvaluation — ~13% lower latency
-        // by bypassing _ANEInMemoryModel dispatch overhead.
-        // Falls back to evaluateWithQoS: if fast-path objects are unavailable.
+        // Dispatch priority (fastest → slowest):
+        //
+        //   Tier 0 — processRequest: on _ANEProgramForEvaluation
+        //            Bypasses _ANEInMemoryModel dispatch overhead. ~13% faster
+        //            than evaluateWithQoS:. Measured baseline: 346 µs p50.
+        //
+        //            NOTE: doEvaluateDirectWithModel: on _ANEClient.sharedConnection
+        //            was benchmarked (2026-04-17) and found to be 18% SLOWER (401 µs
+        //            p50) — the "37% faster" claim in ane-dispatch compares against
+        //            CoreML's evaluateWithModel:, not processRequest:. On Path A
+        //            (MIL / _ANEInMemoryModel), _ANEClient adds connection-table
+        //            lookup overhead that processRequest: avoids.
+        //
+        //   Tier 1 — evaluateWithQoS: on _ANEInMemoryModel (fallback)
+        //
         if (program->objc_program && program->objc_inner_model) {
             id prog_eval   = (id)program->objc_program;
             id inner_model = (id)program->objc_inner_model;
