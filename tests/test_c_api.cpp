@@ -1198,3 +1198,4 @@ TEST_CASE("libane_mil_compile_with_weights external scale weight", "[mil]") {
 
     libane_mil_release(h);
 }
+

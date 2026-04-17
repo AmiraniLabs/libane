@@ -16,11 +16,8 @@
  *   HwxEmitter::emit() cross-patches the 5 op-specific words in the cached
  *   HWX template in microseconds — no recompile, no XPC to ANECompilerService.
  *   ane_load_hwx() stubs in the patched binary and calls loadWithQoS: through
- *   aned (~20–40 ms).  The compile cost is zero.
- *
- * HOT   (future: IOKit H11ANEIn sel=3 ProgramCreate direct load)
- *   Eliminates the aned loader round-trip entirely.  Emission + execution
- *   becomes pure microsecond cost for any cached shape and known op.
+ *   aned (~20–40 ms).  The compile cost is zero.  This is the production ceiling
+ *   under standard system configuration.
  *
  * ── UNet / transformer use case ──────────────────────────────────────────
  *

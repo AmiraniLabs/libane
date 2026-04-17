@@ -3,7 +3,7 @@
  */
 #include "graph_compiler.hpp"
 #include "graph_validator.hpp"
-#include "mil_backend.hpp"
+#include "hwx_backend.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -138,7 +138,7 @@ std::unique_ptr<CompiledGraph> GraphCompiler::compile(const AneGraph& graph,
 /* ── GraphCompiler::compile (default MilBackend overload) ────────────────── */
 
 std::unique_ptr<CompiledGraph> GraphCompiler::compile(const AneGraph& graph) {
-    MilBackend backend;
+    thread_local HwxBackend backend;
     return compile(graph, backend);
 }
 

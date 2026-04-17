@@ -236,8 +236,7 @@ AneDeviceInfo device_info();
  *
  * This is the Path C runtime entry point used by HwxBackend.  The first
  * call per (channels, seq) shape still incurs a full ane_compile() for the
- * stub; the performance gain materialises when the IOKit direct-load path
- * (sel=3 ProgramCreate) replaces this stub route.
+ * stub; subsequent calls for the same shape skip compilation entirely.
  *
  * @param hwx_bytes      BEEFFACE HWX binary (magic 0xBEEFFACE).
  * @param channels       I/O tensor channels dimension.
