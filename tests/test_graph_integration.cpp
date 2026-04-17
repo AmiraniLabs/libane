@@ -816,6 +816,59 @@ TEST_CASE("T3: rsqrt via C API", "[integration][tier3][ane]") {
     libane_graph_release(g);
 }
 
+TEST_CASE("T3: select via graph API (condition, x, y)", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 32, SP = 64;
+    const size_t N = static_cast<size_t>(C) * SP;
+
+    auto* g = libane_graph_create();
+    REQUIRE(g != nullptr);
+
+    libane_shape_t s; s.dims[0]=1; s.dims[1]=C; s.dims[2]=1; s.dims[3]=SP; s.ndim=4;
+
+    // Input names must be alphabetical: c < x < y (ANE constraint #13)
+    uint32_t c_id = libane_graph_add_input(g, "c", s);
+    uint32_t x_id = libane_graph_add_input(g, "x", s);
+    uint32_t y_id = libane_graph_add_input(g, "y", s);
+    REQUIRE(c_id != LIBANE_INVALID_TENSOR_ID);
+    REQUIRE(x_id != LIBANE_INVALID_TENSOR_ID);
+    REQUIRE(y_id != LIBANE_INVALID_TENSOR_ID);
+
+    uint32_t in_ids[3] = {c_id, x_id, y_id};
+    uint32_t out_id = libane_graph_add_op(g, LIBANE_OP_SELECT, in_ids, 3, s, nullptr, 0);
+    REQUIRE(out_id != LIBANE_INVALID_TENSOR_ID);
+    CHECK(libane_graph_mark_output(g, out_id, "out") == LIBANE_OK);
+
+    libane_compiled_graph_t cg = libane_graph_compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    // Checkerboard condition: even elements = 1.0 (true), odd = 0.0 (false)
+    std::vector<fp16> cond_data(N), x_data(N), y_data(N), out_data(N, to_f16(0.0f));
+    for (size_t i = 0; i < N; ++i) {
+        cond_data[i] = to_f16((i % 2 == 0) ? 1.0f : 0.0f);
+        x_data[i]   = to_f16(1.0f);
+        y_data[i]   = to_f16(-1.0f);
+    }
+
+    const void* in_ptrs[3]  = {cond_data.data(), x_data.data(), y_data.data()};
+    size_t      in_bytes[3] = {N * sizeof(fp16), N * sizeof(fp16), N * sizeof(fp16)};
+    void*  out_ptrs[1]  = {out_data.data()};
+    size_t out_bytes[1] = {N * sizeof(fp16)};
+
+    libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 3, out_ptrs, out_bytes, 1);
+    CHECK(st == LIBANE_OK);
+
+    // Even indices selected from x (1.0), odd from y (-1.0)
+    for (size_t i = 0; i < N; ++i) {
+        float expected = (i % 2 == 0) ? 1.0f : -1.0f;
+        CHECK(near(to_f32(out_data[i]), expected));
+    }
+
+    libane_compiled_graph_release(cg);
+    libane_graph_release(g);
+}
+
 TEST_CASE("T3: execute returns false for mismatched input count", "[integration][tier3][ane]") {
     if (!libane_available()) SKIP("ANE not available");
 
