@@ -16,6 +16,7 @@
 #include "../../include/libane.h"
 #include <cstdint>
 #include <cstddef>
+#include <atomic>
 #include <string>
 #include <functional>
 #include <memory>
@@ -145,7 +146,9 @@ private:
 
     mutable std::shared_mutex mutex_;
 
-    Stats  stats_;
+    std::atomic<uint64_t> hits_{0};
+    std::atomic<uint64_t> misses_{0};
+    std::atomic<uint64_t> evictions_{0};
 
     std::optional<std::string> disk_cache_dir_;
 };

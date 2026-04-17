@@ -37,6 +37,7 @@ bool FusionRules::op_supported(libane_op_t op) {
     case LIBANE_OP_LAYERNORM:
     case LIBANE_OP_LAYER_NORM:
     case LIBANE_OP_TRANSPOSE:
+    case LIBANE_OP_RESHAPE:
         return true;
     case LIBANE_OP_CONV2D:
     case LIBANE_OP_CAST:

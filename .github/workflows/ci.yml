@@ -26,6 +26,51 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  sanitizers:
+    name: ASan + UBSan
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure with sanitizers
+        run: |
+          cmake -B build-san \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLIBANE_BUILD_TESTS=ON \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_OBJCXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build build-san -j$(sysctl -n hw.logicalcpu)
+
+      - name: Test under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-san --output-on-failure
+
+  clang-tidy:
+    name: clang-tidy
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -B build-tidy \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLIBANE_BUILD_TESTS=OFF \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Run clang-tidy
+        run: |
+          find src/ -name '*.cpp' -o -name '*.mm' | \
+            xargs clang-tidy -p build-tidy --warnings-as-errors='bugprone-use-after-move,bugprone-dangling-handle,clang-analyzer-core.*'
+
   wheel:
     name: Build & Check Wheel
     runs-on: macos-latest
@@ -40,7 +85,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install build tools
-        run: pip install scikit-build-core pybind11 build twine
+        run: pip install scikit-build-core pybind11 build twine pytest
 
       - name: Build wheel
         working-directory: bindings/python
@@ -51,6 +96,12 @@ jobs:
       - name: Check wheel
         working-directory: bindings/python
         run: twine check dist/*
+
+      - name: Install built wheel
+        run: pip install --force-reinstall bindings/python/dist/*.whl
+
+      - name: Run Python runtime tests
+        run: pytest -q bindings/python/tests
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4

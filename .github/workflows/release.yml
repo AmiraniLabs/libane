@@ -40,7 +40,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install build tools
-        run: pip install scikit-build-core pybind11 build twine
+        run: pip install scikit-build-core pybind11 build twine pytest
 
       - name: Build wheel
         working-directory: bindings/python
@@ -51,6 +51,12 @@ jobs:
       - name: Check wheel
         working-directory: bindings/python
         run: twine check dist/*
+
+      - name: Install built wheel
+        run: pip install --force-reinstall bindings/python/dist/*.whl
+
+      - name: Run Python runtime tests
+        run: pytest -q bindings/python/tests
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4

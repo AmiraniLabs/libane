@@ -347,6 +347,104 @@ TEST_CASE("transpose: no weights passes", "[validator][weights]") {
     CHECK(r.ok());
 }
 
+TEST_CASE("reshape: same-numel and no-weights passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_RESHAPE, S(512, 128), S(1024, 64), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("reshape: mismatched numel fails", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_RESHAPE, S(512, 128), S(1024, 128), 0);
+    REQUIRE_FALSE(r.ok());
+    bool found = false;
+    for (const auto& e : r.errors)
+        if (e.find("equal input/output element counts") != std::string::npos) found = true;
+    CHECK(found);
+}
+
+TEST_CASE("reshape: unexpected weights fail", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_RESHAPE, S(512, 128), S(1024, 64), 8);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("concat: valid shape relation passes", "[validator][weights]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(256, 128));
+    TensorId b = g.add_input("b", S(512, 128));
+    TensorId c = g.add_op(LIBANE_OP_CONCAT, {a, b}, S(768, 128));
+    g.mark_output(c);
+    CHECK(GraphValidator::validate(g).ok());
+}
+
+TEST_CASE("concat: output channels mismatch fails", "[validator][weights]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(256, 128));
+    TensorId b = g.add_input("b", S(512, 128));
+    TensorId c = g.add_op(LIBANE_OP_CONCAT, {a, b}, S(512, 128));
+    g.mark_output(c);
+    auto r = GraphValidator::validate(g);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("concat: mismatched input seq fails", "[validator][weights]") {
+    AneGraph g;
+    TensorId a = g.add_input("a", S(256, 128));
+    TensorId b = g.add_input("b", S(512, 256));
+    TensorId c = g.add_op(LIBANE_OP_CONCAT, {a, b}, S(768, 128));
+    g.mark_output(c);
+    auto r = GraphValidator::validate(g);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("slice_by_index: output <= input dims passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_SLICE_BY_INDEX, S(512, 128), S(256, 64), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("slice_by_index: output dims larger than input fails", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_SLICE_BY_INDEX, S(256, 64), S(512, 64), 0);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("slice_by_index: unexpected weights fail", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_SLICE_BY_INDEX, S(512, 128), S(256, 64), 8);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("reduce_sum: valid reduced shape passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_REDUCE_SUM, S(512, 128), S(1, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("reduce_sum: output channels must be 1", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_REDUCE_SUM, S(512, 128), S(2, 128), 0);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("reduce_sum: output seq must match input seq", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_REDUCE_SUM, S(512, 128), S(1, 64), 0);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("reduce_mean: valid reduced shape passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_REDUCE_MEAN, S(512, 128), S(1, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("reduce_mean: output channels must be 1", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_REDUCE_MEAN, S(512, 128), S(4, 128), 0);
+    REQUIRE_FALSE(r.ok());
+}
+
+TEST_CASE("reduce_max: valid reduced shape passes", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_REDUCE_MAX, S(512, 128), S(1, 128), 0);
+    CHECK(r.ok());
+}
+
+TEST_CASE("reduce_max: output seq must match input seq", "[validator][weights]") {
+    auto r = validate_single(LIBANE_OP_REDUCE_MAX, S(512, 128), S(1, 64), 0);
+    REQUIRE_FALSE(r.ok());
+}
+
 TEST_CASE("conv2d: always fails in graph API", "[validator][weights]") {
     auto r = validate_single(LIBANE_OP_CONV2D, S(512, 128), S(512, 128), 0);
     REQUIRE_FALSE(r.ok());

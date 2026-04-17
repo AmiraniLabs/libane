@@ -3,6 +3,7 @@
 #include <thread>
 #include <vector>
 #include <atomic>
+#include <chrono>
 
 using namespace libane;
 
@@ -191,6 +192,100 @@ TEST_CASE("Cache is thread-safe under concurrent read/write", "[cache][threads]"
             }
         });
     }
+
+    for (auto& th : threads) th.join();
+    CHECK(errors == 0);
+}
+
+/* ── Concurrent eviction stress ─────────────────────────────────────────── */
+
+TEST_CASE("Cache handles concurrent writes with heavy eviction", "[cache][threads]") {
+    // Tiny budget forces constant eviction under contention
+    CompileCache cache(500); // fits ~5 entries of 100 bytes
+    std::atomic<int> errors{0};
+    constexpr int num_threads = 8;
+    constexpr int ops_per_thread = 200;
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < num_threads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < ops_per_thread; ++i) {
+                uint64_t hash = static_cast<uint64_t>(t * 10000 + i);
+                try {
+                    cache.put(make_entry(LIBANE_OP_MATMUL, hash, 100));
+
+                    // Immediately try to read back — may or may not be evicted
+                    CacheKey k;
+                    k.op = LIBANE_OP_MATMUL;
+                    k.shape = {.dims={1,64,1,512}, .ndim=4};
+                    k.weight_hash = hash;
+                    cache.get(k); // must not crash
+                } catch (...) {
+                    ++errors;
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads) th.join();
+    CHECK(errors == 0);
+
+    auto st = cache.stats();
+    CHECK(st.evictions > 0); // must have evicted under this budget
+}
+
+TEST_CASE("Cache concurrent mixed read/write/flush", "[cache][threads]") {
+    CompileCache cache(16 * 1024); // 16 KB
+    std::atomic<int> errors{0};
+    std::atomic<bool> done{false};
+    std::vector<std::thread> threads;
+
+    // Writers
+    for (int t = 0; t < 4; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < 100; ++i) {
+                uint64_t hash = static_cast<uint64_t>(t * 1000 + i);
+                try {
+                    cache.put(make_entry(LIBANE_OP_SOFTMAX, hash, 100));
+                } catch (...) {
+                    ++errors;
+                }
+            }
+        });
+    }
+
+    // Readers
+    for (int t = 0; t < 4; ++t) {
+        threads.emplace_back([&, t]() {
+            CacheKey k;
+            k.op = LIBANE_OP_SOFTMAX;
+            k.shape = {.dims={1,64,1,512}, .ndim=4};
+            for (int i = 0; i < 200; ++i) {
+                k.weight_hash = static_cast<uint64_t>(i % 400);
+                try {
+                    auto result = cache.get(k);
+                    // If found, entry must have correct op
+                    if (result && result->key.op != LIBANE_OP_SOFTMAX) {
+                        ++errors;
+                    }
+                } catch (...) {
+                    ++errors;
+                }
+            }
+        });
+    }
+
+    // Flusher — periodically clears the cache while others read/write
+    threads.emplace_back([&]() {
+        for (int i = 0; i < 5; ++i) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            try {
+                cache.flush();
+            } catch (...) {
+                ++errors;
+            }
+        }
+    });
 
     for (auto& th : threads) th.join();
     CHECK(errors == 0);

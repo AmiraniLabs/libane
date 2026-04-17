@@ -19,6 +19,30 @@
 // Convenience type alias used throughout libane.cpp
 using fp16_t = libane::fallback::fp16_t;
 
+/**
+ * RAII guard that returns a buffer to the pool on scope exit.
+ * Eliminates duplicated release calls on success/error paths.
+ */
+class PooledBuffer {
+public:
+    PooledBuffer(std::unique_ptr<libane::AneBuffer> buf, libane::BufferPool& pool)
+        : buf_(std::move(buf)), pool_(pool) {}
+    ~PooledBuffer() { if (buf_) pool_.release(std::move(buf_)); }
+
+    PooledBuffer(const PooledBuffer&) = delete;
+    PooledBuffer& operator=(const PooledBuffer&) = delete;
+    PooledBuffer(PooledBuffer&&) = delete;
+    PooledBuffer& operator=(PooledBuffer&&) = delete;
+
+    libane::AneBuffer* operator->() const { return buf_.get(); }
+    libane::AneBuffer& operator*()  const { return *buf_; }
+    explicit operator bool()        const { return buf_ != nullptr; }
+
+private:
+    std::unique_ptr<libane::AneBuffer> buf_;
+    libane::BufferPool& pool_;
+};
+
 /* ── Graph opaque handle definitions (global namespace, per libane.h) ─────── */
 
 struct libane_graph_s {

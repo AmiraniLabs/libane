@@ -933,6 +933,118 @@ MilProgram MilBuilder::mul(int C, int SP) {
     return p;
 }
 
+/* ── sub ─────────────────────────────────────────────────────────────────── */
+
+MilProgram MilBuilder::sub(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tensor_type(shape) + " x, " +
+                                   tensor_type(shape) + " y) {\n";
+    t += "        " + tensor_type(shape) + " z = sub(x=x, y=y)[name=string(\"sub\")];\n";
+    t += "    } -> (z);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── real_div ────────────────────────────────────────────────────────────── */
+
+MilProgram MilBuilder::real_div(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tensor_type(shape) + " x, " +
+                                   tensor_type(shape) + " y) {\n";
+    t += "        " + tensor_type(shape) + " z = real_div(x=x, y=y)[name=string(\"real_div\")];\n";
+    t += "    } -> (z);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── sqrt ────────────────────────────────────────────────────────────────── */
+
+MilProgram MilBuilder::sqrt(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tensor_type(shape) + " x) {\n";
+    t += "        " + tensor_type(shape) + " y = sqrt(x=x)[name=string(\"sqrt\")];\n";
+    t += "    } -> (y);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── log ─────────────────────────────────────────────────────────────────── */
+
+MilProgram MilBuilder::log(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tensor_type(shape) + " x) {\n";
+    // ANE compiler requires explicit epsilon parameter for log/rsqrt.
+    // Standard MIL treats epsilon as optional but ANE silently rejects
+    // programs without it. Discovered by ironmill op verification.
+    // Value 0x1.0cp-17 ≈ 7.63e-6 (fp16).
+    t += "        fp16 lg_eps = const()[name=string(\"lg_eps\"), val=fp16(0x1.0cp-17)];\n";
+    t += "        " + tensor_type(shape) + " y = log(epsilon=lg_eps, x=x)[name=string(\"log\")];\n";
+    t += "    } -> (y);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
+/* ── rsqrt ───────────────────────────────────────────────────────────────── */
+
+MilProgram MilBuilder::rsqrt(int C, int SP) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+
+    std::string t = header();
+    t += "    func main<ios18>(" + tensor_type(shape) + " x) {\n";
+    // ANE compiler requires explicit epsilon parameter for log/rsqrt.
+    // Standard MIL treats epsilon as optional but ANE silently rejects
+    // programs without it. Discovered by ironmill op verification.
+    // Value 0x1.0cp-17 ≈ 7.63e-6 (fp16).
+    t += "        fp16 rs_eps = const()[name=string(\"rs_eps\"), val=fp16(0x1.0cp-17)];\n";
+    t += "        " + tensor_type(shape) + " y = rsqrt(epsilon=rs_eps, x=x)[name=string(\"rsqrt\")];\n";
+    t += "    } -> (y);\n";
+    t += "}\n";
+
+    MilProgram p;
+    p.text        = std::move(t);
+    p.weight_name = "";
+    p.input_shape  = shape;
+    p.output_shape = shape;
+    return p;
+}
+
 /* ── silu ────────────────────────────────────────────────────────────────── */
 
 MilProgram MilBuilder::silu(int C, int SP) {
@@ -1665,6 +1777,36 @@ MilFragment MilBuilder::transpose_fragment(int C, int SP,
     std::string body;
     body += "        tensor<int32, [4]> " + p + "perm = const()[name=string(\"" + p + "perm\"), val=tensor<int32, [4]>([0,3,2,1])];\n";
     body += "        " + tout + " " + out_var + " = transpose(perm=" + p + "perm, x=" + in_var + ")[name=string(\"" + p + "tr\")];\n";
+
+    MilFragment f;
+    f.body         = std::move(body);
+    f.input_name   = in_var;
+    f.output_name  = out_var;
+    f.output_shape = out;
+    return f;
+}
+
+MilFragment MilBuilder::reshape_fragment(int in_C, int in_SP,
+                                          int out_C, int out_SP,
+                                          const std::string& in_var,
+                                          const std::string& out_var) {
+    TensorShape in {1, in_C, 1, in_SP};
+    TensorShape out{1, out_C, 1, out_SP};
+    in.validate();
+    out.validate();
+
+    if (in.numel() != out.numel()) {
+        throw std::invalid_argument(
+            "reshape_fragment: input and output must have identical element counts");
+    }
+
+    const std::string p  = out_var + "_";
+    std::string tout = tensor_type(out);
+
+    std::string body;
+    body += "        tensor<int32, [4]> " + p + "shape = const()[name=string(\"" + p + "shape\"), val=tensor<int32, [4]>([1," +
+            std::to_string(out_C) + ",1," + std::to_string(out_SP) + "])];\n";
+    body += "        " + tout + " " + out_var + " = reshape(shape=" + p + "shape, x=" + in_var + ")[name=string(\"" + p + "rs\")];\n";
 
     MilFragment f;
     f.body         = std::move(body);

@@ -510,12 +510,17 @@ TEST_CASE("All MilBuilder programs have correct program header", "[mil][build]")
     auto p2 = MilBuilder::gelu(32, 128);
     auto p3 = MilBuilder::softmax(8, 64);
     auto p4 = MilBuilder::add(16, 64);
+    auto p4b = MilBuilder::sub(16, 64);
+    auto p4c = MilBuilder::real_div(16, 64);
+    auto p4d = MilBuilder::sqrt(16, 64);
+    auto p4e = MilBuilder::log(16, 64);
+    auto p4f = MilBuilder::rsqrt(16, 64);
     auto p5 = MilBuilder::transpose_cssc(16, 64);
     auto p6 = MilBuilder::mul(16, 64);
     auto p7 = MilBuilder::silu(32, 128);
     auto p8 = MilBuilder::layernorm(32, 128);
 
-    for (auto* p : {&p1, &p2, &p3, &p4, &p5, &p6, &p7, &p8}) {
+    for (auto* p : {&p1, &p2, &p3, &p4, &p4b, &p4c, &p4d, &p4e, &p4f, &p5, &p6, &p7, &p8}) {
         CHECK_THAT(p->text, ContainsSubstring("program(1.3)"));
         CHECK_THAT(p->text, ContainsSubstring("buildInfo"));
         CHECK_THAT(p->text, ContainsSubstring("coremlc-component-MIL"));
@@ -524,13 +529,13 @@ TEST_CASE("All MilBuilder programs have correct program header", "[mil][build]")
     }
 }
 
-TEST_CASE("MIL programs do not use concat (banned on ANE)", "[mil][build]") {
+TEST_CASE("core single-op builders do not emit concat", "[mil][build]") {
     auto p1 = MilBuilder::matmul_conv1x1(32, 64, 128);
     auto p2 = MilBuilder::gelu(32, 128);
     auto p3 = MilBuilder::add(16, 64);
 
     for (auto* p : {&p1, &p2, &p3}) {
-        // concat compiles but crashes at ANE runtime
+        // These builder entrypoints should stay concat-free.
         CHECK_FALSE(p->text.find("concat") != std::string::npos);
     }
 }
@@ -567,4 +572,22 @@ TEST_CASE("add() has inputs in alphabetical order (constraint #13)", "[mil][cons
     size_t x_pos = prog.text.find("> x,");
     size_t y_pos = prog.text.find("> y)");
     CHECK(x_pos < y_pos);  // alphabetical order
+}
+
+TEST_CASE("sub() has inputs in alphabetical order (constraint #13)", "[mil][constraints]") {
+    auto prog = MilBuilder::sub(16, 64);
+    CHECK_THAT(prog.text, ContainsSubstring("> x,"));
+    CHECK_THAT(prog.text, ContainsSubstring("> y)"));
+    size_t x_pos = prog.text.find("> x,");
+    size_t y_pos = prog.text.find("> y)");
+    CHECK(x_pos < y_pos);
+}
+
+TEST_CASE("real_div() has inputs in alphabetical order (constraint #13)", "[mil][constraints]") {
+    auto prog = MilBuilder::real_div(16, 64);
+    CHECK_THAT(prog.text, ContainsSubstring("> x,"));
+    CHECK_THAT(prog.text, ContainsSubstring("> y)"));
+    size_t x_pos = prog.text.find("> x,");
+    size_t y_pos = prog.text.find("> y)");
+    CHECK(x_pos < y_pos);
 }

@@ -82,6 +82,12 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
         return mil::MilBuilder::transpose_fragment(
             in_shape.channels, in_shape.seq, in_var, out_var);
 
+    case LIBANE_OP_RESHAPE:
+        return mil::MilBuilder::reshape_fragment(
+            in_shape.channels, in_shape.seq,
+            out_shape.channels, out_shape.seq,
+            in_var, out_var);
+
     case LIBANE_OP_ADD:
         return mil::MilBuilder::add_fragment(
             out_shape.channels, out_shape.seq,

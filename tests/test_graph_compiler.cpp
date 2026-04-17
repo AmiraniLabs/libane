@@ -119,6 +119,23 @@ TEST_CASE("build_plan: matmul+gelu fuse into one group", "[compiler][fusion]") {
     CHECK(plan.groups[0].output == t2);
 }
 
+TEST_CASE("build_plan: matmul+reshape+gelu fuse into one group", "[compiler][fusion]") {
+    AneGraph g;
+    auto w = matmul_weights(512, 256);
+    TensorId x  = g.add_input("x", S(512, 128));        // numel 65536
+    TensorId t1 = g.add_op(LIBANE_OP_MATMUL,  {x},  S(256, 128),
+                             w.data(), w.size());
+    TensorId t2 = g.add_op(LIBANE_OP_RESHAPE, {t1}, S(1024, 32)); // same numel
+    TensorId t3 = g.add_op(LIBANE_OP_GELU,    {t2}, S(1024, 32));
+    g.mark_output(t3);
+
+    ExecutionPlan plan = GraphCompiler::build_plan(g);
+
+    REQUIRE(plan.groups.size() == 1);
+    CHECK(plan.groups[0].node_ids.size() == 3);
+    CHECK(plan.groups[0].output == t3);
+}
+
 TEST_CASE("build_plan: matmul+rmsnorm+gelu fuse into one group", "[compiler][fusion]") {
     AneGraph g;
     auto wm  = matmul_weights(512, 256);
