@@ -103,6 +103,20 @@ if(LIBANE_BUILD_PYTHON)
   add_subdirectory(bindings/python)
 endif()
 
+# ── Benchmarks ───────────────────────────────────────────────────────────────
+option(LIBANE_BUILD_BENCH "Build dispatch latency benchmark" OFF)
+if(LIBANE_BUILD_BENCH AND APPLE)
+  add_executable(bench_dispatch tools/bench_dispatch/bench_dispatch.cpp)
+  target_link_libraries(bench_dispatch PRIVATE libane_static)
+  target_include_directories(bench_dispatch PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  set_target_properties(bench_dispatch PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tools
+  )
+endif()
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 message(STATUS "libane ${PROJECT_VERSION}")
 message(STATUS "  Build type:    ${CMAKE_BUILD_TYPE}")
