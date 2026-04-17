@@ -878,6 +878,7 @@ libane_mil_handle_t libane_mil_compile(const char*   mil_text,
                                         const void**  weight_data,
                                         const size_t* weight_sizes,
                                         size_t        num_weights) {
+    libane::runtime::initialize();
     if (!mil_text) {
         set_error("libane_mil_compile: null mil_text");
         return nullptr;

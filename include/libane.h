@@ -22,6 +22,20 @@ extern "C" {
 #define LIBANE_VERSION_MINOR   8
 #define LIBANE_VERSION_PATCH   0
 
+/* ── ABI visibility ──────────────────────────────────────────────────────── */
+
+#if defined(_WIN32)
+#  if defined(libane_EXPORTS)
+#    define LIBANE_API __declspec(dllexport)
+#  else
+#    define LIBANE_API __declspec(dllimport)
+#  endif
+#elif defined(__GNUC__) || defined(__clang__)
+#  define LIBANE_API __attribute__((visibility("default")))
+#else
+#  define LIBANE_API
+#endif
+
 /* ── fp16 portability ────────────────────────────────────────────────────── */
 
 #if defined(__ARM_FP16_FORMAT_IEEE) || defined(__aarch64__)
@@ -161,10 +175,10 @@ typedef struct {
  * Thread-safe. Compilation is cached — subsequent calls with the same
  * (op, shape, weight hash) return immediately from cache.
  */
-libane_handle_t libane_compile(libane_op_t op,
-                               libane_shape_t shape,
-                               const void* weights,
-                               size_t weights_len);
+LIBANE_API libane_handle_t libane_compile(libane_op_t op,
+                                          libane_shape_t shape,
+                                          const void* weights,
+                                          size_t weights_len);
 
 /**
  * Compile multiple operations in a single call.
@@ -188,9 +202,9 @@ libane_handle_t libane_compile(libane_op_t op,
  *
  * Thread-safe. Each request is compiled independently and may be cached.
  */
-libane_status_t libane_compile_batch(const libane_compile_request_t* requests,
-                                     size_t num_requests,
-                                     libane_handle_t* out_handles);
+LIBANE_API libane_status_t libane_compile_batch(const libane_compile_request_t* requests,
+                                                size_t num_requests,
+                                                libane_handle_t* out_handles);
 
 /**
  * Execute a compiled program.
@@ -201,10 +215,10 @@ libane_status_t libane_compile_batch(const libane_compile_request_t* requests,
  * @param shape  Runtime shape (must match compiled shape).
  * @return       LIBANE_OK on success.
  */
-libane_status_t libane_execute(libane_handle_t h,
-                               const void* input,
-                               void* output,
-                               libane_shape_t shape);
+LIBANE_API libane_status_t libane_execute(libane_handle_t h,
+                                          const void* input,
+                                          void* output,
+                                          libane_shape_t shape);
 
 /**
  * Execute a compiled program with two inputs (e.g., elementwise ops, out_proj_add).
@@ -219,11 +233,11 @@ libane_status_t libane_execute(libane_handle_t h,
  * @param shape   Runtime shape (must match compiled shape).
  * @return        LIBANE_OK on success, negative error code on failure.
  */
-libane_status_t libane_execute2(libane_handle_t h,
-                                const void* input0,
-                                const void* input1,
-                                void* output,
-                                libane_shape_t shape);
+LIBANE_API libane_status_t libane_execute2(libane_handle_t h,
+                                           const void* input0,
+                                           const void* input1,
+                                           void* output,
+                                           libane_shape_t shape);
 
 /**
  * Re-load a compiled program into ANE SRAM without recompiling.
@@ -245,13 +259,13 @@ libane_status_t libane_execute2(libane_handle_t h,
  *         LIBANE_ERR_EXECUTE_FAILED if the reload fails (handle is then
  *         invalid — call libane_release() + libane_compile()).
  */
-libane_status_t libane_delta_reload(libane_handle_t h);
+LIBANE_API libane_status_t libane_delta_reload(libane_handle_t h);
 
 /**
  * Release a compiled program handle and return resources to the pool.
  * Safe to call with NULL.
  */
-void libane_release(libane_handle_t h);
+LIBANE_API void libane_release(libane_handle_t h);
 
 /* ── High-level convenience ──────────────────────────────────────────────── */
 
@@ -263,32 +277,32 @@ void libane_release(libane_handle_t h);
  *
  * @return LIBANE_OK on success, negative error code on failure.
  */
-libane_status_t libane_matmul_f16(const libane_f16_t* A,
-                                  const libane_f16_t* B,
-                                  libane_f16_t* C,
-                                  int M, int K, int N);
+LIBANE_API libane_status_t libane_matmul_f16(const libane_f16_t* A,
+                                              const libane_f16_t* B,
+                                              libane_f16_t* C,
+                                              int M, int K, int N);
 
 /**
  * Single-call fp32 matrix multiplication: C = A × B (casts fp32→fp16→fp32).
  */
-libane_status_t libane_matmul_f32(const float* A,
-                                  const float* B,
-                                  float* C,
-                                  int M, int K, int N);
+LIBANE_API libane_status_t libane_matmul_f32(const float* A,
+                                              const float* B,
+                                              float* C,
+                                              int M, int K, int N);
 
 /* ── Status / introspection ──────────────────────────────────────────────── */
 
 /** @return 1 if ANE is accessible and initialized, 0 if running in fallback mode. */
-int libane_available(void);
+LIBANE_API int libane_available(void);
 
-/** @return Semantic version string, e.g. "0.1.0". */
-const char* libane_version(void);
+/** @return Semantic version string, e.g. "0.8.0". */
+LIBANE_API const char* libane_version(void);
 
 /** @return Human-readable description of the last error on the calling thread. */
-const char* libane_last_error(void);
+LIBANE_API const char* libane_last_error(void);
 
 /** Set the global log level. Default: LIBANE_LOG_ERROR. */
-void libane_set_log_level(libane_log_level_t level);
+LIBANE_API void libane_set_log_level(libane_log_level_t level);
 
 /**
  * Force a specific backend.
@@ -297,13 +311,13 @@ void libane_set_log_level(libane_log_level_t level);
  *                 "cpu" to force CPU fallback,
  *                 NULL to restore auto-detect (default).
  */
-void libane_set_backend(const char* backend);
+LIBANE_API void libane_set_backend(const char* backend);
 
 /** Flush the compile cache and release all cached program handles. */
-void libane_cache_flush(void);
+LIBANE_API void libane_cache_flush(void);
 
 /** Return current cache usage in bytes. */
-size_t libane_cache_size_bytes(void);
+LIBANE_API size_t libane_cache_size_bytes(void);
 
 /* ── Device introspection ────────────────────────────────────────────────── */
 
@@ -315,7 +329,7 @@ size_t libane_cache_size_bytes(void);
  *
  * architecture  — chip generation string, e.g. "h15g" (M3) or "h16g" (M4).
  * core_count    — number of ANE inference cores; 0 if unavailable.
- * sram_bytes    — on-chip SRAM capacity in bytes; 0 if unavailable.
+ * num_anes      — number of ANE units; 0 if unavailable.
  * available     — 1 if _ANEDeviceInfo was successfully queried, 0 otherwise.
  */
 typedef struct {
@@ -335,7 +349,7 @@ typedef struct {
  *         with zeros and the call succeeds).
  *         LIBANE_ERR_INVALID_ARG if out is NULL.
  */
-libane_status_t libane_device_info(libane_device_info_t* out);
+LIBANE_API libane_status_t libane_device_info(libane_device_info_t* out);
 
 /**
  * Per-chip ANE tensor shape limits.
@@ -374,14 +388,14 @@ typedef struct {
  * to conservative universally-safe values otherwise.  See the SRAM BUDGET
  * WARNING on libane_shape_limits_t — both limits cannot be hit simultaneously.
  */
-libane_shape_limits_t libane_get_shape_limits(void);
+LIBANE_API libane_shape_limits_t libane_get_shape_limits(void);
 
 /* ── Performance statistics ──────────────────────────────────────────────── */
 
 /**
  * Per-execution ANE hardware counters sampled via IOReport.
  *
- * Populated by libane_execute_with_stats(). Requires no entitlements or root.
+ * Populated by libane_mil_execute_stats(). Requires no entitlements or root.
  * If IOReport is unavailable (non-Apple-Silicon target), available == 0 and
  * all numeric fields are zero.
  *
@@ -421,25 +435,25 @@ typedef struct libane_compiled_graph_s* libane_compiled_graph_t;
  * Create a new, empty graph builder.
  * @return Non-null handle, or NULL on OOM. Must be freed with libane_graph_release().
  */
-libane_graph_t libane_graph_create(void);
+LIBANE_API libane_graph_t libane_graph_create(void);
 
 /**
  * Free a graph builder. Safe to call with NULL.
  * Does NOT affect any compiled graph derived from it.
  */
-void libane_graph_release(libane_graph_t g);
+LIBANE_API void libane_graph_release(libane_graph_t g);
 
 /**
  * Declare a graph input tensor.
  *
  * @param g      Graph handle.
  * @param name   Human-readable name (used in debug output).
- * @param shape  ANE tensor shape [1, C, 1, S].  S must be a multiple of 8.
+ * @param shape  ANE tensor shape [1, C, 1, S].  S must be a multiple of 16.
  * @return       Tensor ID, or LIBANE_INVALID_TENSOR_ID on error.
  */
-uint32_t libane_graph_add_input(libane_graph_t  g,
-                                 const char*     name,
-                                 libane_shape_t  shape);
+LIBANE_API uint32_t libane_graph_add_input(libane_graph_t  g,
+                                            const char*     name,
+                                            libane_shape_t  shape);
 
 /**
  * Add an operation node to the graph.
@@ -454,13 +468,13 @@ uint32_t libane_graph_add_input(libane_graph_t  g,
  * @return             Tensor ID of the new output tensor,
  *                     or LIBANE_INVALID_TENSOR_ID on error.
  */
-uint32_t libane_graph_add_op(libane_graph_t       g,
-                              libane_op_t          op,
-                              const uint32_t*      input_ids,
-                              size_t               num_inputs,
-                              libane_shape_t       output_shape,
-                              const void*          weights,
-                              size_t               weights_len);
+LIBANE_API uint32_t libane_graph_add_op(libane_graph_t       g,
+                                         libane_op_t          op,
+                                         const uint32_t*      input_ids,
+                                         size_t               num_inputs,
+                                         libane_shape_t       output_shape,
+                                         const void*          weights,
+                                         size_t               weights_len);
 
 /**
  * Mark a tensor as a graph output.
@@ -471,9 +485,9 @@ uint32_t libane_graph_add_op(libane_graph_t       g,
  * @param name      Optional output name (may be NULL).
  * @return          LIBANE_OK on success, LIBANE_ERR_INVALID_ARG on bad tensor_id.
  */
-libane_status_t libane_graph_mark_output(libane_graph_t g,
-                                          uint32_t       tensor_id,
-                                          const char*    name);
+LIBANE_API libane_status_t libane_graph_mark_output(libane_graph_t g,
+                                                     uint32_t       tensor_id,
+                                                     const char*    name);
 
 /**
  * Add a piecewise-linear custom activation op to the graph.
@@ -492,13 +506,13 @@ libane_status_t libane_graph_mark_output(libane_graph_t g,
  * @param n_samples    Number of sample points (≥ 2; 33 = 32 segments recommended).
  * @return             Tensor ID of the output, or LIBANE_INVALID_TENSOR_ID on error.
  */
-uint32_t libane_graph_add_pwl_activation(libane_graph_t g,
-                                          uint32_t       input_id,
-                                          libane_shape_t output_shape,
-                                          float          x_min,
-                                          float          x_max,
-                                          const float*   samples,
-                                          uint32_t       n_samples);
+LIBANE_API uint32_t libane_graph_add_pwl_activation(libane_graph_t g,
+                                                     uint32_t       input_id,
+                                                     libane_shape_t output_shape,
+                                                     float          x_min,
+                                                     float          x_max,
+                                                     const float*   samples,
+                                                     uint32_t       n_samples);
 
 /**
  * Validate, fuse, and compile the graph for ANE execution.
@@ -508,12 +522,12 @@ uint32_t libane_graph_add_pwl_activation(libane_graph_t g,
  *           (validation error, ANE unavailable, or compile error).
  *           Must be freed with libane_compiled_graph_release().
  */
-libane_compiled_graph_t libane_graph_compile(libane_graph_t g);
+LIBANE_API libane_compiled_graph_t libane_graph_compile(libane_graph_t g);
 
 /**
  * Free a compiled graph. Safe to call with NULL.
  */
-void libane_compiled_graph_release(libane_compiled_graph_t cg);
+LIBANE_API void libane_compiled_graph_release(libane_compiled_graph_t cg);
 
 /**
  * Execute a compiled graph.
@@ -529,19 +543,19 @@ void libane_compiled_graph_release(libane_compiled_graph_t cg);
  * @param num_outputs  Length of output_ptrs / output_bytes.
  * @return             LIBANE_OK on success, negative status on failure.
  */
-libane_status_t libane_graph_execute(libane_compiled_graph_t cg,
-                                      const void**            input_ptrs,
-                                      const size_t*           input_bytes,
-                                      size_t                  num_inputs,
-                                      void**                  output_ptrs,
-                                      const size_t*           output_bytes,
-                                      size_t                  num_outputs);
+LIBANE_API libane_status_t libane_graph_execute(libane_compiled_graph_t cg,
+                                                 const void**            input_ptrs,
+                                                 const size_t*           input_bytes,
+                                                 size_t                  num_inputs,
+                                                 void**                  output_ptrs,
+                                                 const size_t*           output_bytes,
+                                                 size_t                  num_outputs);
 
 /* ── Raw MIL probe API ───────────────────────────────────────────────────── */
 
 /**
  * Opaque handle to a compiled raw MIL program.
- * Created by libane_mil_compile() / libane_mil_compile_with_weights().
+ * Created by libane_mil_compile().
  * Destroyed by libane_mil_release().
  *
  * The struct is defined outside the libane namespace so the C ABI typedef
@@ -564,11 +578,11 @@ typedef struct libane_mil_program_s* libane_mil_handle_t;
  *          The handle must be freed with libane_mil_release().
  *          Requires ANE; returns NULL when ANE is unavailable.
  */
-libane_mil_handle_t libane_mil_compile(const char*   mil_text,
-                                        const char**  weight_names,
-                                        const void**  weight_data,
-                                        const size_t* weight_sizes,
-                                        size_t        num_weights);
+LIBANE_API libane_mil_handle_t libane_mil_compile(const char*   mil_text,
+                                                   const char**  weight_names,
+                                                   const void**  weight_data,
+                                                   const size_t* weight_sizes,
+                                                   size_t        num_weights);
 
 /**
  * Execute a compiled MIL program.
@@ -587,13 +601,13 @@ libane_mil_handle_t libane_mil_compile(const char*   mil_text,
  *
  * @return LIBANE_OK on success, negative status on failure.
  */
-libane_status_t libane_mil_execute(libane_mil_handle_t h,
-                                    const void**  in_data,
-                                    const size_t* in_sizes,
-                                    size_t        num_inputs,
-                                    void**        out_data,
-                                    const size_t* out_sizes,
-                                    size_t        num_outputs);
+LIBANE_API libane_status_t libane_mil_execute(libane_mil_handle_t h,
+                                               const void**  in_data,
+                                               const size_t* in_sizes,
+                                               size_t        num_inputs,
+                                               void**        out_data,
+                                               const size_t* out_sizes,
+                                               size_t        num_outputs);
 
 /**
  * Execute a compiled MIL program and return hardware performance counters.
@@ -601,9 +615,8 @@ libane_status_t libane_mil_execute(libane_mil_handle_t h,
  * Identical to libane_mil_execute() but populates *stats_out after execution.
  * Pass stats_out = NULL to skip stat collection (equivalent to libane_mil_execute).
  *
- * _ANEPerformanceStats may require private entitlements on some firmware
- * versions.  If unavailable, stats_out->hw_execution_time_ms will be -1.0
- * and execution proceeds normally (not an error).
+ * If IOReport is unavailable, stats_out->available will be 0 and execution
+ * proceeds normally (not an error).
  *
  * @param h           Handle from libane_mil_compile().
  * @param in_data     Array of pointers to fp16 input data.
@@ -616,14 +629,14 @@ libane_status_t libane_mil_execute(libane_mil_handle_t h,
  *
  * @return LIBANE_OK on success, negative status on failure.
  */
-libane_status_t libane_mil_execute_stats(libane_mil_handle_t h,
-                                          const void**         in_data,
-                                          const size_t*        in_sizes,
-                                          size_t               num_inputs,
-                                          void**               out_data,
-                                          const size_t*        out_sizes,
-                                          size_t               num_outputs,
-                                          libane_perf_stats_t* stats_out);
+LIBANE_API libane_status_t libane_mil_execute_stats(libane_mil_handle_t  h,
+                                                     const void**         in_data,
+                                                     const size_t*        in_sizes,
+                                                     size_t               num_inputs,
+                                                     void**               out_data,
+                                                     const size_t*        out_sizes,
+                                                     size_t               num_outputs,
+                                                     libane_perf_stats_t* stats_out);
 
 /**
  * Return whether the last ANE load for this program spilled to DRAM.
@@ -646,12 +659,12 @@ libane_status_t libane_mil_execute_stats(libane_mil_handle_t h,
  * @param h  Handle from libane_mil_compile().
  * @return   1 if SRAM spill was detected, 0 if not, -1 on null handle.
  */
-int libane_mil_sram_spill(libane_mil_handle_t h);
+LIBANE_API int libane_mil_sram_spill(libane_mil_handle_t h);
 
 /**
  * Free a compiled MIL program.  Safe to call with NULL.
  */
-void libane_mil_release(libane_mil_handle_t h);
+LIBANE_API void libane_mil_release(libane_mil_handle_t h);
 
 #ifdef __cplusplus
 }

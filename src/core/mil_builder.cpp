@@ -2255,10 +2255,29 @@ MilFragment MilBuilder::pwl_activation_fragment(int C, int SP,
     }
 
     auto fp16_lit = [](float v) -> std::string {
-        // Emit enough precision for fp16 round-trip
+        // fp16 subnormal minimum ~5.96e-8; anything smaller rounds to 0.
+        // MIL fp16() literals don't accept scientific notation ('e' form).
+        constexpr float kFp16SubnormalMin = 5.96e-8f;
+        if (std::abs(v) < kFp16SubnormalMin) return "0.0";
         std::ostringstream ss;
         ss << std::setprecision(6) << v;
-        return ss.str();
+        std::string s = ss.str();
+        if (s.find('e') != std::string::npos || s.find('E') != std::string::npos) {
+            // Reformat without scientific notation
+            std::ostringstream ss2;
+            ss2 << std::fixed << std::setprecision(7) << v;
+            s = ss2.str();
+            // Trim trailing zeros but keep at least one digit after decimal
+            auto dot = s.find('.');
+            if (dot != std::string::npos) {
+                size_t last = s.find_last_not_of('0');
+                if (last == dot) ++last;
+                s = s.substr(0, last + 1);
+            }
+        } else if (s.find('.') == std::string::npos) {
+            s += ".0";
+        }
+        return s;
     };
 
     std::string body;
