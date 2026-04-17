@@ -74,7 +74,9 @@ jobs:
       - name: Run clang-tidy
         run: |
           find src/ -name '*.cpp' -o -name '*.mm' | \
-            xargs clang-tidy -p build-tidy --warnings-as-errors='bugprone-use-after-move,bugprone-dangling-handle,clang-analyzer-core.*'
+            xargs clang-tidy -p build-tidy \
+              --checks='bugprone-use-after-move,bugprone-dangling-handle,clang-analyzer-core.*' \
+              --warnings-as-errors='bugprone-use-after-move,bugprone-dangling-handle,clang-analyzer-core.*'
 
   wheel:
     name: Build & Check Wheel

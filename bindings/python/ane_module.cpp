@@ -1,5 +1,5 @@
 /**
- * Python bindings for libane v0.7.1.
+ * Python bindings for libane v0.8.0.
  *
  * PyPI package: ane · Install: pip install ane
  * Requires: pybind11, numpy
@@ -495,114 +495,6 @@ private:
     std::vector<std::vector<int>>     out_shapes_;
 };
 
-/* ── CompiledMil class ───────────────────────────────────────────────────── */
-
-class PyMilProgram {
-public:
-    explicit PyMilProgram(libane_mil_handle_t h) : h_(h) {}
-    ~PyMilProgram() { libane_mil_release(h_); }
-
-    PyMilProgram(const PyMilProgram&)            = delete;
-    PyMilProgram& operator=(const PyMilProgram&) = delete;
-
-    py::list run(const std::vector<py::array>& inputs_raw,
-                 const std::vector<size_t>&    out_numel) {
-        py::module_ np = py::module_::import("numpy");
-
-        std::vector<py::array>       inputs;
-        std::vector<py::buffer_info> in_bufs;
-        inputs.reserve(inputs_raw.size());
-        for (auto& a : inputs_raw)
-            inputs.push_back(np.attr("ascontiguousarray")(
-                np.attr("asarray")(a, "dtype"_a="float16")));
-        for (auto& a : inputs)
-            in_bufs.push_back(a.request());
-
-        std::vector<const void*> in_ptrs;
-        std::vector<size_t>      in_bytes;
-        for (auto& buf : in_bufs) {
-            in_ptrs.push_back(buf.ptr);
-            in_bytes.push_back(static_cast<size_t>(buf.size) * buf.itemsize);
-        }
-
-        std::vector<py::array> out_arrays;
-        std::vector<void*>     out_ptrs;
-        std::vector<size_t>    out_bytes;
-        for (auto n : out_numel) {
-            out_arrays.emplace_back(
-                np.attr("empty")(static_cast<py::ssize_t>(n), "dtype"_a="float16"));
-            auto ob = out_arrays.back().request();
-            out_ptrs.push_back(ob.ptr);
-            out_bytes.push_back(n * sizeof(uint16_t));
-        }
-
-        libane_status_t st = libane_mil_execute(
-            h_,
-            in_ptrs.empty()  ? nullptr : in_ptrs.data(),
-            in_bytes.empty() ? nullptr : in_bytes.data(),
-            in_ptrs.size(),
-            out_ptrs.empty()  ? nullptr : out_ptrs.data(),
-            out_bytes.empty() ? nullptr : out_bytes.data(),
-            out_ptrs.size());
-
-        if (st != LIBANE_OK)
-            throw std::runtime_error(
-                std::string("mil execute failed: ") + libane_last_error());
-
-        py::list result;
-        for (auto& a : out_arrays) result.append(a);
-        return result;
-    }
-
-private:
-    libane_mil_handle_t h_;
-};
-
-static PyMilProgram* py_compile_mil(const std::string& mil_text) {
-    auto h = libane_mil_compile(mil_text.c_str(), nullptr, nullptr, nullptr, 0);
-    if (!h)
-        throw std::runtime_error(
-            std::string("compile_mil failed: ") + libane_last_error());
-    return new PyMilProgram(h);
-}
-
-static PyMilProgram* py_compile_mil_with_weights(const std::string& mil_text,
-                                                   py::dict           weights_dict) {
-    py::module_ np = py::module_::import("numpy");
-
-    std::vector<std::string>     names_str;
-    std::vector<py::array>       w_arrays;
-    std::vector<py::buffer_info> w_bufs;
-
-    for (auto& item : weights_dict) {
-        names_str.push_back(py::str(item.first).cast<std::string>());
-        w_arrays.push_back(np.attr("ascontiguousarray")(
-            np.attr("asarray")(item.second, "dtype"_a="float16")));
-    }
-    for (auto& a : w_arrays) w_bufs.push_back(a.request());
-
-    std::vector<const char*> name_ptrs;
-    std::vector<const void*> data_ptrs;
-    std::vector<size_t>      size_vals;
-    for (auto& s : names_str) name_ptrs.push_back(s.c_str());
-    for (auto& b : w_bufs) {
-        data_ptrs.push_back(b.ptr);
-        size_vals.push_back(static_cast<size_t>(b.size) * b.itemsize);
-    }
-
-    auto h = libane_mil_compile(
-        mil_text.c_str(),
-        name_ptrs.empty() ? nullptr : name_ptrs.data(),
-        data_ptrs.empty() ? nullptr : data_ptrs.data(),
-        size_vals.empty() ? nullptr : size_vals.data(),
-        name_ptrs.size());
-
-    if (!h)
-        throw std::runtime_error(
-            std::string("compile_mil failed: ") + libane_last_error());
-    return new PyMilProgram(h);
-}
-
 /* ── Graph.compile() ─────────────────────────────────────────────────────── */
 
 static PyCompiledGraph* py_compile(PyGraph& g) {
@@ -617,7 +509,7 @@ static PyCompiledGraph* py_compile(PyGraph& g) {
 
 PYBIND11_MODULE(ane, m) {
     m.doc() = R"(
-ane — Apple Neural Engine Python bindings (libane v0.7.1)
+ane — Apple Neural Engine Python bindings (libane v0.8.0)
 Amirani Labs
 
 ANE-accelerated ML operations with automatic CPU fallback.
@@ -654,46 +546,6 @@ Not for App Store submission.
           "ANE softmax over last dimension. Falls back to numpy.");
     m.def("gelu",      &py_gelu,      py::arg("x"),
           "ANE GELU (tanh approximation). Falls back to numpy.");
-
-    /* ── Raw MIL probe API ───────────────────────────────────────────── */
-    py::class_<PyMilProgram>(m, "CompiledMil", R"(
-Compiled raw MIL program.  Returned by compile_mil() and compile_mil_with_weights().
-
-Use the ane.probe module for a higher-level interface.
-)")
-        .def("run", &PyMilProgram::run,
-             py::arg("inputs"), py::arg("output_sizes"),
-             "Execute the compiled MIL program.\n\n"
-             "Args:\n"
-             "    inputs: list of np.ndarray (converted to fp16 internally);\n"
-             "            must be in alphabetical order of MIL parameter names.\n"
-             "    output_sizes: list of int — number of fp16 elements per output.\n\n"
-             "Returns:\n"
-             "    list of np.float16 arrays, one per output.");
-
-    m.def("compile_mil", &py_compile_mil,
-          py::arg("mil_text"),
-          py::return_value_policy::take_ownership,
-          "Compile a raw MIL program (no external weights).\n\n"
-          "Args:\n"
-          "    mil_text: UTF-8 MIL source including buildInfo header.\n\n"
-          "Returns:\n"
-          "    CompiledMil ready for .run().\n\n"
-          "Raises:\n"
-          "    RuntimeError if ANE is unavailable or compilation fails.");
-
-    m.def("compile_mil_with_weights", &py_compile_mil_with_weights,
-          py::arg("mil_text"), py::arg("weights"),
-          py::return_value_policy::take_ownership,
-          "Compile a raw MIL program with external weight files.\n\n"
-          "Args:\n"
-          "    mil_text: UTF-8 MIL source.\n"
-          "    weights:  dict mapping filename -> fp16 np.ndarray.\n"
-          "              Filenames must match file() references in the MIL text.\n\n"
-          "Returns:\n"
-          "    CompiledMil ready for .run().\n\n"
-          "Raises:\n"
-          "    RuntimeError if ANE is unavailable or compilation fails.");
 
     /* ── Graph API ────────────────────────────────────────────────────── */
     py::class_<PyGraph>(m, "Graph", R"(
