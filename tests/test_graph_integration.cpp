@@ -490,9 +490,13 @@ TEST_CASE("T3: slice_by_index via C API", "[integration][tier3][ane]") {
     libane_status_t st = libane_graph_execute(cg, in_ptrs, in_bytes, 1, out_ptrs, out_bytes, 1);
     CHECK(st == LIBANE_OK);
 
-    // Slice is origin-aligned prefix: output contains first OC*OSP elements.
-    for (size_t i = 0; i < out_data.size(); ++i) {
-        CHECK(near(to_f32(out_data[i]), to_f32(in_data[i])));
+    // Slice is origin-aligned: out[r][c] == in[r][c] for r<OC, c<OSP.
+    // in_data is laid out with stride SP; out_data with stride OSP.
+    for (int r = 0; r < OC; ++r) {
+        for (int c = 0; c < OSP; ++c) {
+            CHECK(near(to_f32(out_data[static_cast<size_t>(r) * OSP + c]),
+                       to_f32(in_data [static_cast<size_t>(r) * SP  + c])));
+        }
     }
 
     libane_compiled_graph_release(cg);

@@ -182,17 +182,21 @@ TEST_CASE("concat_fragment: axis and interleave const params emitted", "[fragmen
     CHECK(has(f.body, "cat = concat(axis=cat_ax, interleave=cat_id, values=(lhs, rhs))"));
 }
 
-TEST_CASE("slice_by_index_fragment: begin/end/strides const params emitted", "[fragment]") {
+TEST_CASE("slice_by_index_fragment: conv-based selection emitted", "[fragment]") {
+    // C: 512→256, S: 128→64 — both axes need selection convs
     auto f = MilBuilder::slice_by_index_fragment(512, 128, 256, 64, "x", "sl");
     CHECK(f.input_name == "x");
     CHECK(f.side_input_name.empty());
     CHECK(f.output_shape == S(256, 64));
-    CHECK(has(f.body, "sl_bg = const()"));
-    CHECK(has(f.body, "val=tensor<int32, [4]>([0,0,0,0])"));
-    CHECK(has(f.body, "sl_ed = const()"));
-    CHECK(has(f.body, "val=tensor<int32, [4]>([1,256,1,64])"));
-    CHECK(has(f.body, "sl_st = const()"));
-    CHECK(has(f.body, "slice_by_index(begin=sl_bg, end=sl_ed, strides=sl_st, x=x)"));
+    // C-selection: 1×1 conv with weight file sl_csel.bin
+    CHECK(has(f.body, "sl_ccv"));          // C-selection conv output variable
+    CHECK(has(f.body, "sl_csel.bin"));     // C-selection weight file
+    CHECK(has(f.body, "conv(dilations="));  // conv op present
+    // S-selection: transpose → conv → transpose
+    CHECK(has(f.body, "sl_str1"));         // first transpose
+    CHECK(has(f.body, "sl_ssel.bin"));     // S-selection weight file
+    CHECK(has(f.body, "sl_str2"));         // second transpose
+    CHECK(f.weight_file == "sl_csel.bin");
 }
 
 TEST_CASE("reduce_sum_fragment: axis+keep_dims const params emitted", "[fragment]") {
@@ -333,7 +337,8 @@ TEST_CASE("build_fused: matmul -> slice_by_index chain", "[fused]") {
     auto f1 = MilBuilder::slice_by_index_fragment(512, 128, 256, 64, "proj", "out");
     auto prog = MilBuilder::build_fused("x", S(512, 128), {f0, f1});
 
-    CHECK(has(prog.text, "out = slice_by_index(begin=out_bg, end=out_ed, strides=out_st, x=proj)"));
+    CHECK(has(prog.text, "conv(dilations="));  // C-selection conv present
+    CHECK(has(prog.text, "out_csel.bin"));     // weight file reference
     CHECK(has(prog.text, "} -> (out)"));
     CHECK(prog.output_shape == S(256, 64));
 }

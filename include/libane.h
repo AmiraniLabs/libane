@@ -107,6 +107,19 @@ typedef enum {
 
     /* ── Learnable activation ────────────────────────────────────────────── */
     LIBANE_OP_PWL_ACTIVATION = 48,  /**< Piecewise-linear custom activation; use libane_graph_add_pwl_activation() */
+
+    /* ── General slice ───────────────────────────────────────────────────── */
+    /**
+     * General slice with begin, end, and stride per dimension.
+     *
+     * weights (optional): 8 × int32 packed as [ begin[4], stride[4] ].
+     *   begin[i]  — start index for dimension i (default 0).
+     *   stride[i] — step for dimension i (default 1; negative unsupported).
+     * end[i] is computed as begin[i] + stride[i] * output_shape[i].
+     * NULL weights → begin=[0,0,0,0], stride=[1,1,1,1] (equivalent to
+     * SLICE_BY_INDEX with output_shape as the end).
+     */
+    LIBANE_OP_SLICE = 49,
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */

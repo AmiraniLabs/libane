@@ -60,6 +60,7 @@ PIXEL_SHUFFLE: int
 CAST: int
 CONV2D: int
 PWL_ACTIVATION: int
+SLICE: int
 
 # ── Log level constants ───────────────────────────────────────────────────────
 

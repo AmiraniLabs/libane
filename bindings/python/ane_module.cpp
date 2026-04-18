@@ -576,8 +576,15 @@ public:
 
         if (!weights_obj.is_none()) {
             py::module_ np = py::module_::import("numpy");
-            w_arr = np.attr("ascontiguousarray")(
-                np.attr("asarray")(weights_obj, "dtype"_a="float16"));
+            // SLICE weights are int32 (begin[4], stride[4]); pass raw bytes.
+            // All other ops expect fp16 weights.
+            if (op == LIBANE_OP_SLICE) {
+                w_arr = np.attr("ascontiguousarray")(
+                    np.attr("asarray")(weights_obj, "dtype"_a="int32"));
+            } else {
+                w_arr = np.attr("ascontiguousarray")(
+                    np.attr("asarray")(weights_obj, "dtype"_a="float16"));
+            }
             auto wb = w_arr.request();
             wptr = wb.ptr;
             wlen = static_cast<size_t>(wb.size) * wb.itemsize;
@@ -1027,6 +1034,7 @@ Raises:
     m.attr("CAST")      = static_cast<int>(LIBANE_OP_CAST);
     m.attr("CONV2D")    = static_cast<int>(LIBANE_OP_CONV2D);
     m.attr("PWL_ACTIVATION") = static_cast<int>(LIBANE_OP_PWL_ACTIVATION);
+    m.attr("SLICE")     = static_cast<int>(LIBANE_OP_SLICE);
 
     /* ── Log level constants ──────────────────────────────────────────── */
     m.attr("LOG_SILENT") = static_cast<int>(LIBANE_LOG_SILENT);

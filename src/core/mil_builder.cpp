@@ -1875,6 +1875,31 @@ MilFragment MilBuilder::concat_fragment(int in0_C, int in1_C, int SP,
     return f;
 }
 
+// ── Shared helper: emit a 1×1 conv body that selects a channel subspace ──────
+// Emits MIL for: [1, in_C, 1, SP] → [1, out_C, 1, SP]
+// `wtype`  : "tensor<fp16, [out_C,in_C,1,1]>"  (pre-computed by caller)
+// `tout`   : "tensor<fp16, [1,out_C,1,SP]>"    (pre-computed by caller)
+// `wref`   : full file_ref(...) expression      (pre-computed by caller)
+// `prefix` must be unique within the surrounding function scope.
+static void emit_chan_conv(std::string& body, const std::string& prefix,
+                           const std::string& in_var,
+                           const std::string& out_var,
+                           const std::string& wtype,
+                           const std::string& tout,
+                           const std::string& wref) {
+    body += "        string "            + prefix + "pt = const()[name=string(\"" + prefix + "pt\"), val=string(\"valid\")];\n";
+    body += "        tensor<int32, [2]> "+ prefix + "st = const()[name=string(\"" + prefix + "st\"), val=tensor<int32, [2]>([1,1])];\n";
+    body += "        tensor<int32, [4]> "+ prefix + "pd = const()[name=string(\"" + prefix + "pd\"), val=tensor<int32, [4]>([0,0,0,0])];\n";
+    body += "        tensor<int32, [2]> "+ prefix + "dl = const()[name=string(\"" + prefix + "dl\"), val=tensor<int32, [2]>([1,1])];\n";
+    body += "        int32 "             + prefix + "gr = const()[name=string(\"" + prefix + "gr\"), val=int32(1)];\n";
+    body += "        " + wtype + " "    + prefix + "W  = const()[name=string(\"" + prefix + "W\"), val=" + wref + "];\n";
+    body += "        " + tout + " " + out_var
+            + " = conv(dilations=" + prefix + "dl, groups=" + prefix + "gr"
+            + ", pad=" + prefix + "pd, pad_type=" + prefix + "pt"
+            + ", strides=" + prefix + "st, weight=" + prefix + "W"
+            + ", x=" + in_var + ")[name=string(\"" + prefix + "cv\")];\n";
+}
+
 MilFragment MilBuilder::slice_by_index_fragment(int in_C, int in_SP,
                                                  int out_C, int out_SP,
                                                  const std::string& in_var,
@@ -1883,18 +1908,118 @@ MilFragment MilBuilder::slice_by_index_fragment(int in_C, int in_SP,
     out.validate();
     if (out_C > in_C || out_SP > in_SP)
         throw std::invalid_argument("slice_by_index_fragment: output shape must be <= input shape");
+
+    const bool c_sliced = (out_C  != in_C);
+    const bool s_sliced = (out_SP != in_SP);
     const std::string p = out_var + "_";
-    std::string tout = tensor_type(out);
     std::string body;
-    body += "        tensor<int32, [4]> " + p + "bg = const()[name=string(\"" + p + "bg\"), val=tensor<int32, [4]>([0,0,0,0])];\n";
-    body += "        tensor<int32, [4]> " + p + "ed = const()[name=string(\"" + p + "ed\"), val=tensor<int32, [4]>([1," + std::to_string(out_C) + ",1," + std::to_string(out_SP) + "])];\n";
-    body += "        tensor<int32, [4]> " + p + "st = const()[name=string(\"" + p + "st\"), val=tensor<int32, [4]>([1,1,1,1])];\n";
-    body += "        " + tout + " " + out_var + " = slice_by_index(begin=" + p + "bg, end=" + p + "ed, strides=" + p + "st, x=" + in_var + ")[name=string(\"" + p + "sbi\")];\n";
+    std::string cur   = in_var;
+    int         cur_C = in_C;
+
+    auto make_wtype = [](int OC, int IC) {
+        return "tensor<fp16, [" + std::to_string(OC) + "," + std::to_string(IC) + ",1,1]>";
+    };
+
+    // Step 1 – channel selection via 1×1 conv (begin_C = 0)
+    if (c_sliced) {
+        std::string after = s_sliced ? (p + "csl") : out_var;
+        TensorShape ws{out_C, in_C, 1, 1};
+        emit_chan_conv(body, p + "c", cur, after,
+                       make_wtype(out_C, in_C),
+                       tensor_type(TensorShape{1, out_C, 1, in_SP}),
+                       file_ref(out_var + "_csel.bin", WeightBlob::kWeightDictOffset, ws));
+        cur   = after;
+        cur_C = out_C;
+    }
+
+    // Step 2 – sequence selection via transpose → 1×1 conv → transpose (begin_S = 0)
+    if (s_sliced) {
+        TensorShape t1{1, in_SP, 1, cur_C};
+        body += "        tensor<int32, [4]> " + p + "sp1 = const()[name=string(\"" + p + "sp1\"), val=tensor<int32, [4]>([0,3,2,1])];\n";
+        body += "        " + tensor_type(t1) + " " + p + "sT = transpose(perm=" + p + "sp1, x=" + cur + ")[name=string(\"" + p + "str1\")];\n";
+        TensorShape ws{out_SP, in_SP, 1, 1};
+        emit_chan_conv(body, p + "s", p + "sT", p + "sSel",
+                       make_wtype(out_SP, in_SP),
+                       tensor_type(TensorShape{1, out_SP, 1, cur_C}),
+                       file_ref(out_var + "_ssel.bin", WeightBlob::kWeightDictOffset, ws));
+        body += "        tensor<int32, [4]> " + p + "sp2 = const()[name=string(\"" + p + "sp2\"), val=tensor<int32, [4]>([0,3,2,1])];\n";
+        body += "        " + tensor_type(out) + " " + out_var + " = transpose(perm=" + p + "sp2, x=" + p + "sSel)[name=string(\"" + p + "str2\")];\n";
+    }
+
+    // Identity path (no C or S slicing) – emit a no-op add with scalar zero
+    if (!c_sliced && !s_sliced) {
+        body += "        fp16 " + p + "z = const()[name=string(\"" + p + "z\"), val=fp16(0.0)];\n";
+        body += "        " + tensor_type(out) + " " + out_var + " = add(x=" + in_var + ", y=" + p + "z)[name=string(\"" + p + "id\")];\n";
+    }
+
     MilFragment f;
-    f.body         = std::move(body);
-    f.input_name   = in_var;
-    f.output_name  = out_var;
+    f.body        = std::move(body);
+    f.input_name  = in_var;
+    f.output_name = out_var;
     f.output_shape = out;
+    if (c_sliced)       f.weight_file = out_var + "_csel.bin";
+    else if (s_sliced)  f.weight_file = out_var + "_ssel.bin";
+    return f;
+}
+
+MilFragment MilBuilder::slice_fragment(int in_C, int in_SP,
+                                        int out_C, int out_SP,
+                                        const int32_t begin[4],
+                                        const int32_t stride[4],
+                                        const std::string& in_var,
+                                        const std::string& out_var) {
+    TensorShape out{1, out_C, 1, out_SP};
+    out.validate();
+
+    const int begin_C  = begin[1];
+    const int begin_SP = begin[3];
+    const bool c_sliced = (out_C  != in_C  || begin_C  != 0);
+    const bool s_sliced = (out_SP != in_SP || begin_SP != 0);
+    const std::string p = out_var + "_";
+    std::string body;
+    std::string cur   = in_var;
+    int         cur_C = in_C;
+
+    auto make_wtype = [](int OC, int IC) {
+        return "tensor<fp16, [" + std::to_string(OC) + "," + std::to_string(IC) + ",1,1]>";
+    };
+
+    if (c_sliced) {
+        std::string after = s_sliced ? (p + "csl") : out_var;
+        TensorShape ws{out_C, in_C, 1, 1};
+        emit_chan_conv(body, p + "c", cur, after,
+                       make_wtype(out_C, in_C),
+                       tensor_type(TensorShape{1, out_C, 1, in_SP}),
+                       file_ref(out_var + "_csel.bin", WeightBlob::kWeightDictOffset, ws));
+        cur   = after;
+        cur_C = out_C;
+    }
+
+    if (s_sliced) {
+        TensorShape t1{1, in_SP, 1, cur_C};
+        body += "        tensor<int32, [4]> " + p + "sp1 = const()[name=string(\"" + p + "sp1\"), val=tensor<int32, [4]>([0,3,2,1])];\n";
+        body += "        " + tensor_type(t1) + " " + p + "sT = transpose(perm=" + p + "sp1, x=" + cur + ")[name=string(\"" + p + "str1\")];\n";
+        TensorShape ws{out_SP, in_SP, 1, 1};
+        emit_chan_conv(body, p + "s", p + "sT", p + "sSel",
+                       make_wtype(out_SP, in_SP),
+                       tensor_type(TensorShape{1, out_SP, 1, cur_C}),
+                       file_ref(out_var + "_ssel.bin", WeightBlob::kWeightDictOffset, ws));
+        body += "        tensor<int32, [4]> " + p + "sp2 = const()[name=string(\"" + p + "sp2\"), val=tensor<int32, [4]>([0,3,2,1])];\n";
+        body += "        " + tensor_type(out) + " " + out_var + " = transpose(perm=" + p + "sp2, x=" + p + "sSel)[name=string(\"" + p + "str2\")];\n";
+    }
+
+    if (!c_sliced && !s_sliced) {
+        body += "        fp16 " + p + "z = const()[name=string(\"" + p + "z\"), val=fp16(0.0)];\n";
+        body += "        " + tensor_type(out) + " " + out_var + " = add(x=" + in_var + ", y=" + p + "z)[name=string(\"" + p + "id\")];\n";
+    }
+
+    MilFragment f;
+    f.body        = std::move(body);
+    f.input_name  = in_var;
+    f.output_name = out_var;
+    f.output_shape = out;
+    if (c_sliced)       f.weight_file = out_var + "_csel.bin";
+    else if (s_sliced)  f.weight_file = out_var + "_ssel.bin";
     return f;
 }
 

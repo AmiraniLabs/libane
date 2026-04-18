@@ -31,6 +31,7 @@ bool FusionRules::op_supported(libane_op_t op) {
     case LIBANE_OP_RSQRT:
     case LIBANE_OP_CONCAT:
     case LIBANE_OP_SLICE_BY_INDEX:
+    case LIBANE_OP_SLICE:
     case LIBANE_OP_SCATTER:
     case LIBANE_OP_SCATTER_ND:
     case LIBANE_OP_SCATTER_ALONG_AXIS:

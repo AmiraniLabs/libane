@@ -541,6 +541,13 @@ public:
                                                 const std::string& in_var,
                                                 const std::string& out_var);
 
+    static MilFragment slice_fragment(int in_C, int in_SP,
+                                      int out_C, int out_SP,
+                                      const int32_t begin[4],
+                                      const int32_t stride[4],
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
     static MilFragment reduce_sum_fragment(int in_C, int SP,
                                             const std::string& in_var,
                                             const std::string& out_var);

@@ -200,6 +200,20 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
             out_shape.channels, out_shape.seq,
             in_var, out_var);
 
+    case LIBANE_OP_SLICE: {
+        int32_t begin[4]  = {0, 0, 0, 0};
+        int32_t stride[4] = {1, 1, 1, 1};
+        if (node.weights.size() == 8 * sizeof(int32_t)) {
+            const int32_t* w = reinterpret_cast<const int32_t*>(node.weights.data());
+            for (int i = 0; i < 4; ++i) begin[i]  = w[i];
+            for (int i = 0; i < 4; ++i) stride[i] = w[4 + i];
+        }
+        return mil::MilBuilder::slice_fragment(
+            in_shape.channels, in_shape.seq,
+            out_shape.channels, out_shape.seq,
+            begin, stride, in_var, out_var);
+    }
+
     case LIBANE_OP_SQRT:
         return mil::MilBuilder::sqrt_fragment(
             out_shape.channels, out_shape.seq, in_var, out_var);
@@ -329,10 +343,52 @@ runtime::AneProgram* MilBackend::compile_group(const AneGraph&    graph,
                 weight_entries.push_back({ node.weight_file, std::move(blob.data) });
             }
         }
+
+        // ── SLICE / SLICE_BY_INDEX: generate conv selection-matrix weights ────
+        if (node.op == LIBANE_OP_SLICE || node.op == LIBANE_OP_SLICE_BY_INDEX) {
+            int32_t begin[4]  = {0, 0, 0, 0};
+            int32_t stride[4] = {1, 1, 1, 1};
+            if (node.op == LIBANE_OP_SLICE &&
+                node.weights.size() == 8 * sizeof(int32_t)) {
+                const int32_t* w =
+                    reinterpret_cast<const int32_t*>(node.weights.data());
+                for (int i = 0; i < 4; ++i) begin[i]  = w[i];
+                for (int i = 0; i < 4; ++i) stride[i] = w[4 + i];
+            }
+
+            int in_C   = graph.tensor(node.inputs[0]).shape.channels;
+            int in_SP  = graph.tensor(node.inputs[0]).shape.seq;
+            int out_C  = graph.tensor(node.output).shape.channels;
+            int out_SP = graph.tensor(node.output).shape.seq;
+            std::string ovar = tensor_var(node.output);
+
+            // C-selection matrix [out_C, in_C]: W[i, begin_C + i*stride_C] = 1.0
+            if (out_C != in_C || begin[1] != 0) {
+                std::vector<uint16_t> w(static_cast<size_t>(out_C) * in_C, 0);
+                for (int i = 0; i < out_C; ++i)
+                    w[static_cast<size_t>(i) * in_C + begin[1] + i * stride[1]]
+                        = 0x3C00; // fp16 1.0
+                auto blob = mil::WeightBlob::from_fp16(w.data(), w.size() * 2);
+                weight_entries.push_back({ ovar + "_csel.bin",
+                                           std::move(blob.data) });
+            }
+
+            // S-selection matrix [out_SP, in_SP]: W[i, begin_SP + i*stride_SP] = 1.0
+            if (out_SP != in_SP || begin[3] != 0) {
+                std::vector<uint16_t> w(static_cast<size_t>(out_SP) * in_SP, 0);
+                for (int i = 0; i < out_SP; ++i)
+                    w[static_cast<size_t>(i) * in_SP + begin[3] + i * stride[3]]
+                        = 0x3C00;
+                auto blob = mil::WeightBlob::from_fp16(w.data(), w.size() * 2);
+                weight_entries.push_back({ ovar + "_ssel.bin",
+                                           std::move(blob.data) });
+            }
+        }
     }
 
     // ── Assemble MIL program and compile ─────────────────────────────────
     mil::MilProgram prog = mil::MilBuilder::build_fused(fused_inputs, fragments);
+    if (getenv("LIBANE_DUMP_MIL")) fprintf(stderr, "=== MIL ===\n%s\n", prog.text.c_str());
     return runtime::ane_compile(prog.text, weight_entries, debug_name);
 }
 

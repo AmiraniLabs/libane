@@ -495,6 +495,29 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
             break;
         }
 
+        case LIBANE_OP_SLICE: {
+            if (!n.weights.empty() && n.weights.size() != 8 * sizeof(int32_t)) {
+                err("slice weights must be empty or exactly 32 bytes "
+                    "(8 × int32: begin[4], stride[4]), got " +
+                    std::to_string(n.weights.size()) + " bytes");
+            }
+            if (n.inputs.size() != 1) {
+                err("slice requires exactly one input, got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            if (!n.weights.empty()) {
+                const int32_t* w = reinterpret_cast<const int32_t*>(n.weights.data());
+                for (int i = 0; i < 4; ++i) {
+                    if (w[4 + i] < 1) {
+                        err("slice stride[" + std::to_string(i) +
+                            "] must be >= 1, got " + std::to_string(w[4 + i]));
+                    }
+                }
+            }
+            break;
+        }
+
         case LIBANE_OP_REDUCE_SUM:
         case LIBANE_OP_REDUCE_MEAN:
         case LIBANE_OP_REDUCE_MAX: {
