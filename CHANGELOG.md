@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.8.2 — 2026-04-18
+
+### Added
+
+- **Python bindings parity** — all C API features now exposed in the `ane` Python package:
+  - Op constants: `RELU`, `TANH`, `SIGMOID`, `HARDSWISH`, `LEAKY_RELU`, `ELU`,
+    `PIXEL_SHUFFLE`, `CAST`, `CONV2D`, `SELECT`, `PWL_ACTIVATION`
+  - `ane.device_info()` → dict (architecture, core_count, num_anes, available)
+  - `ane.shape_limits()` → dict (max_seq, max_channels, seq_alignment)
+  - `ane.compile(op, shape, weights)` → `CompiledOp`
+  - `ane.compile_batch(requests)` → `list[CompiledOp | None]`
+  - `CompiledOp.execute(x, shape)`, `CompiledOp.execute2(x0, x1, shape)`, `CompiledOp.delta_reload()`
+  - `Graph.add_pwl_activation(input_id, output_shape, x_min, x_max, samples)`
+  - `CompiledMil.sram_spill` (property)
+  - `CompiledMil.run_stats(inputs, output_sizes)` → `(outputs, stats dict)`
+  - Updated `ane.pyi` type stub to full parity with the C API
+
+### Changed
+
+- Module tagline updated to "Run ML graphs directly on the Apple Neural Engine from Python."
+- Removed "Not for App Store submission" disclaimer from all files — self-evident from
+  private API usage.
+
 ## v0.8.1 — 2026-04-17
 
 ### Fixed
