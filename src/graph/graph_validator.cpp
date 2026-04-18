@@ -518,6 +518,55 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
             break;
         }
 
+        case LIBANE_OP_CLIP: {
+            if (n.weights.size() != 2 * sizeof(float))
+                err("clip requires exactly 8 weight bytes (float32 lo, hi), got " +
+                    std::to_string(n.weights.size()));
+            if (n.inputs.size() != 1)
+                err("clip requires exactly one input");
+            else {
+                const auto& in_s = g.tensor(n.inputs[0]).shape;
+                if (out_t.shape.channels != in_s.channels ||
+                    out_t.shape.seq      != in_s.seq)
+                    err("clip output shape must equal input shape");
+                if (n.weights.size() == 8) {
+                    float lo, hi;
+                    std::memcpy(&lo, n.weights.data(),              4);
+                    std::memcpy(&hi, n.weights.data() + 4,          4);
+                    if (lo > hi)
+                        err("clip: lo (" + std::to_string(lo) + ") must be <= hi (" +
+                            std::to_string(hi) + ")");
+                }
+            }
+            break;
+        }
+
+        case LIBANE_OP_PAD: {
+            if (!n.weights.empty() && n.weights.size() != 8 * sizeof(int32_t))
+                err("pad weights must be empty or exactly 32 bytes "
+                    "(8 × int32), got " + std::to_string(n.weights.size()) + " bytes");
+            if (n.inputs.size() != 1)
+                err("pad requires exactly one input");
+            else if (n.weights.size() == 32) {
+                const int32_t* pw =
+                    reinterpret_cast<const int32_t*>(n.weights.data());
+                const auto& in_s = g.tensor(n.inputs[0]).shape;
+                for (int i = 0; i < 8; ++i)
+                    if (pw[i] < 0)
+                        err("pad amount [" + std::to_string(i) +
+                            "] must be >= 0, got " + std::to_string(pw[i]));
+                int expected_C  = in_s.channels + pw[1] + pw[5];
+                int expected_SP = in_s.seq       + pw[3] + pw[7];
+                if (out_t.shape.channels != expected_C)
+                    err("pad output C must equal in_C + pad_before_C + pad_after_C = " +
+                        std::to_string(expected_C));
+                if (out_t.shape.seq != expected_SP)
+                    err("pad output S must equal in_S + pad_before_S + pad_after_S = " +
+                        std::to_string(expected_SP));
+            }
+            break;
+        }
+
         case LIBANE_OP_REDUCE_SUM:
         case LIBANE_OP_REDUCE_MEAN:
         case LIBANE_OP_REDUCE_MAX: {

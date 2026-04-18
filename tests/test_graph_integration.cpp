@@ -1190,3 +1190,75 @@ TEST_CASE("T3: asin/acos lowering compile + execute", "[integration][tier3][ane]
     if (!run_unary(LIBANE_OP_ASIN, [](float x){ return std::asin(x); })) SKIP("asin compile/execute unavailable");
     if (!run_unary(LIBANE_OP_ACOS, [](float x){ return std::acos(x); })) SKIP("acos compile/execute unavailable");
 }
+
+TEST_CASE("T3: clip compile + execute", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+    const float lo = -2.0f, hi = 5.0f;
+
+    AneGraph g;
+    TensorId x = g.add_input("x", S(C, SP));
+    float clip_w[2] = {lo, hi};
+    TensorId y = g.add_op(LIBANE_OP_CLIP, {x}, S(C, SP),
+                          reinterpret_cast<const uint8_t*>(clip_w), sizeof(clip_w));
+    g.mark_output(y);
+
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    const size_t n = static_cast<size_t>(C) * SP;
+    std::vector<fp16> in(n), out(n, to_f16(0.0f));
+    for (size_t i = 0; i < n; ++i)
+        in[i] = to_f16(-6.0f + 12.0f * float(i) / float(n - 1));
+
+    bool ok = GraphExecutor::execute(*cg,
+        {in.data()}, {n * sizeof(fp16)},
+        {out.data()}, {n * sizeof(fp16)});
+    REQUIRE(ok);
+
+    for (size_t i = 0; i < n; ++i) {
+        float ref = std::max(lo, std::min(hi, to_f32(in[i])));
+        CHECK(near(to_f32(out[i]), ref, 0.0f, 0.1f));
+    }
+}
+
+TEST_CASE("T3: pad compile + execute (C-dim padding)", "[integration][tier3][ane]") {
+    if (!libane_available()) SKIP("ANE not available");
+
+    const int C = 64, SP = 64;
+    const int PAD_C0 = 32;   // pad 32 channels before
+    const int OC = C + PAD_C0;
+
+    AneGraph g;
+    TensorId x = g.add_input("x", S(C, SP));
+    int32_t pad_w[8] = {0, PAD_C0, 0, 0,  0, 0, 0, 0};
+    TensorId y = g.add_op(LIBANE_OP_PAD, {x}, S(OC, SP),
+                          reinterpret_cast<const uint8_t*>(pad_w), sizeof(pad_w));
+    g.mark_output(y);
+
+    auto cg = GraphCompiler::compile(g);
+    if (!cg) SKIP("ANE compiler unavailable in this environment");
+
+    const size_t n_in  = static_cast<size_t>(C)  * SP;
+    const size_t n_out = static_cast<size_t>(OC) * SP;
+    std::vector<fp16> in(n_in), out(n_out, to_f16(0.0f));
+    for (size_t i = 0; i < n_in; ++i)
+        in[i] = to_f16(float(i % 97) * 0.01f);
+
+    bool ok = GraphExecutor::execute(*cg,
+        {in.data()}, {n_in * sizeof(fp16)},
+        {out.data()}, {n_out * sizeof(fp16)});
+    REQUIRE(ok);
+
+    // First PAD_C0 channels must be zero
+    for (int c = 0; c < PAD_C0; ++c)
+        for (int s = 0; s < SP; ++s)
+            CHECK(near(to_f32(out[static_cast<size_t>(c) * SP + s]), 0.0f, 0.0f, 0.05f));
+
+    // Remaining channels must equal the input
+    for (int c = 0; c < C; ++c)
+        for (int s = 0; s < SP; ++s)
+            CHECK(near(to_f32(out[static_cast<size_t>(PAD_C0 + c) * SP + s]),
+                       to_f32(in [static_cast<size_t>(c) * SP + s])));
+}

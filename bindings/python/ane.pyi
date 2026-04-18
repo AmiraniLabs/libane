@@ -61,6 +61,8 @@ CAST: int
 CONV2D: int
 PWL_ACTIVATION: int
 SLICE: int
+CLIP: int
+PAD: int
 
 # ── Log level constants ───────────────────────────────────────────────────────
 

@@ -214,6 +214,31 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
             begin, stride, in_var, out_var);
     }
 
+    case LIBANE_OP_CLIP: {
+        float lo = 0.0f, hi = 6.0f;
+        if (node.weights.size() == 2 * sizeof(float)) {
+            std::memcpy(&lo, node.weights.data(),                   sizeof(float));
+            std::memcpy(&hi, node.weights.data() + sizeof(float),   sizeof(float));
+        }
+        return mil::MilBuilder::clip_fragment(
+            out_shape.channels, out_shape.seq, lo, hi, in_var, out_var);
+    }
+
+    case LIBANE_OP_PAD: {
+        int32_t pad[8] = {0};
+        if (node.weights.size() == 8 * sizeof(int32_t)) {
+            const int32_t* w = reinterpret_cast<const int32_t*>(node.weights.data());
+            for (int i = 0; i < 8; ++i) pad[i] = w[i];
+        }
+        std::string cfile = tensor_var(node.output) + "_cpad.bin";
+        std::string sfile = tensor_var(node.output) + "_spad.bin";
+        return mil::MilBuilder::pad_fragment(
+            in_shape.channels, in_shape.seq,
+            out_shape.channels, out_shape.seq,
+            pad[1], pad[3],
+            in_var, out_var, cfile, sfile);
+    }
+
     case LIBANE_OP_SQRT:
         return mil::MilBuilder::sqrt_fragment(
             out_shape.channels, out_shape.seq, in_var, out_var);
@@ -381,6 +406,46 @@ runtime::AneProgram* MilBackend::compile_group(const AneGraph&    graph,
                         = 0x3C00;
                 auto blob = mil::WeightBlob::from_fp16(w.data(), w.size() * 2);
                 weight_entries.push_back({ ovar + "_ssel.bin",
+                                           std::move(blob.data) });
+            }
+        }
+
+        // ── PAD: generate conv projection-matrix weights ──────────────────────
+        if (node.op == LIBANE_OP_PAD) {
+            int32_t pad[8] = {0};
+            if (node.weights.size() == 8 * sizeof(int32_t)) {
+                const int32_t* pw =
+                    reinterpret_cast<const int32_t*>(node.weights.data());
+                for (int i = 0; i < 8; ++i) pad[i] = pw[i];
+            }
+
+            int in_C   = graph.tensor(node.inputs[0]).shape.channels;
+            int in_SP  = graph.tensor(node.inputs[0]).shape.seq;
+            int out_C  = graph.tensor(node.output).shape.channels;
+            int out_SP = graph.tensor(node.output).shape.seq;
+            std::string ovar = tensor_var(node.output);
+
+            // C-projection matrix [out_C, in_C]:
+            //   W[pad_before_C + i, i] = 1.0 for i in [0, in_C); rest = 0.
+            if (out_C != in_C) {
+                std::vector<uint16_t> w(static_cast<size_t>(out_C) * in_C, 0);
+                int before_C = pad[1];
+                for (int i = 0; i < in_C; ++i)
+                    w[static_cast<size_t>(before_C + i) * in_C + i] = 0x3C00;
+                auto blob = mil::WeightBlob::from_fp16(w.data(), w.size() * 2);
+                weight_entries.push_back({ ovar + "_cpad.bin",
+                                           std::move(blob.data) });
+            }
+
+            // S-projection matrix [out_SP, in_SP]:
+            //   W[pad_before_S + i, i] = 1.0 for i in [0, in_SP); rest = 0.
+            if (out_SP != in_SP) {
+                std::vector<uint16_t> w(static_cast<size_t>(out_SP) * in_SP, 0);
+                int before_S = pad[3];
+                for (int i = 0; i < in_SP; ++i)
+                    w[static_cast<size_t>(before_S + i) * in_SP + i] = 0x3C00;
+                auto blob = mil::WeightBlob::from_fp16(w.data(), w.size() * 2);
+                weight_entries.push_back({ ovar + "_spad.bin",
                                            std::move(blob.data) });
             }
         }

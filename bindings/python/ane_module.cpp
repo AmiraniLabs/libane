@@ -576,11 +576,13 @@ public:
 
         if (!weights_obj.is_none()) {
             py::module_ np = py::module_::import("numpy");
-            // SLICE weights are int32 (begin[4], stride[4]); pass raw bytes.
-            // All other ops expect fp16 weights.
-            if (op == LIBANE_OP_SLICE) {
+            // SLICE/PAD weights are int32; CLIP weights are float32; others fp16.
+            if (op == LIBANE_OP_SLICE || op == LIBANE_OP_PAD) {
                 w_arr = np.attr("ascontiguousarray")(
                     np.attr("asarray")(weights_obj, "dtype"_a="int32"));
+            } else if (op == LIBANE_OP_CLIP) {
+                w_arr = np.attr("ascontiguousarray")(
+                    np.attr("asarray")(weights_obj, "dtype"_a="float32"));
             } else {
                 w_arr = np.attr("ascontiguousarray")(
                     np.attr("asarray")(weights_obj, "dtype"_a="float16"));
@@ -1035,6 +1037,8 @@ Raises:
     m.attr("CONV2D")    = static_cast<int>(LIBANE_OP_CONV2D);
     m.attr("PWL_ACTIVATION") = static_cast<int>(LIBANE_OP_PWL_ACTIVATION);
     m.attr("SLICE")     = static_cast<int>(LIBANE_OP_SLICE);
+    m.attr("CLIP")      = static_cast<int>(LIBANE_OP_CLIP);
+    m.attr("PAD")       = static_cast<int>(LIBANE_OP_PAD);
 
     /* ── Log level constants ──────────────────────────────────────────── */
     m.attr("LOG_SILENT") = static_cast<int>(LIBANE_LOG_SILENT);

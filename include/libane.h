@@ -119,7 +119,22 @@ typedef enum {
      * NULL weights → begin=[0,0,0,0], stride=[1,1,1,1] (equivalent to
      * SLICE_BY_INDEX with output_shape as the end).
      */
-    LIBANE_OP_SLICE = 49,
+    LIBANE_OP_SLICE = 49,  /**< General slice; weights: int32 begin[4], stride[4] (32 bytes); NULL=origin */
+
+    /**
+     * Element-wise clamp: out = clamp(x, lo, hi).
+     * weights: float32[2] = {lo, hi} (8 bytes, required).
+     * Output shape must equal input shape.
+     */
+    LIBANE_OP_CLIP  = 50,
+
+    /**
+     * Zero-pad tensor.
+     * weights: int32[8] = {pad_N0,pad_C0,pad_H0,pad_S0, pad_N1,pad_C1,pad_H1,pad_S1}
+     *   where index 0 = before, 1 = after.  N and H pads must be 0.
+     * output_shape must equal input_shape + total padding on each axis.
+     */
+    LIBANE_OP_PAD   = 51,
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */

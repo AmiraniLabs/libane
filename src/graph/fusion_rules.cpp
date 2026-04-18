@@ -58,6 +58,8 @@ bool FusionRules::op_supported(libane_op_t op) {
     case LIBANE_OP_ELU:
     case LIBANE_OP_PIXEL_SHUFFLE:
     case LIBANE_OP_PWL_ACTIVATION:
+    case LIBANE_OP_CLIP:
+    case LIBANE_OP_PAD:
         return true;
     case LIBANE_OP_CONV2D:
     case LIBANE_OP_CAST:

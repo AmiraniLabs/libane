@@ -2023,6 +2023,94 @@ MilFragment MilBuilder::slice_fragment(int in_C, int in_SP,
     return f;
 }
 
+MilFragment MilBuilder::clip_fragment(int C, int SP,
+                                       float lo, float hi,
+                                       const std::string& in_var,
+                                       const std::string& out_var) {
+    // clamp(x, lo, hi) = lo + relu(x - lo) - relu(x - hi)
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p  = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        fp16 " + p + "lo  = const()[name=string(\"" + p + "lo\"),  val=fp16(" + std::to_string(lo) + ")];\n";
+    body += "        fp16 " + p + "hi  = const()[name=string(\"" + p + "hi\"),  val=fp16(" + std::to_string(hi) + ")];\n";
+    body += "        " + tt + " " + p + "xl  = sub(x=" + in_var + ", y=" + p + "lo)[name=string(\"" + p + "xl\")];\n";
+    body += "        " + tt + " " + p + "rl  = relu(x=" + p + "xl)[name=string(\"" + p + "rl\")];\n";
+    body += "        " + tt + " " + p + "xh  = sub(x=" + in_var + ", y=" + p + "hi)[name=string(\"" + p + "xh\")];\n";
+    body += "        " + tt + " " + p + "rh  = relu(x=" + p + "xh)[name=string(\"" + p + "rh\")];\n";
+    body += "        " + tt + " " + p + "cl  = sub(x=" + p + "rl, y=" + p + "rh)[name=string(\"" + p + "cl\")];\n";
+    body += "        " + tt + " " + out_var + " = add(x=" + p + "cl, y=" + p + "lo)[name=string(\"" + p + "clamp\")];\n";
+    MilFragment f;
+    f.body        = std::move(body);
+    f.input_name  = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::pad_fragment(int in_C, int in_SP,
+                                      int out_C, int out_SP,
+                                      int pad_before_C, int pad_before_S,
+                                      const std::string& in_var,
+                                      const std::string& out_var,
+                                      const std::string& c_weight_file,
+                                      const std::string& s_weight_file) {
+    TensorShape out{1, out_C, 1, out_SP};
+    out.validate();
+
+    const bool c_padded = (out_C  != in_C);
+    const bool s_padded = (out_SP != in_SP);
+    const std::string p = out_var + "_";
+    std::string body;
+    std::string cur   = in_var;
+    int         cur_C = in_C;
+
+    auto make_wtype = [](int OC, int IC) {
+        return "tensor<fp16, [" + std::to_string(OC) + "," + std::to_string(IC) + ",1,1]>";
+    };
+
+    // C-padding: 1×1 conv with projection matrix [out_C, in_C]
+    if (c_padded) {
+        std::string after = s_padded ? (p + "cpad") : out_var;
+        TensorShape ws{out_C, in_C, 1, 1};
+        emit_chan_conv(body, p + "c", cur, after,
+                       make_wtype(out_C, in_C),
+                       tensor_type(TensorShape{1, out_C, 1, in_SP}),
+                       file_ref(c_weight_file, WeightBlob::kWeightDictOffset, ws));
+        cur   = after;
+        cur_C = out_C;
+    }
+
+    // S-padding: transpose → 1×1 conv → transpose
+    if (s_padded) {
+        TensorShape t1{1, in_SP, 1, cur_C};
+        body += "        tensor<int32, [4]> " + p + "sp1 = const()[name=string(\"" + p + "sp1\"), val=tensor<int32, [4]>([0,3,2,1])];\n";
+        body += "        " + tensor_type(t1) + " " + p + "sT = transpose(perm=" + p + "sp1, x=" + cur + ")[name=string(\"" + p + "str1\")];\n";
+        TensorShape ws{out_SP, in_SP, 1, 1};
+        emit_chan_conv(body, p + "s", p + "sT", p + "sPad",
+                       make_wtype(out_SP, in_SP),
+                       tensor_type(TensorShape{1, out_SP, 1, cur_C}),
+                       file_ref(s_weight_file, WeightBlob::kWeightDictOffset, ws));
+        body += "        tensor<int32, [4]> " + p + "sp2 = const()[name=string(\"" + p + "sp2\"), val=tensor<int32, [4]>([0,3,2,1])];\n";
+        body += "        " + tensor_type(out) + " " + out_var + " = transpose(perm=" + p + "sp2, x=" + p + "sPad)[name=string(\"" + p + "str2\")];\n";
+    }
+
+    if (!c_padded && !s_padded) {
+        body += "        fp16 " + p + "z = const()[name=string(\"" + p + "z\"), val=fp16(0.0)];\n";
+        body += "        " + tensor_type(out) + " " + out_var + " = add(x=" + in_var + ", y=" + p + "z)[name=string(\"" + p + "id\")];\n";
+    }
+
+    MilFragment f;
+    f.body        = std::move(body);
+    f.input_name  = in_var;
+    f.output_name = out_var;
+    f.output_shape = out;
+    if (c_padded)       f.weight_file = c_weight_file;
+    else if (s_padded)  f.weight_file = s_weight_file;
+    return f;
+}
+
 MilFragment MilBuilder::reduce_sum_fragment(int in_C, int SP,
                                              const std::string& in_var,
                                              const std::string& out_var) {
