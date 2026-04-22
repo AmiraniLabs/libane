@@ -3,31 +3,25 @@
  *
  * For weight-free single-node activation groups (RELU, TANH, SIGMOID,
  * HARDSWISH, LEAKY_RELU, ELU), HwxBackend emits BEEFFACE HWX binaries
- * and loads them directly via ane_load_hwx(), bypassing MIL→aned
- * compilation after the first warm-up call per shape.
+ * and loads them directly via ane_load_hwx().
  *
- * ── Performance tiers ────────────────────────────────────────────────────
+ * ── Compile-path ordering (ascending cost) ───────────────────────────────
  *
- * COLD  (first compile for a given (C, S) shape)
- *   Falls back to MilBackend (Path A).  Full ane_compile() cost applies:
- *   ~4200 ms on M-series.  Captures the resulting HWX and caches it.
+ * 1. MilBackend::try_warm_reconnect (~0.7 ms) — same op, aned slot alive
+ * 2. HwxEmitter cross-op patch + ane_load_hwx (~20–40 ms) — different op,
+ *    shape template cached
+ * 3. MilBackend::compile_group full cold compile (~100 ms on macOS 26) —
+ *    first time for this shape and op
  *
- * WARM  (same shape, any known op)
- *   HwxEmitter::emit() cross-patches the 5 op-specific words in the cached
- *   HWX template in microseconds — no recompile, no XPC to ANECompilerService.
- *   ane_load_hwx() stubs in the patched binary and calls loadWithQoS: through
- *   aned (~20–40 ms).  The compile cost is zero.  This is the production ceiling
- *   under standard system configuration.
+ * After each successful cold compile, the HWX template + op-config words
+ * are captured into HwxEmitter so subsequent cross-op hits at the same
+ * shape can skip ANECompilerService entirely.
  *
- * ── UNet / transformer use case ──────────────────────────────────────────
- *
- * A UNet or transformer has a fixed set of shapes that repeat across layers.
- * First forward pass pays the compile cost once per unique (C, S) pair.
- * Every subsequent call — regardless of which activation op — pays only the
- * loader cost (~20–40 ms), not the compiler cost (~4200 ms).
- *
- * The cache is append-only within a process lifetime: warm-cache calls can
- * never regress to cold-cache cost for a previously seen shape.
+ * URL reconnect state lives on MilBackend (Phase 1).  HwxBackend does not
+ * maintain its own URL cache — by delegating the same-op warm path to
+ * MilBackend::try_warm_reconnect, matmul/rmsnorm/softmax and the
+ * HwxEmitter-owned activation ops share one cache, keyed by aned's own
+ * hexID equivalence class.
  *
  * ── Delegation ───────────────────────────────────────────────────────────
  *
@@ -39,16 +33,29 @@
 
 #include "compiler_backend.hpp"
 #include "hwx_emitter.hpp"
+#include "mil_backend.hpp"
 
-#include <string>
-#include <unordered_map>
+#include <memory>
 
 namespace libane {
 namespace graph {
 
 class HwxBackend final : public CompilerBackend {
 public:
-    HwxBackend() = default;
+    /**
+     * Default constructor: HwxBackend owns its own MilBackend.  Suitable
+     * for tests and standalone use.  Warm-path URLs cached internally
+     * persist across compile_group calls on this instance.
+     */
+    HwxBackend();
+
+    /**
+     * Injecting constructor: HwxBackend borrows the given MilBackend.
+     * Used by GraphCompiler so HwxBackend and the router's MilBackend
+     * share one URL-reconnect cache — cold compiles from either path
+     * populate the same table.
+     */
+    explicit HwxBackend(MilBackend* shared_mil);
 
     /**
      * Owns single-node, weight-free activation groups.
@@ -62,33 +69,11 @@ public:
                                        const std::string& debug_name) override;
 
 private:
-    HwxEmitter emitter_;
+    HwxEmitter  emitter_;
+    std::unique_ptr<MilBackend> owned_mil_;  ///< non-null iff default-constructed
+    MilBackend* mil_;                         ///< always valid; borrowed or owned
 
     static bool is_hwx_eligible(libane_op_t op);
-
-    // ── Path C URL reconnect cache (macOS 26+) ────────────────────────────
-    // Keyed by (channels, seq, op).  Populated on first cold compile;
-    // used by ane_reconnect() for subsequent calls at the same shape+op
-    // without consuming a new aned compile slot (~0.722ms warm path).
-    struct ShapeOpKey {
-        int channels, seq, op;
-        bool operator==(const ShapeOpKey& o) const noexcept {
-            return channels == o.channels && seq == o.seq && op == o.op;
-        }
-    };
-    struct ShapeOpKeyHash {
-        size_t operator()(const ShapeOpKey& k) const noexcept {
-            size_t h = std::hash<int>{}(k.channels);
-            h ^= std::hash<int>{}(k.seq) + 0x9e3779b9u + (h << 6) + (h >> 2);
-            h ^= std::hash<int>{}(k.op)  + 0x9e3779b9u + (h << 6) + (h >> 2);
-            return h;
-        }
-    };
-    struct UrlCacheEntry {
-        std::string model_url;
-        std::string mil_text;
-    };
-    std::unordered_map<ShapeOpKey, UrlCacheEntry, ShapeOpKeyHash> url_cache_;
 };
 
 } // namespace graph

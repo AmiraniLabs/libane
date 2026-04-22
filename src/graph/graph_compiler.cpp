@@ -207,9 +207,11 @@ private:
 /* ── GraphCompiler::compile (default routed overload) ───────────────────── */
 
 std::unique_ptr<CompiledGraph> GraphCompiler::compile(const AneGraph& graph) {
-    thread_local HwxBackend      hwx;
-    thread_local EspressoBackend espresso;
+    // MilBackend owns the process-wide URL-reconnect cache; HwxBackend
+    // borrows it so both paths populate and hit the same cache.
     thread_local MilBackend      mil;
+    thread_local HwxBackend      hwx(&mil);
+    thread_local EspressoBackend espresso;
     thread_local RoutingBackend  router({&hwx, &espresso, &mil});
     return compile(graph, router);
 }
