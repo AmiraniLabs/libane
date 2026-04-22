@@ -3,6 +3,7 @@
 #include "graph/ane_graph.hpp"
 #include "graph/fusion_rules.hpp"
 #include <algorithm>
+#include <cstring>
 
 using namespace libane::mil;
 using namespace libane::graph;
@@ -853,4 +854,147 @@ TEST_CASE("every node appears in exactly one group", "[fusion][groups]") {
                        all_node_ids.end());
 
     CHECK(all_node_ids.size() == g.nodes().size());
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Part 4 — CONV2D fusion rules
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+// Conv image shape helper: [1, C, H, W]  (W must be % 32 for ANE alignment)
+static TensorShape SC(int C, int H, int W) { return {1, C, H, W}; }
+
+// Minimal dummy weight blob: 11 × int32 header (kH=1,kW=1 … groups=1)
+// plus a single fp16 zero for kernel data.  Content is irrelevant for
+// fusion-rule tests — we just need a non-empty blob so weight_file is set.
+static std::vector<uint8_t> conv_dummy_weights(int IC, int OC) {
+    // Header: kH kW stride_h stride_w pad_top pad_left pad_bot pad_right dil_h dil_w groups
+    int32_t hdr[11] = {1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1};
+    // Kernel data: OC × IC × 1 × 1 fp16 zeros
+    size_t kernel_elems = static_cast<size_t>(OC) * IC;
+    std::vector<uint8_t> blob(sizeof(hdr) + kernel_elems * 2, 0);
+    std::memcpy(blob.data(), hdr, sizeof(hdr));
+    return blob;
+}
+
+TEST_CASE("conv2d alone is a singleton group", "[fusion][conv2d]") {
+    AneGraph g;
+    TensorId x  = g.add_input("x", SC(8, 4, 32));
+    auto     w  = conv_dummy_weights(8, 16);
+    TensorId y  = g.add_op(LIBANE_OP_CONV2D, {x}, SC(16, 4, 32), w.data(), w.size());
+    g.mark_output(y);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 1);
+    CHECK(groups[0].output == y);
+}
+
+TEST_CASE("conv2d → relu fuses into one group", "[fusion][conv2d]") {
+    AneGraph g;
+    TensorId x  = g.add_input("x", SC(8, 4, 32));
+    auto     w  = conv_dummy_weights(8, 16);
+    TensorId h  = g.add_op(LIBANE_OP_CONV2D, {x}, SC(16, 4, 32), w.data(), w.size());
+    TensorId y  = g.add_op(LIBANE_OP_RELU, {h}, SC(16, 4, 32));
+    g.mark_output(y);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+    CHECK(groups[0].output == y);
+}
+
+TEST_CASE("conv2d → gelu fuses into one group", "[fusion][conv2d]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", SC(8, 4, 32));
+    auto     w = conv_dummy_weights(8, 16);
+    TensorId h = g.add_op(LIBANE_OP_CONV2D, {x}, SC(16, 4, 32), w.data(), w.size());
+    TensorId y = g.add_op(LIBANE_OP_GELU, {h}, SC(16, 4, 32));
+    g.mark_output(y);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+}
+
+TEST_CASE("conv2d → silu fuses into one group", "[fusion][conv2d]") {
+    AneGraph g;
+    TensorId x = g.add_input("x", SC(8, 4, 32));
+    auto     w = conv_dummy_weights(8, 16);
+    TensorId h = g.add_op(LIBANE_OP_CONV2D, {x}, SC(16, 4, 32), w.data(), w.size());
+    TensorId y = g.add_op(LIBANE_OP_SILU, {h}, SC(16, 4, 32));
+    g.mark_output(y);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 2);
+}
+
+TEST_CASE("conv2d → relu → relu: all three fuse", "[fusion][conv2d]") {
+    AneGraph g;
+    TensorId x  = g.add_input("x", SC(8, 4, 32));
+    auto     w  = conv_dummy_weights(8, 16);
+    TensorId h  = g.add_op(LIBANE_OP_CONV2D, {x}, SC(16, 4, 32), w.data(), w.size());
+    TensorId a  = g.add_op(LIBANE_OP_RELU, {h}, SC(16, 4, 32));
+    TensorId y  = g.add_op(LIBANE_OP_RELU, {a}, SC(16, 4, 32));
+    g.mark_output(y);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 1);
+    CHECK(groups[0].node_ids.size() == 3);
+}
+
+TEST_CASE("conv2d group does not accept matmul extension", "[fusion][conv2d]") {
+    AneGraph g;
+    TensorId x  = g.add_input("x", SC(8, 4, 32));
+    auto     wc = conv_dummy_weights(8, 16);
+    TensorId h  = g.add_op(LIBANE_OP_CONV2D, {x}, SC(16, 4, 32), wc.data(), wc.size());
+    // Try to extend with a MATMUL.  MATMUL doesn't work on image tensors so
+    // the fusion rule should reject it and start a new group.
+    auto     wm = fp16_ones(16 * 16);
+    TensorId y  = g.add_op(LIBANE_OP_MATMUL, {h}, S(16, 32),
+                            wm.data(), wm.size() * 2);
+    g.mark_output(y);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 2);
+    CHECK(groups[0].node_ids.size() == 1);  // conv2d alone
+    CHECK(groups[1].node_ids.size() == 1);  // matmul alone
+}
+
+TEST_CASE("matmul group does not accept conv2d extension", "[fusion][conv2d]") {
+    AneGraph g;
+    TensorId x  = g.add_input("x", S(8, 32));
+    auto     wm = fp16_ones(8 * 16);
+    // Note: for MATMUL the output is S(16, 32), not a conv image shape.
+    // CONV2D cannot extend this group.
+    TensorId h  = g.add_op(LIBANE_OP_MATMUL, {x}, S(16, 32),
+                            wm.data(), wm.size() * 2);
+    auto     wc = conv_dummy_weights(16, 16);
+    // This conv op's primary input (h) IS the matmul output; but the rule
+    // says CONV2D cannot extend a non-CONV2D group.
+    TensorId y  = g.add_op(LIBANE_OP_CONV2D, {h}, SC(16, 4, 32),
+                            wc.data(), wc.size());
+    g.mark_output(y);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 2);
+    CHECK(groups[0].node_ids.size() == 1);  // matmul alone
+    CHECK(groups[1].node_ids.size() == 1);  // conv2d alone
+}
+
+TEST_CASE("two independent conv2d nodes form separate groups", "[fusion][conv2d]") {
+    AneGraph g;
+    TensorId x0 = g.add_input("x0", SC(8, 4, 32));
+    TensorId x1 = g.add_input("x1", SC(8, 4, 32));
+    auto     w0 = conv_dummy_weights(8, 16);
+    auto     w1 = conv_dummy_weights(8, 16);
+    TensorId y0 = g.add_op(LIBANE_OP_CONV2D, {x0}, SC(16, 4, 32), w0.data(), w0.size());
+    TensorId y1 = g.add_op(LIBANE_OP_CONV2D, {x1}, SC(16, 4, 32), w1.data(), w1.size());
+    g.mark_output(y0);
+    g.mark_output(y1);
+
+    auto groups = FusionRules::compute_groups(g);
+    REQUIRE(groups.size() == 2);
+    CHECK(groups[0].output == y0);
+    CHECK(groups[1].output == y1);
 }

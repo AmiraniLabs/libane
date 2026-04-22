@@ -35,19 +35,23 @@ TEST_CASE("TensorShape validation — height must be 1", "[mil][shape]") {
     REQUIRE_THROWS_AS(s.validate(), std::invalid_argument);
 }
 
-TEST_CASE("TensorShape validation — S must be multiple of 16", "[mil][shape]") {
+TEST_CASE("TensorShape validation — S must be multiple of 32", "[mil][shape]") {
     TensorShape s{1, 64, 1, 513};
     REQUIRE_THROWS_AS(s.validate(), std::invalid_argument);
 
-    TensorShape s2{1, 64, 1, 16};
+    TensorShape s2{1, 64, 1, 32};
     REQUIRE_NOTHROW(s2.validate());
 
     TensorShape s3{1, 64, 1, 0};
     REQUIRE_THROWS_AS(s3.validate(), std::invalid_argument);
 
-    // S=8 no longer valid (must be multiple of 16)
-    TensorShape s4{1, 64, 1, 8};
+    // S=16 no longer valid (must be multiple of 32)
+    TensorShape s4{1, 64, 1, 16};
     REQUIRE_THROWS_AS(s4.validate(), std::invalid_argument);
+
+    // S=8 still invalid
+    TensorShape s5{1, 64, 1, 8};
+    REQUIRE_THROWS_AS(s5.validate(), std::invalid_argument);
 }
 
 TEST_CASE("TensorShape validation — S <= 65536", "[mil][shape]") {
@@ -59,10 +63,10 @@ TEST_CASE("TensorShape validation — S <= 65536", "[mil][shape]") {
 }
 
 TEST_CASE("TensorShape validation — C <= 16384", "[mil][shape]") {
-    TensorShape s{1, 16384, 1, 16};
+    TensorShape s{1, 16384, 1, 32};
     REQUIRE_NOTHROW(s.validate());
 
-    TensorShape s2{1, 16385, 1, 16};
+    TensorShape s2{1, 16385, 1, 32};
     REQUIRE_THROWS_AS(s2.validate(), std::invalid_argument);
 }
 
@@ -424,20 +428,20 @@ TEST_CASE("MilBuilder::rmsnorm uses reduce_sum + pow path", "[mil][build]") {
 /* ── MilBuilder — transpose_cssc ────────────────────────────────────────── */
 
 TEST_CASE("MilBuilder::transpose_cssc emits perm [0,3,2,1]", "[mil][build]") {
-    auto prog = MilBuilder::transpose_cssc(16, 64);
+    auto prog = MilBuilder::transpose_cssc(32, 64);
     REQUIRE_FALSE(prog.text.empty());
     CHECK_THAT(prog.text, ContainsSubstring("transpose("));
     CHECK_THAT(prog.text, ContainsSubstring("[0,3,2,1]"));
-    // Input [1,16,1,64] → output [1,64,1,16]
-    CHECK_THAT(prog.text, ContainsSubstring("tensor<fp16, [1, 16, 1, 64]>"));
-    CHECK_THAT(prog.text, ContainsSubstring("tensor<fp16, [1, 64, 1, 16]>"));
-    CHECK(prog.input_shape  == (TensorShape{1, 16, 1, 64}));
-    CHECK(prog.output_shape == (TensorShape{1, 64, 1, 16}));
+    // Input [1,32,1,64] → output [1,64,1,32]
+    CHECK_THAT(prog.text, ContainsSubstring("tensor<fp16, [1, 32, 1, 64]>"));
+    CHECK_THAT(prog.text, ContainsSubstring("tensor<fp16, [1, 64, 1, 32]>"));
+    CHECK(prog.input_shape  == (TensorShape{1, 32, 1, 64}));
+    CHECK(prog.output_shape == (TensorShape{1, 64, 1, 32}));
 }
 
 TEST_CASE("MilBuilder::transpose_cssc rejects invalid dims", "[mil][build]") {
     // S and C swap roles in output: both must be valid ANE shapes
-    // If C=7 → output.seq=7 which is not a multiple of 16 → invalid
+    // If C=7 → output.seq=7 which is not a multiple of 32 → invalid
     REQUIRE_THROWS_AS(MilBuilder::transpose_cssc(7, 64), std::invalid_argument);
 }
 
@@ -519,7 +523,7 @@ TEST_CASE("All MilBuilder programs have correct program header", "[mil][build]")
     auto p4d = MilBuilder::sqrt(16, 64);
     auto p4e = MilBuilder::log(16, 64);
     auto p4f = MilBuilder::rsqrt(16, 64);
-    auto p5 = MilBuilder::transpose_cssc(16, 64);
+    auto p5 = MilBuilder::transpose_cssc(32, 64);
     auto p6 = MilBuilder::mul(16, 64);
     auto p7 = MilBuilder::silu(32, 128);
     auto p8 = MilBuilder::layernorm(32, 128);

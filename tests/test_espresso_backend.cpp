@@ -7,14 +7,14 @@
  *
  * ── Architecture ─────────────────────────────────────────────────────────────
  *
- * EspressoBackend owns single-node MATMUL groups with seq == 16 (the minimum
+ * EspressoBackend owns single-node MATMUL groups with seq == 32 (the minimum
  * valid ANE seq tile).  The Espresso inner_product model is always compiled with
  * w=1 (single vector).  graph_executor stride-extracts column 0 from the
- * [IC][16] graph buffer → [IC][1] compact buffer → ane_execute_client → result
- * written back to column 0 of the [OC][16] output buffer (columns 1–15 = 0).
+ * [IC][32] graph buffer → [IC][1] compact buffer → ane_execute_client → result
+ * written back to column 0 of the [OC][32] output buffer (columns 1–31 = 0).
  *
- * This makes EspressoBackend correct for single-token decode (seq=16, real data
- * at position 0, positions 1–15 are padding zeros).
+ * This makes EspressoBackend correct for single-token decode (seq=32, real data
+ * at position 0, positions 1–31 are padding zeros).
  *
  * ── Hardware proof method ─────────────────────────────────────────────────────
  *
@@ -100,15 +100,15 @@ static std::vector<uint8_t> identity_weight_bytes(int IC, int OC) {
 
 /* ── Tests ───────────────────────────────────────────────────────────────── */
 
-// SEQ = 16: minimum valid ANE seq tile (required by TensorShape::validate).
+// SEQ = 32: minimum valid ANE seq tile (required by TensorShape::validate).
 // EspressoBackend processes only column 0 (single-token decode semantics).
-// Columns 1–15 are padding zeros and should not appear in the output.
+// Columns 1–31 are padding zeros and should not appear in the output.
 
 TEST_CASE("EspressoBackend dispatch: zero-weight FC produces zero at seq[0]", "[espresso][ane]") {
     if (!libane_available())             SKIP("ANE not available");
     if (!runtime::path_b_available())   SKIP("Path B (_ANEClient) not available");
 
-    const int IC = 64, OC = 32, SEQ = 16;
+    const int IC = 64, OC = 32, SEQ = 32;
     const size_t N_in  = static_cast<size_t>(IC)  * SEQ;
     const size_t N_out = static_cast<size_t>(OC) * SEQ;
 
@@ -147,7 +147,7 @@ TEST_CASE("EspressoBackend dispatch: identity-weight FC passes through seq[0]", 
     // W[IC, OC] with W[i,i] = 1.0 → output[j, 0] = input[j, 0] for j < OC.
     // Proves: weights are loaded, IOSurface scatter/gather is correct,
     // and the seq[0] column is extracted and written back accurately.
-    const int IC = 64, OC = 32, SEQ = 16;
+    const int IC = 64, OC = 32, SEQ = 32;
     const size_t N_in  = static_cast<size_t>(IC)  * SEQ;
     const size_t N_out = static_cast<size_t>(OC) * SEQ;
 
@@ -193,7 +193,7 @@ TEST_CASE("EspressoBackend warm path: cacheInference:YES re-execute produces cor
     if (!runtime::path_b_available())   SKIP("Path B (_ANEClient) not available");
 
     // Uniform weights (1/IC): output[j, 0] = mean(input[:, 0]) = 1.0 when input all = 1.0
-    const int IC = 64, OC = 32, SEQ = 16;
+    const int IC = 64, OC = 32, SEQ = 32;
     const size_t N_in  = static_cast<size_t>(IC)  * SEQ;
     const size_t N_out = static_cast<size_t>(OC) * SEQ;
     const float w_val = 1.0f / static_cast<float>(IC);
@@ -236,13 +236,13 @@ TEST_CASE("EspressoBackend warm path: cacheInference:YES re-execute produces cor
         CHECK(std::abs(to_f32(out_data[static_cast<size_t>(j) * SEQ]) - 1.0f) < 0.1f);
 }
 
-TEST_CASE("EspressoBackend router: seq==16 matmul routes end-to-end via default compiler", "[espresso][ane]") {
+TEST_CASE("EspressoBackend router: seq==32 matmul routes end-to-end via default compiler", "[espresso][ane]") {
     if (!libane_available())             SKIP("ANE not available");
     if (!runtime::path_b_available())   SKIP("Path B (_ANEClient) not available");
 
     // Default router (HwxBackend → EspressoBackend → MilBackend):
-    // seq==16 MATMUL must be claimed by EspressoBackend with correct output.
-    const int IC = 64, OC = 32, SEQ = 16;
+    // seq==32 MATMUL must be claimed by EspressoBackend with correct output.
+    const int IC = 64, OC = 32, SEQ = 32;
     const size_t N_in  = static_cast<size_t>(IC)  * SEQ;
     const size_t N_out = static_cast<size_t>(OC) * SEQ;
 

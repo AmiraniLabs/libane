@@ -168,10 +168,10 @@ TEST_CASE("libane_execute softmax produces valid probabilities", "[api]") {
         return;
     }
 
-    // Shape [1, C=8, 1, S=16]: axis=1 softmax normalises over C channels.
+    // Shape [1, C=8, 1, S=32]: axis=1 softmax normalises over C channels.
     // For each S position the C channel values must sum to 1.0.
     libane_shape_t shape;
-    shape.dims[0]=1; shape.dims[1]=8; shape.dims[2]=1; shape.dims[3]=16; shape.ndim=4;
+    shape.dims[0]=1; shape.dims[1]=8; shape.dims[2]=1; shape.dims[3]=32; shape.ndim=4;
 
     auto h = libane_compile(LIBANE_OP_SOFTMAX, shape, nullptr, 0);
     if (!h) { WARN("ANE compile limit reached — skipping: " << libane_last_error()); return; }
@@ -179,18 +179,18 @@ TEST_CASE("libane_execute softmax produces valid probabilities", "[api]") {
 
     using fp16_t = libane_f16_t;
     // Each S position gets the same C values [1..8]; after channel softmax they sum to 1.0.
-    std::vector<fp16_t> in(8*16), out(8*16);
+    std::vector<fp16_t> in(8*32), out(8*32);
     float vals[] = {1.0f,2.0f,3.0f,4.0f,5.0f,6.0f,7.0f,8.0f};
     for (int c = 0; c < 8; ++c)
-        for (int s = 0; s < 16; ++s)
-            in[c * 16 + s] = f16(vals[c]);
+        for (int s = 0; s < 32; ++s)
+            in[c * 32 + s] = f16(vals[c]);
 
     libane_status_t st = libane_execute(h, in.data(), out.data(), shape);
     CHECK(st == LIBANE_OK);
 
     // Check one S position: sum of C=8 channel values must be ~1.0
     float sum = 0.0f;
-    for (int c = 0; c < 8; ++c) sum += f32(out[c * 16 + 0]);
+    for (int c = 0; c < 8; ++c) sum += f32(out[c * 32 + 0]);
     CHECK(std::abs(sum - 1.0f) < 0.05f); // fp16 precision
 
     libane_release(h);
@@ -610,6 +610,49 @@ TEST_CASE("libane_cache_flush resets cache", "[api][cache]") {
     libane_release(h);
 
     libane_cache_flush();
+    CHECK(libane_cache_size_bytes() == 0);
+}
+
+TEST_CASE("libane_release evicts cache entry", "[api][cache]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+    libane_cache_flush();
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    libane_shape_t shape;
+    shape.dims[0]=1; shape.dims[1]=8; shape.dims[2]=1; shape.dims[3]=64; shape.ndim=4;
+    auto h = libane_compile(LIBANE_OP_SOFTMAX, shape, nullptr, 0);
+    if (!h) { WARN("ANE compile limit reached — skipping: " << libane_last_error()); return; }
+    REQUIRE(h != nullptr);
+    REQUIRE(libane_cache_size_bytes() > 0);
+
+    libane_release(h);
+    CHECK(libane_cache_size_bytes() == 0);
+}
+
+TEST_CASE("libane_end_job flushes cache", "[api][cache]") {
+    libane_set_backend(nullptr);
+    libane_set_log_level(LIBANE_LOG_SILENT);
+    libane_cache_flush();
+
+    if (!libane_available()) {
+        WARN("ANE not available — skipping");
+        return;
+    }
+
+    libane_shape_t shape;
+    shape.dims[0]=1; shape.dims[1]=8; shape.dims[2]=1; shape.dims[3]=64; shape.ndim=4;
+    auto h = libane_compile(LIBANE_OP_SOFTMAX, shape, nullptr, 0);
+    if (!h) { WARN("ANE compile limit reached — skipping: " << libane_last_error()); return; }
+    REQUIRE(h != nullptr);
+    REQUIRE(libane_cache_size_bytes() > 0);
+    libane_release(h);
+
+    libane_end_job();
     CHECK(libane_cache_size_bytes() == 0);
 }
 
@@ -1198,4 +1241,3 @@ TEST_CASE("libane_mil_compile_with_weights external scale weight", "[mil]") {
 
     libane_mil_release(h);
 }
-
