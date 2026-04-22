@@ -96,6 +96,7 @@ struct AneProgram {
     std::string model_dir;               ///< Temp dir path for delta compilation
     std::string mil_text;                ///< Original MIL source (stored for serialization)
     std::string model_url;               ///< URL from _ANEInMemoryModel.modelURL after compile; inject via setModelURL: + loadWithQoS: for ~0.722ms Path C reconnect
+    std::string hex_id;                  ///< hexStringIdentifier — aned's cache key for this (mil_text, weights) pair
     std::vector<WeightEntry> weights;    ///< stored for delta reload
     std::vector<std::string> input_param_names;
     std::vector<std::string> output_var_names;
@@ -169,6 +170,20 @@ struct AnePerfStats {
 AneProgram* ane_compile(const std::string& mil_text,
                         const std::vector<WeightEntry>& weights,
                         const std::string& debug_name = "");
+
+/**
+ * Compute aned's hexID for a (mil_text, weights) pair without compiling.
+ *
+ * Creates an _ANEInMemoryModelDescriptor and reads its hexStringIdentifier,
+ * then discards both.  This is the same key aned uses to deduplicate compiled
+ * programs in its in-process cache, so it can be used to look up warm-path
+ * entries before a program exists.
+ *
+ * @return Non-empty hexID string on success.  Empty string on failure or in
+ *         Fallback mode (check ane_last_error()).
+ */
+std::string ane_compute_hex_id(const std::string& mil_text,
+                                const std::vector<WeightEntry>& weights);
 
 /**
  * Reconnect to an existing aned compile slot without triggering compileWithQoS:.

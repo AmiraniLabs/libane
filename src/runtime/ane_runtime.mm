@@ -627,6 +627,54 @@ static std::vector<std::string> extract_output_vars(const std::string& mil_text)
     return outputs;
 }
 
+/* ── HexID probe (no compile) ────────────────────────────────────────────── */
+
+std::string ane_compute_hex_id(const std::string& mil_text,
+                                const std::vector<WeightEntry>& weights) {
+    if (g_state != AneState::Available) {
+        set_error("ane_compute_hex_id: ANE not available: %s", g_fallback_reason);
+        return "";
+    }
+    @autoreleasepool {
+        NSData* mil_data = [NSData dataWithBytes:mil_text.data()
+                                          length:mil_text.size()];
+
+        NSMutableDictionary* weights_dict = [NSMutableDictionary dictionary];
+        for (const auto& w : weights) {
+            NSString* full_path = [NSString stringWithFormat:@"@model_path/weights/%s",
+                                   w.filename.c_str()];
+            NSData*   blob = [NSData dataWithBytes:w.data.data() length:w.data.size()];
+            weights_dict[full_path] = @{@"offset": @0, @"data": blob};
+        }
+        NSDictionary* final_weights = (weights_dict.count > 0) ? weights_dict : @{};
+
+        typedef id (*DescFn)(Class, SEL, NSData*, NSDictionary*, id);
+        id descriptor = ((DescFn)objc_msgSend)(
+            g_syms.cls_Descriptor, g_syms.sel_modelWithMILText,
+            mil_data, final_weights, nil);
+        if (!descriptor) {
+            set_error("ane_compute_hex_id: _ANEInMemoryModelDescriptor creation failed");
+            return "";
+        }
+
+        typedef id (*ModelFn)(Class, SEL, id);
+        id model = ((ModelFn)objc_msgSend)(
+            g_syms.cls_Model, g_syms.sel_inMemoryModel, descriptor);
+        if (!model) {
+            set_error("ane_compute_hex_id: _ANEInMemoryModel creation failed");
+            return "";
+        }
+
+        typedef NSString* (*StrFn)(id, SEL);
+        NSString* hex_id = ((StrFn)objc_msgSend)(model, g_syms.sel_hexID);
+        if (!hex_id || hex_id.length == 0) {
+            set_error("ane_compute_hex_id: hexStringIdentifier returned empty string");
+            return "";
+        }
+        return [hex_id UTF8String];
+    }
+}
+
 /* ── Compile ─────────────────────────────────────────────────────────────── */
 
 AneProgram* ane_compile(const std::string& mil_text,
@@ -863,6 +911,7 @@ AneProgram* ane_compile(const std::string& mil_text,
         prog->mil_text   = mil_text;
         prog->weights    = weights;
         prog->model_url  = captured_model_url;
+        prog->hex_id     = [hex_id UTF8String];
 
         // Extract parameter and output names for constraint validation
         prog->input_param_names = extract_input_params(mil_text);
@@ -1354,6 +1403,7 @@ AneProgram* ane_reconnect(const std::string&              mil_text,
         prog->mil_text    = mil_text;
         prog->weights     = weights;
         prog->model_url   = model_url;
+        prog->hex_id      = [hex_id UTF8String];
         prog->size_bytes  = mil_text.size();
         for (const auto& w : weights) prog->size_bytes += w.data.size();
 
@@ -1515,6 +1565,7 @@ AneProgram* ane_load_hwx(const std::vector<uint8_t>& hwx_bytes,
         retain_model_dir(prog->model_dir);
         prog->mil_text    = mil_text;
         prog->model_url   = captured_model_url;
+        prog->hex_id      = [hex_id UTF8String];
         prog->size_bytes  = mil_text.size() + hwx_bytes.size();
 
         @try {

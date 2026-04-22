@@ -597,10 +597,49 @@ runtime::AneProgram* MilBackend::compile_group(const AneGraph&    graph,
         }
     }
 
-    // ── Assemble MIL program and compile ─────────────────────────────────
+    // ── Assemble MIL program ─────────────────────────────────────────────
     mil::MilProgram prog = mil::MilBuilder::build_fused(fused_inputs, fragments);
     if (getenv("LIBANE_DUMP_MIL")) fprintf(stderr, "=== MIL ===\n%s\n", prog.text.c_str());
-    return runtime::ane_compile(prog.text, weight_entries, debug_name);
+
+    // ── Warm path: try reconnect before paying cold-compile cost ─────────
+    if (auto* warm = try_warm_reconnect(prog.text, weight_entries, debug_name))
+        return warm;
+
+    // ── Cold path: full compile; cache model_url + hexID for next time ───
+    runtime::AneProgram* program = runtime::ane_compile(prog.text, weight_entries, debug_name);
+    if (program) cache_populate(program);
+    return program;
+}
+
+runtime::AneProgram* MilBackend::try_warm_reconnect(
+    const std::string&                              mil_text,
+    const std::vector<runtime::WeightEntry>&        weights,
+    const std::string&                              debug_name) {
+    // Compute hexID without compiling — this is aned's own equivalence
+    // class for (mil_text, weights), so the lookup is exact.
+    std::string hex_id = runtime::ane_compute_hex_id(mil_text, weights);
+    if (hex_id.empty()) return nullptr;
+
+    auto it = url_cache_.find(hex_id);
+    if (it == url_cache_.end()) return nullptr;
+
+    // Cache hit — attempt reconnect.  Returns nullptr if aned's compile
+    // slot was purged (compiledModelExists=NO); caller falls through to
+    // cold compile.
+    runtime::AneProgram* prog = runtime::ane_reconnect(
+        it->second.mil_text, it->second.weights, it->second.model_url, debug_name);
+    if (!prog) {
+        // Slot purged — stale entry.  Drop it so the cold compile that
+        // follows can refresh the URL on cache_populate().
+        url_cache_.erase(it);
+    }
+    return prog;
+}
+
+void MilBackend::cache_populate(const runtime::AneProgram* prog) {
+    if (!prog || prog->hex_id.empty() || prog->model_url.empty()) return;
+    url_cache_[prog->hex_id] =
+        UrlCacheEntry{prog->model_url, prog->mil_text, prog->weights};
 }
 
 } // namespace graph
