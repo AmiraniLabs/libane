@@ -17,6 +17,7 @@
 #include <atomic>
 #include <string>
 #include <vector>
+#include <fstream>
 
 /* ── Global state ────────────────────────────────────────────────────────── */
 
@@ -146,6 +147,18 @@ size_t libane_cache_size_bytes(void) {
     return cache().size_bytes();
 }
 
+/* ── Compile budget ──────────────────────────────────────────────────────── */
+
+int libane_compile_count(void) {
+    libane::runtime::initialize();
+    return libane::runtime::ane_compile_count();
+}
+
+int libane_compile_slots_remaining(void) {
+    libane::runtime::initialize();
+    return libane::runtime::ane_compile_slots_remaining();
+}
+
 /* ── Device introspection ────────────────────────────────────────────────── */
 
 libane_status_t libane_device_info(libane_device_info_t* out) {
@@ -167,7 +180,7 @@ libane_shape_limits_t libane_get_shape_limits(void) {
     auto di = libane::runtime::device_info();
 
     libane_shape_limits_t lim;
-    lim.seq_alignment = 8;   // constant: ANE constraint #1
+    lim.seq_alignment = 32;  // constant: ANE activation-output stride constraint
 
     // Chip-adaptive limits.  Conservative universally-safe values are used
     // when device info is unavailable or the architecture is unrecognised.
@@ -542,10 +555,30 @@ libane_status_t libane_delta_reload(libane_handle_t h) {
     return LIBANE_OK;
 }
 
+/* ── SRAM-only unload ────────────────────────────────────────────────────── */
+
+void libane_unload_sram(libane_handle_t h) {
+    if (!h) return;
+    auto& entry = *h->entry;
+    if (!entry.is_ane || !entry.backend_handle) return;
+    auto* prog = static_cast<libane::runtime::AneProgram*>(entry.backend_handle);
+    libane::runtime::ane_unload_sram(prog);
+}
+
 /* ── Release ─────────────────────────────────────────────────────────────── */
 
 void libane_release(libane_handle_t h) {
-    delete h; // shared_ptr to CacheEntry is released; cache still holds its copy
+    if (!h) return;
+    // Unpin this program from the global cache so release can deterministically
+    // drive ANE teardown once the final handle reference is dropped.
+    cache().erase(h->entry->key);
+    delete h;
+}
+
+void libane_end_job(void) {
+    // Explicit lifecycle boundary: callers can mark end-of-batch/end-of-job to
+    // force release of any idle cached ANE programs.
+    cache().flush();
 }
 
 /* ── Convenience matmul ──────────────────────────────────────────────────── */
@@ -794,6 +827,307 @@ uint32_t libane_graph_add_pwl_activation(libane_graph_t g,
     }
 }
 
+uint32_t libane_graph_add_conv2d(libane_graph_t g,
+                                  uint32_t       input_id,
+                                  libane_shape_t output_shape,
+                                  int            kH,
+                                  int            kW,
+                                  int            stride_h,
+                                  int            stride_w,
+                                  int            pad_top,
+                                  int            pad_left,
+                                  int            pad_bottom,
+                                  int            pad_right,
+                                  int            dilation_h,
+                                  int            dilation_w,
+                                  int            groups,
+                                  const void*    kernel,
+                                  size_t         kernel_bytes) {
+    if (!g) {
+        set_error("libane_graph_add_conv2d: null graph");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    // Basic parameter sanity checks (full semantic validation happens in
+    // graph_validator during compile — these guards catch obvious misuse early).
+    if (kH <= 0 || kW <= 0) {
+        set_error("libane_graph_add_conv2d: kH and kW must be >= 1");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    if (stride_h <= 0 || stride_w <= 0) {
+        set_error("libane_graph_add_conv2d: strides must be >= 1");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    if (dilation_h <= 0 || dilation_w <= 0) {
+        set_error("libane_graph_add_conv2d: dilations must be >= 1");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    if (groups <= 0) {
+        set_error("libane_graph_add_conv2d: groups must be >= 1");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    if (pad_top < 0 || pad_left < 0 || pad_bottom < 0 || pad_right < 0) {
+        set_error("libane_graph_add_conv2d: padding values must be >= 0");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    if (!kernel || kernel_bytes == 0) {
+        set_error("libane_graph_add_conv2d: kernel must be non-null and non-empty");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+
+    // Pack: int32[11] header + raw fp16 kernel bytes.
+    // Header layout mirrors LIBANE_OP_CONV2D blob spec in libane.h:
+    //   {kH, kW, stride_h, stride_w, pad_top, pad_left, pad_bottom, pad_right,
+    //    dilation_h, dilation_w, groups}
+    constexpr size_t kNumParams  = 11;
+    constexpr size_t kParamBytes = kNumParams * sizeof(int32_t);
+
+    std::vector<uint8_t> blob;
+    blob.reserve(kParamBytes + kernel_bytes);
+    blob.resize(kParamBytes);
+
+    int32_t params[kNumParams] = {
+        kH, kW, stride_h, stride_w,
+        pad_top, pad_left, pad_bottom, pad_right,
+        dilation_h, dilation_w, groups
+    };
+    std::memcpy(blob.data(), params, kParamBytes);
+
+    // Append raw fp16 kernel
+    const auto* kptr = static_cast<const uint8_t*>(kernel);
+    blob.insert(blob.end(), kptr, kptr + kernel_bytes);
+
+    try {
+        libane::mil::TensorShape ms = to_mil_shape(output_shape);
+        return g->graph.add_op(LIBANE_OP_CONV2D, {input_id}, ms,
+                               blob.data(), blob.size());
+    } catch (const std::exception& e) {
+        set_error("libane_graph_add_conv2d: %s", e.what());
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+}
+
+uint32_t libane_graph_add_matmul_w8a16(libane_graph_t g,
+                                        uint32_t       input_id,
+                                        libane_shape_t output_shape,
+                                        const int8_t*  weights,
+                                        const float*   scales,
+                                        int            IC,
+                                        int            OC) {
+    if (!g) {
+        set_error("libane_graph_add_matmul_w8a16: null graph");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    if (!weights || !scales) {
+        set_error("libane_graph_add_matmul_w8a16: null weights or scales");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    if (IC <= 0 || OC <= 0) {
+        set_error("libane_graph_add_matmul_w8a16: IC and OC must be positive");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+
+    // Pack blob: int32[2]={OC,IC} + int8[IC×OC] + pad-to-4 + float32[OC]
+    const size_t kHdrBytes    = 2 * sizeof(int32_t);
+    const size_t wbytes       = static_cast<size_t>(IC) * OC;
+    const size_t scales_start = (kHdrBytes + wbytes + 3) & ~size_t(3);
+    const size_t total_bytes  = scales_start + static_cast<size_t>(OC) * sizeof(float);
+
+    std::vector<uint8_t> blob(total_bytes, 0);
+    int32_t hdr[2] = { OC, IC };
+    std::memcpy(blob.data(),              hdr,     kHdrBytes);
+    std::memcpy(blob.data() + kHdrBytes,  weights, wbytes);
+    std::memcpy(blob.data() + scales_start, scales,
+                static_cast<size_t>(OC) * sizeof(float));
+
+    try {
+        libane::mil::TensorShape ms = to_mil_shape(output_shape);
+        return g->graph.add_op(LIBANE_OP_MATMUL_W8A16, {input_id}, ms,
+                               blob.data(), blob.size());
+    } catch (const std::exception& e) {
+        set_error("libane_graph_add_matmul_w8a16: %s", e.what());
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+}
+
+uint32_t libane_graph_add_matmul_w8a8(libane_graph_t g,
+                                       uint32_t       input_id,
+                                       libane_shape_t output_shape,
+                                       const int8_t*  weights,
+                                       const float*   scales,
+                                       int            IC,
+                                       int            OC,
+                                       float          act_scale,
+                                       int32_t        act_zero_point) {
+    if (!g) {
+        set_error("libane_graph_add_matmul_w8a8: null graph");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    if (!weights || !scales) {
+        set_error("libane_graph_add_matmul_w8a8: null weights or scales");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    if (IC <= 0 || OC <= 0) {
+        set_error("libane_graph_add_matmul_w8a8: IC and OC must be positive");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    if (act_scale <= 0.0f) {
+        set_error("libane_graph_add_matmul_w8a8: act_scale must be positive");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+
+    // Blob format: int32[2]={OC,IC} + int8[IC×OC] + pad-to-4
+    //              + float32[OC] (weight scales) + float32[1] (act_scale) + int32[1] (act_zp)
+    const size_t kHdrBytes    = 2 * sizeof(int32_t);
+    const size_t wbytes       = static_cast<size_t>(IC) * OC;
+    const size_t scales_start = (kHdrBytes + wbytes + 3) & ~size_t(3);
+    const size_t act_off      = scales_start + static_cast<size_t>(OC) * sizeof(float);
+    const size_t total_bytes  = act_off + sizeof(float) + sizeof(int32_t);
+
+    std::vector<uint8_t> blob(total_bytes, 0);
+    int32_t hdr[2] = { OC, IC };
+    std::memcpy(blob.data(),                hdr,      kHdrBytes);
+    std::memcpy(blob.data() + kHdrBytes,    weights,  wbytes);
+    std::memcpy(blob.data() + scales_start, scales,   static_cast<size_t>(OC) * sizeof(float));
+    std::memcpy(blob.data() + act_off,      &act_scale,      sizeof(float));
+    std::memcpy(blob.data() + act_off + 4,  &act_zero_point, sizeof(int32_t));
+
+    try {
+        libane::mil::TensorShape ms = to_mil_shape(output_shape);
+        return g->graph.add_op(LIBANE_OP_MATMUL_W8A8, {input_id}, ms,
+                               blob.data(), blob.size());
+    } catch (const std::exception& e) {
+        set_error("libane_graph_add_matmul_w8a8: %s", e.what());
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+}
+
+void libane_quantize_i8(const void* in_fp16,
+                         int8_t*     out_i8,
+                         size_t      n,
+                         float       act_scale,
+                         int32_t     act_zero_point) {
+    if (!in_fp16 || !out_i8 || n == 0 || act_scale <= 0.0f) return;
+    const auto* src = static_cast<const fp16_t*>(in_fp16);
+    for (size_t i = 0; i < n; ++i) {
+        float f;
+        libane::fallback::cast_f16_to_f32(src + i, &f, 1);
+        float q  = f / act_scale + static_cast<float>(act_zero_point);
+        int   qi = static_cast<int>(std::round(q));
+        if (qi < -128) qi = -128;
+        if (qi >  127) qi =  127;
+        out_i8[i] = static_cast<int8_t>(qi);
+    }
+}
+
+/* ── KV Cache ────────────────────────────────────────────────────────────── */
+
+libane_kv_cache_t libane_kv_cache_create(int num_heads, int head_dim, int max_seq) {
+    if (num_heads <= 0 || head_dim <= 0 || max_seq <= 0) {
+        set_error("libane_kv_cache_create: all dimensions must be > 0");
+        return nullptr;
+    }
+    auto* c = new (std::nothrow) libane_kv_cache_s;
+    if (!c) {
+        set_error("libane_kv_cache_create: out of memory");
+        return nullptr;
+    }
+    c->num_heads = num_heads;
+    c->head_dim  = head_dim;
+    c->max_seq   = max_seq;
+    c->pos       = 0;
+    try {
+        c->k_buf.assign(c->total_elems(), 0);
+        c->v_buf.assign(c->total_elems(), 0);
+    } catch (const std::bad_alloc&) {
+        delete c;
+        set_error("libane_kv_cache_create: out of memory for buffers");
+        return nullptr;
+    }
+    return c;
+}
+
+int libane_kv_cache_update(libane_kv_cache_t cache,
+                            const void*       new_k,
+                            const void*       new_v) {
+    if (!cache || !new_k || !new_v) {
+        set_error("libane_kv_cache_update: null argument");
+        return -1;
+    }
+    if (cache->pos >= cache->max_seq) {
+        set_error("libane_kv_cache_update: cache full (pos=%d, max_seq=%d)",
+                  cache->pos, cache->max_seq);
+        return -1;
+    }
+    // Each token's K/V slice is laid out as [num_heads, head_dim].
+    // We scatter-write to [head][pos][dim] in the buffer.
+    const auto* k_src = static_cast<const uint16_t*>(new_k);
+    const auto* v_src = static_cast<const uint16_t*>(new_v);
+    const int pos      = cache->pos;
+    const int H        = cache->num_heads;
+    const int D        = cache->head_dim;
+    const int max_seq  = cache->max_seq;
+    for (int h = 0; h < H; ++h) {
+        // Buffer layout: [h * max_seq * D + pos * D .. + D)
+        size_t buf_off = static_cast<size_t>(h) * max_seq * D + pos * D;
+        std::memcpy(cache->k_buf.data() + buf_off, k_src + h * D, D * sizeof(uint16_t));
+        std::memcpy(cache->v_buf.data() + buf_off, v_src + h * D, D * sizeof(uint16_t));
+    }
+    cache->pos = pos + 1;
+    return cache->pos;
+}
+
+const void* libane_kv_cache_k(libane_kv_cache_t cache) {
+    if (!cache) return nullptr;
+    return cache->k_buf.data();
+}
+
+const void* libane_kv_cache_v(libane_kv_cache_t cache) {
+    if (!cache) return nullptr;
+    return cache->v_buf.data();
+}
+
+int libane_kv_cache_position(libane_kv_cache_t cache) {
+    if (!cache) return -1;
+    return cache->pos;
+}
+
+void libane_kv_cache_reset(libane_kv_cache_t cache) {
+    if (!cache) return;
+    cache->pos = 0;
+    std::fill(cache->k_buf.begin(), cache->k_buf.end(), uint16_t(0));
+    std::fill(cache->v_buf.begin(), cache->v_buf.end(), uint16_t(0));
+}
+
+void libane_kv_cache_release(libane_kv_cache_t cache) {
+    delete cache;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+uint32_t libane_graph_add_sdpa_gqa(libane_graph_t g,
+                                    uint32_t       Q_id,
+                                    uint32_t       K_id,
+                                    uint32_t       V_id,
+                                    uint32_t       mask_id) {
+    if (!g) {
+        set_error("libane_graph_add_sdpa_gqa: null graph");
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+    try {
+        // Build inputs list; append mask only if provided.
+        std::vector<uint32_t> inputs = {Q_id, K_id, V_id};
+        if (mask_id != LIBANE_INVALID_TENSOR_ID)
+            inputs.push_back(mask_id);
+
+        // Output shape mirrors Q shape.
+        const auto& q_shape = g->graph.tensor(Q_id).shape;
+        return g->graph.add_op(LIBANE_OP_SDPA_GQA, inputs, q_shape);
+    } catch (const std::exception& e) {
+        set_error("libane_graph_add_sdpa_gqa: %s", e.what());
+        return LIBANE_INVALID_TENSOR_ID;
+    }
+}
+
 libane_status_t libane_graph_mark_output(libane_graph_t g,
                                           uint32_t       tensor_id,
                                           const char*    name) {
@@ -830,6 +1164,58 @@ libane_compiled_graph_t libane_graph_compile(libane_graph_t g) {
 
 void libane_compiled_graph_release(libane_compiled_graph_t cg) {
     delete cg;
+}
+
+libane_status_t libane_compiled_graph_save(libane_compiled_graph_t cg,
+                                            const char* path) {
+    if (!cg || !cg->cg) {
+        set_error("libane_compiled_graph_save: null compiled graph");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+    if (!path) {
+        set_error("libane_compiled_graph_save: null path");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+    if (!cg->cg->save(path)) {
+        set_error("libane_compiled_graph_save: save failed");
+        return LIBANE_ERR_EXECUTE_FAILED;
+    }
+    return LIBANE_OK;
+}
+
+libane_compiled_graph_t libane_compiled_graph_load(const char* path) {
+    if (!path) {
+        set_error("libane_compiled_graph_load: null path");
+        return nullptr;
+    }
+    auto cg = libane::graph::GraphCompiler::load(path);
+    if (!cg) {
+        set_error("libane_compiled_graph_load: load failed");
+        return nullptr;
+    }
+    auto* h = new (std::nothrow) libane_compiled_graph_s{std::move(cg)};
+    if (!h) {
+        set_error("libane_compiled_graph_load: out of memory");
+        return nullptr;
+    }
+    return h;
+}
+
+libane_status_t libane_compiled_graph_delta_reload(libane_compiled_graph_t cg) {
+    if (!cg || !cg->cg) {
+        set_error("libane_compiled_graph_delta_reload: null compiled graph");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+    bool ok = libane::graph::GraphExecutor::delta_reload(*cg->cg);
+    if (!ok) {
+        const char* rt = libane::runtime::ane_last_error();
+        if (rt && rt[0] != '\0')
+            set_error("libane_compiled_graph_delta_reload: reload failed: %s", rt);
+        else
+            set_error("libane_compiled_graph_delta_reload: reload failed");
+        return LIBANE_ERR_EXECUTE_FAILED;
+    }
+    return LIBANE_OK;
 }
 
 libane_status_t libane_graph_execute(libane_compiled_graph_t cg,
@@ -1063,6 +1449,171 @@ void libane_mil_release(libane_mil_handle_t h) {
     if (!h) return;
     if (h->prog) libane::runtime::ane_unload(h->prog);
     delete h;
+}
+
+/* ── MIL program save / load ─────────────────────────────────────────────── */
+
+// Binary file helpers (local to this translation unit)
+namespace {
+static constexpr uint32_t kMilMagic   = 0x414E454Du; // "ANEM"
+static constexpr uint32_t kMilVersion = 1u;
+
+static bool mil_w32(std::ofstream& f, uint32_t v) {
+    return static_cast<bool>(f.write(reinterpret_cast<const char*>(&v), 4));
+}
+static bool mil_wstr(std::ofstream& f, const std::string& s) {
+    uint32_t len = static_cast<uint32_t>(s.size());
+    return mil_w32(f, len) && f.write(s.data(), len);
+}
+static bool mil_wbytes(std::ofstream& f, const std::vector<uint8_t>& b) {
+    uint32_t len = static_cast<uint32_t>(b.size());
+    return mil_w32(f, len) && (b.empty() || f.write(
+        reinterpret_cast<const char*>(b.data()), len));
+}
+
+static bool mil_r32(std::ifstream& f, uint32_t& v) {
+    return static_cast<bool>(f.read(reinterpret_cast<char*>(&v), 4));
+}
+static bool mil_rstr(std::ifstream& f, std::string& s) {
+    uint32_t len;
+    if (!mil_r32(f, len)) return false;
+    s.resize(len);
+    if (len == 0) return true;
+    return static_cast<bool>(f.read(s.data(), len));
+}
+static bool mil_rbytes(std::ifstream& f, std::vector<uint8_t>& b) {
+    uint32_t len;
+    if (!mil_r32(f, len)) return false;
+    b.resize(len);
+    if (len == 0) return true;
+    return static_cast<bool>(f.read(reinterpret_cast<char*>(b.data()), len));
+}
+} // anonymous namespace
+
+libane_status_t libane_mil_save(libane_mil_handle_t h, const char* path) {
+    if (!h || !path) {
+        set_error("libane_mil_save: null argument");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+    if (!h->prog) {
+        set_error("libane_mil_save: handle has no compiled program");
+        return LIBANE_ERR_INVALID_ARG;
+    }
+
+    libane::runtime::SerializedProgram sp;
+    if (!libane::runtime::ane_serialize_program(h->prog, sp)) {
+        set_error("libane_mil_save: ane_serialize_program failed");
+        return LIBANE_ERR_EXECUTE_FAILED;
+    }
+
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        set_error("libane_mil_save: cannot open '%s' for writing", path);
+        return LIBANE_ERR_EXECUTE_FAILED;
+    }
+
+    // Header
+    mil_w32(f, kMilMagic);
+    mil_w32(f, kMilVersion);
+
+    // MIL text + metadata
+    mil_wstr(f, sp.mil_text);
+    mil_wstr(f, sp.hwx_rel_path);
+    mil_wstr(f, sp.debug_name);
+    mil_wbytes(f, sp.hwx_bytes);
+
+    // Weight entries
+    mil_w32(f, static_cast<uint32_t>(sp.weights.size()));
+    for (const auto& we : sp.weights) {
+        mil_wstr(f, we.filename);
+        std::vector<uint8_t> data(we.data.begin(), we.data.end());
+        mil_wbytes(f, data);
+    }
+
+    // I/O param names
+    mil_w32(f, static_cast<uint32_t>(sp.input_param_names.size()));
+    for (const auto& n : sp.input_param_names)
+        mil_wstr(f, n);
+    mil_w32(f, static_cast<uint32_t>(sp.output_var_names.size()));
+    for (const auto& n : sp.output_var_names)
+        mil_wstr(f, n);
+
+    if (!f) {
+        set_error("libane_mil_save: write error on '%s'", path);
+        return LIBANE_ERR_EXECUTE_FAILED;
+    }
+    return LIBANE_OK;
+}
+
+libane_mil_handle_t libane_mil_load(const char* path) {
+    if (!path) {
+        set_error("libane_mil_load: null path");
+        return nullptr;
+    }
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        set_error("libane_mil_load: cannot open '%s'", path);
+        return nullptr;
+    }
+
+    uint32_t magic = 0, version = 0;
+    if (!mil_r32(f, magic) || magic != kMilMagic) {
+        set_error("libane_mil_load: not an ANEM file (bad magic)");
+        return nullptr;
+    }
+    if (!mil_r32(f, version) || version != kMilVersion) {
+        set_error("libane_mil_load: unsupported ANEM version %u", version);
+        return nullptr;
+    }
+
+    libane::runtime::SerializedProgram sp;
+    if (!mil_rstr(f, sp.mil_text)    ||
+        !mil_rstr(f, sp.hwx_rel_path)||
+        !mil_rstr(f, sp.debug_name)  ||
+        !mil_rbytes(f, sp.hwx_bytes)) {
+        set_error("libane_mil_load: truncated header in '%s'", path);
+        return nullptr;
+    }
+
+    uint32_t nweights = 0;
+    if (!mil_r32(f, nweights)) {
+        set_error("libane_mil_load: truncated weight count in '%s'", path);
+        return nullptr;
+    }
+    sp.weights.resize(nweights);
+    for (auto& we : sp.weights) {
+        std::vector<uint8_t> data;
+        if (!mil_rstr(f, we.filename) || !mil_rbytes(f, data)) {
+            set_error("libane_mil_load: truncated weight data in '%s'", path);
+            return nullptr;
+        }
+        we.data.assign(data.begin(), data.end());
+    }
+
+    uint32_t nin = 0, nout = 0;
+    if (!mil_r32(f, nin)) return nullptr;
+    sp.input_param_names.resize(nin);
+    for (auto& n : sp.input_param_names)
+        if (!mil_rstr(f, n)) return nullptr;
+    if (!mil_r32(f, nout)) return nullptr;
+    sp.output_var_names.resize(nout);
+    for (auto& n : sp.output_var_names)
+        if (!mil_rstr(f, n)) return nullptr;
+
+    auto* prog = libane::runtime::ane_restore_program(sp);
+    if (!prog) {
+        set_error("libane_mil_load: ane_restore_program failed");
+        return nullptr;
+    }
+
+    auto* h = new (std::nothrow) libane_mil_program_s{prog};
+    if (!h) {
+        libane::runtime::ane_unload(prog);
+        set_error("libane_mil_load: out of memory");
+        return nullptr;
+    }
+    return h;
 }
 
 } // extern "C"

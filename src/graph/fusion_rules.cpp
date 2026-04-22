@@ -11,6 +11,8 @@ namespace graph {
 bool FusionRules::op_supported(libane_op_t op) {
     switch (op) {
     case LIBANE_OP_MATMUL:
+    case LIBANE_OP_MATMUL_W8A16:
+    case LIBANE_OP_MATMUL_W8A8:
     case LIBANE_OP_GELU:
     case LIBANE_OP_SOFTMAX:
     case LIBANE_OP_AVG_POOL:
@@ -60,8 +62,21 @@ bool FusionRules::op_supported(libane_op_t op) {
     case LIBANE_OP_PWL_ACTIVATION:
     case LIBANE_OP_CLIP:
     case LIBANE_OP_PAD:
+    case LIBANE_OP_DYNAMIC_MATMUL:
+    case LIBANE_OP_SDPA:
+    case LIBANE_OP_SDPA_GQA:
+    case LIBANE_OP_EXP:
+    case LIBANE_OP_SIN:
+    case LIBANE_OP_COS:
+    case LIBANE_OP_ABS:
+    case LIBANE_OP_POW:
+    case LIBANE_OP_CEIL:
+    case LIBANE_OP_FLOOR:
+    case LIBANE_OP_ROUND:
+    case LIBANE_OP_SIGN:
         return true;
     case LIBANE_OP_CONV2D:
+        return true;  // may start a group; extension is gated in can_extend()
     case LIBANE_OP_CAST:
     default:
         return false;
@@ -93,6 +108,34 @@ FusionRules::build_consumer_count(const AneGraph& graph) {
 
 /* ── can_extend ──────────────────────────────────────────────────────────── */
 
+/// Pointwise activations that are safe to fuse after a CONV2D node.
+/// These ops are shape-preserving, element-wise, and work on image tensors.
+static bool is_conv_compatible_activation(libane_op_t op) {
+    switch (op) {
+    case LIBANE_OP_RELU:
+    case LIBANE_OP_GELU:
+    case LIBANE_OP_SILU:
+    case LIBANE_OP_TANH:
+    case LIBANE_OP_SIGMOID:
+    case LIBANE_OP_HARDSWISH:
+    case LIBANE_OP_LEAKY_RELU:
+    case LIBANE_OP_ELU:
+    case LIBANE_OP_CLIP:
+    case LIBANE_OP_NEG:
+    case LIBANE_OP_ABS:
+    case LIBANE_OP_EXP:
+    case LIBANE_OP_SIN:
+    case LIBANE_OP_COS:
+    case LIBANE_OP_CEIL:
+    case LIBANE_OP_FLOOR:
+    case LIBANE_OP_ROUND:
+    case LIBANE_OP_SIGN:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool FusionRules::can_extend(const AneGraph& graph,
                                const FusionGroup& group,
                                uint32_t candidate_id,
@@ -104,6 +147,20 @@ bool FusionRules::can_extend(const AneGraph& graph,
 
     // Op must be supported
     if (!op_supported(candidate.op)) return false;
+
+    // CONV2D compatibility rules:
+    //   (a) If the group contains a CONV2D node, only conv-compatible
+    //       pointwise activations may extend it.
+    //   (b) A CONV2D candidate may not extend a non-CONV2D group
+    //       (tensor memory layouts are incompatible).
+    bool group_has_conv = false;
+    for (uint32_t nid : group.node_ids)
+        if (graph.node(nid).op == LIBANE_OP_CONV2D) { group_has_conv = true; break; }
+
+    if (group_has_conv && !is_conv_compatible_activation(candidate.op))
+        return false;
+    if (!group_has_conv && candidate.op == LIBANE_OP_CONV2D)
+        return false;
 
     // Rule 1a — chain: candidate's primary input must be last node's output
     if (candidate.inputs.empty()) return false;
@@ -121,10 +178,9 @@ bool FusionRules::can_extend(const AneGraph& graph,
         }
     }
 
-    // Rule 3 — binary op: inputs[1] must not be produced by any node in group
-    if (candidate.inputs.size() >= 2) {
-        TensorId side = candidate.inputs[1];
-        // Build set of outputs produced within the group
+    // Rule 3 — all side inputs must come from outside the group
+    for (size_t si = 1; si < candidate.inputs.size(); ++si) {
+        TensorId side = candidate.inputs[si];
         for (uint32_t nid : group.node_ids) {
             if (graph.node(nid).output == side)
                 return false;  // side input is an intra-group tensor — can't fuse

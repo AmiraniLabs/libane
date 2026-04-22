@@ -103,6 +103,15 @@ public:
      */
     std::shared_ptr<CacheEntry> put(std::unique_ptr<CacheEntry> entry);
 
+    /**
+     * Remove one entry by key.
+     * Returns true if an entry was removed from the cache map/LRU list.
+     *
+     * Any external shared_ptr references remain valid; backend teardown still
+     * happens only when the final reference is released.
+     */
+    bool erase(const CacheKey& key);
+
     /** Remove all entries and release backend handles. */
     void flush();
 

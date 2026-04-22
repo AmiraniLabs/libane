@@ -16,7 +16,12 @@
  *     the output of any node already in the group (it is a "side input"
  *     coming from outside — graph input or a different fusion group).
  *
- *  4. Supported ops only: CONV2D and CAST are rejected.
+ *  4. CONV2D rules: CONV2D may start a group and may be extended only by
+ *     shape-preserving pointwise activations (RELU, GELU, SILU, TANH,
+ *     SIGMOID, HARDSWISH, LEAKY_RELU, ELU, CLIP, NEG).  Non-CONV2D groups
+ *     cannot be extended by a CONV2D node.  CAST is always rejected.
+ *
+ *  5. Supported ops only: CAST is rejected unconditionally.
  *
  * Nodes are processed in topological order (= insertion order, since
  * AneGraph::add_op guarantees inputs pre-exist).

@@ -9,6 +9,8 @@
 
 #include <unordered_map>
 #include <memory>
+#include <vector>
+#include <cstring>
 
 namespace libane {
 namespace graph {
@@ -37,19 +39,46 @@ bool GraphExecutor::execute(const CompiledGraph&            cg,
         }
     } guard{tmp_input_bufs};
 
-    // Acquire and fill one buffer per graph input
+    // Acquire and fill one buffer per graph input.
+    // If the tensor has int8 quant params (from a W8A8 op), the caller has
+    // supplied int8 data — dequantize to fp16 before packing the IOSurface.
     for (size_t i = 0; i < cg.graph_input_ids().size(); ++i) {
         TensorId tid = cg.graph_input_ids()[i];
         if (!cg.tensor_bytes().count(tid)) return false;
         const auto* tshape = cg.tensor_shape(tid);
         if (!tshape) return false;
 
-        // Input pointers are contiguous logical [1,C,1,S] fp16 tensors.
-        // Acquire tensor-aware buffers so copy_from applies ANE stride-safe packing.
         auto buf = global_buffer_pool().acquire_tensor_padded(
-            tshape->channels, tshape->seq, cg.io_alloc_bytes());
+            tshape->channels, tshape->height * tshape->seq, cg.io_alloc_bytes());
         if (!buf) return false;
-        buf->copy_from(input_ptrs[i], input_bytes[i]);
+
+        auto qp_it = cg.quant_params().find(tid);
+        if (qp_it != cg.quant_params().end()) {
+            // int8 input: dequantize to fp16 before IOSurface copy
+            const QuantParams& qp    = qp_it->second;
+            const int8_t*      src   = static_cast<const int8_t*>(input_ptrs[i]);
+            size_t             n_elems = input_bytes[i]; // bytes == elements for int8
+            std::vector<uint16_t> fp16_buf(n_elems);
+            for (size_t k = 0; k < n_elems; ++k) {
+                float f = (static_cast<float>(src[k]) - static_cast<float>(qp.zero_point))
+                          * qp.scale;
+                // fp32 → fp16 via bit manipulation
+                uint32_t fb; std::memcpy(&fb, &f, 4);
+                uint32_t s = (fb >> 16) & 0x8000u;
+                int32_t  e = static_cast<int32_t>((fb >> 23) & 0xFFu) - 127 + 15;
+                uint32_t m = (fb >> 13) & 0x3FFu;
+                uint16_t h;
+                if (e <= 0)       h = static_cast<uint16_t>(s);
+                else if (e >= 31) h = static_cast<uint16_t>(s | 0x7C00u);
+                else              h = static_cast<uint16_t>(s | (static_cast<uint32_t>(e) << 10) | m);
+                fp16_buf[k] = h;
+            }
+            buf->copy_from(fp16_buf.data(), n_elems * sizeof(uint16_t));
+        } else {
+            // fp16 input: normal path
+            buf->copy_from(input_ptrs[i], input_bytes[i]);
+        }
+
         if (!buf) return false;
         tmp_input_bufs[tid] = std::move(buf);
     }
@@ -57,6 +86,7 @@ bool GraphExecutor::execute(const CompiledGraph&            cg,
 #ifdef __APPLE__
     for (const auto& group : cg.groups()) {
         runtime::AneProgram* program = group.program;
+        if (!program) return false;
 
         // Path B — _ANEClient warm-path dispatch
         if (program->objc_client_model) {
@@ -151,6 +181,15 @@ bool GraphExecutor::execute(const CompiledGraph&            cg,
         buf->copy_to(output_ptrs[i], output_bytes[i]);
     }
 
+    return true;
+}
+
+bool GraphExecutor::delta_reload(const CompiledGraph& cg) {
+    for (const auto& group : cg.groups()) {
+        if (!group.program) continue;
+        if (!runtime::ane_delta_reload(group.program))
+            return false;
+    }
     return true;
 }
 

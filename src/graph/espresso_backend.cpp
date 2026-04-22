@@ -65,9 +65,9 @@ bool EspressoBackend::owns(const AneGraph& graph, const FusionGroup& group) cons
     const GraphNode& node = graph.node(group.node_ids[0]);
     if (node.op != LIBANE_OP_MATMUL) return false;
 
-    // Limit to seq == 16 (single ANE tile, pure FC); general matmul stays with MilBackend
+    // Limit to seq == 32 (single ANE tile, pure FC); general matmul stays with MilBackend
     const mil::TensorShape& out_shape = graph.tensor(node.output).shape;
-    return out_shape.seq == 16;
+    return out_shape.seq == 32;
 }
 
 /* ── EspressoBackend::compile_group ─────────────────────────────────────── */

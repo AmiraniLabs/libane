@@ -46,6 +46,25 @@ public:
                         const std::vector<size_t>&      input_bytes,
                         const std::vector<void*>&       output_ptrs,
                         const std::vector<size_t>&      output_bytes);
+
+    /**
+     * Reload all ANE programs in a compiled graph into SRAM without
+     * recompiling.  Equivalent to calling ane_delta_reload() on each
+     * group's program in order.
+     *
+     * Use this after the host has been suspended / resumed, or after any
+     * ANE context reset, to restore the compiled weights without paying the
+     * full compile cost (~8.5× faster than recompiling).
+     *
+     * Also enables LoRA-style weight hot-swap workflows: rewrite the weight
+     * blobs in the AneProgram SRAM buffers, then call delta_reload() to
+     * push the new weights to the accelerator without rebuilding the graph.
+     *
+     * @param cg  Compiled graph whose programs are to be reloaded.
+     * @return    true if every ane_delta_reload() call succeeded;
+     *            false on the first failure (remaining groups are skipped).
+     */
+    static bool delta_reload(const CompiledGraph& cg);
 };
 
 } // namespace graph

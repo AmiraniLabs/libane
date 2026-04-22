@@ -16,10 +16,10 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────────── */
 
-#define LIBANE_VERSION         "0.8.2"
+#define LIBANE_VERSION         "0.9.0"
 #define LIBANE_VERSION_MAJOR   0
-#define LIBANE_VERSION_MINOR   8
-#define LIBANE_VERSION_PATCH   2
+#define LIBANE_VERSION_MINOR   9
+#define LIBANE_VERSION_PATCH   0
 
 /* ── ABI visibility ──────────────────────────────────────────────────────── */
 
@@ -53,6 +53,26 @@ typedef struct libane_program_s* libane_handle_t;
 
 typedef enum {
     LIBANE_OP_MATMUL     = 0,
+    /**
+     * 2D Convolution.
+     *
+     * Input:  [1, IC,  H_in,  W_in]  (conv image tensor — H and W are spatial dims)
+     * Output: [1, OC,  H_out, W_out]
+     * Weight: [OC, IC/groups, kH, kW]  fp16, row-major, NO transpose required.
+     *
+     *   H_out = (H_in + pad_top + pad_bot - dilation_h*(kH-1) - 1) / stride_h + 1
+     *   W_out = (W_in + pad_left + pad_right - dilation_w*(kW-1) - 1) / stride_w + 1
+     *
+     * W_in and W_out must be multiples of 32 (IOSurface 64-byte DMA alignment
+     * for fp16 row stride).  Bias is not supported; follow with ADD if needed.
+     *
+     * Use libane_graph_add_conv2d() — it packs hyperparams and kernel correctly.
+     * Raw weights blob format (for libane_graph_add_op):
+     *   int32[11] = {kH, kW, stride_h, stride_w,
+     *                pad_top, pad_left, pad_bottom, pad_right,
+     *                dilation_h, dilation_w, groups}           (44 bytes)
+     *   fp16[OC × IC/groups × kH × kW]                        (kernel bytes)
+     */
     LIBANE_OP_CONV2D     = 1,
     LIBANE_OP_LAYER_NORM = 2,
     LIBANE_OP_GELU       = 3,
@@ -135,6 +155,138 @@ typedef enum {
      * output_shape must equal input_shape + total padding on each axis.
      */
     LIBANE_OP_PAD   = 51,
+
+    /**
+     * Dynamic matrix multiply: Y = X @ W^T  (both inputs are runtime tensors).
+     *
+     * Uses matrix tensor format (height > 1, C = 1):
+     *   inputs[0] = X: [1, 1, K, M]   (height=K inner dim, seq=M output cols)
+     *   inputs[1] = W: [1, 1, N, K]   (height=N output rows, seq=K inner dim)
+     *   output:        [1, 1, N, M]
+     *
+     * No weights. K/N/M are inferred from the input shapes.
+     * Constraints: K, M, N must all be multiples of 32.
+     * Use this when the weight matrix changes at runtime.
+     * For static weights, prefer MATMUL (3× faster via conv1x1).
+     */
+    LIBANE_OP_DYNAMIC_MATMUL = 52,
+
+    /**
+     * Scaled dot-product attention: out = softmax(Q @ K^T / sqrt(D)) @ V
+     *
+     * Uses matrix tensor format (height > 1):
+     *   inputs[0] = Q:    [1, H, S, D]
+     *   inputs[1] = K:    [1, H, S, D]
+     *   inputs[2] = V:    [1, H, S, D]
+     *   inputs[3] = mask: [1, 1, S, S]  (optional; omit for unmasked attention)
+     *   output:           [1, H, S, D]
+     *
+     * No weights. H/S/D are inferred from the input shapes.
+     * Constraints: S and D must both be multiples of 32.
+     */
+    LIBANE_OP_SDPA = 53,
+
+    /**
+     * W8A16 quantized matrix multiply: Y = dequant(W_int8, scales) × X
+     *
+     * Activations are fp16 (A16).  Weights are stored as int8 with per-output-channel
+     * fp32 scale factors (W8).  Dequantization is fused into the conv1x1 path:
+     *   W_fp16[ic, oc] = (float)W_int8[ic, oc] × scale[oc]
+     *
+     * Input:   [1, IC, 1, S]   (standard activation tensor)
+     * Output:  [1, OC, 1, S]
+     * Weights: [IC, OC]  int8 row-major  (same layout convention as MATMUL)
+     * Scales:  [OC]      float32 per-output-channel (symmetric quantization)
+     *
+     * Use libane_graph_add_matmul_w8a16() — it packs hyperparams and the two
+     * buffers (int8 weights + float32 scales) into the internal blob format.
+     * Raw weights blob format (for libane_graph_add_op):
+     *   int32[2]        = {OC, IC}                     (8 bytes)
+     *   int8[IC × OC]   = quantized weights [IC, OC]   (IC*OC bytes)
+     *   uint8[0..3]     = padding to next 4-byte boundary
+     *   float32[OC]     = per-channel scales            (OC*4 bytes)
+     *
+     * Notes:
+     *  - Symmetric quantization only (zero-point = 0).
+     *  - S must be a multiple of 32 (same as MATMUL).
+     *  - Fuses with downstream elementwise ops (GELU, SILU, ADD, etc.)
+     *    exactly like MATMUL.
+     *  - For asymmetric quantization, apply a bias via a subsequent ADD node.
+     */
+    LIBANE_OP_MATMUL_W8A16 = 54,
+
+    /**
+     * Quantized matrix multiply — int8 weights, int8 activations (W8A8).
+     *
+     * Both weights and input activations are stored as int8, halving memory
+     * bandwidth on both sides of the multiply.  The ANE still operates in fp16;
+     * dequantization is applied transparently:
+     *
+     *   - Weights: dequantized at compile time (offline), baked into the HWX.
+     *   - Activations: dequantized at execute time before IOSurface transfer.
+     *
+     * Blob format (packed, little-endian):
+     *   int32[2] = { OC, IC }                          (8 bytes)
+     *   int8[IC × OC]                                   (IC * OC bytes)
+     *   pad to 4-byte boundary
+     *   float32[OC]    per-channel weight scales        (OC * 4 bytes)
+     *   float32[1]     per-tensor activation scale      (4 bytes)
+     *   int32[1]       per-tensor activation zero_point (4 bytes)
+     *
+     * Quantization equations:
+     *   W_fp16[ic, oc]  = W_int8[ic, oc] × weight_scales[oc]
+     *   A_fp16[n]       = (A_int8[n] - act_zero_point) × act_scale
+     *
+     * The caller is responsible for quantizing activations to int8 before
+     * calling execute.  Use libane_quantize_i8() as a convenience helper.
+     * Fuses with downstream activations (GELU, SiLU, etc.) identically to
+     * MATMUL_W8A16.
+     */
+    LIBANE_OP_MATMUL_W8A8 = 55,
+
+    /**
+     * Grouped Query Attention (GQA) SDPA.
+     *
+     * Like SDPA but Q has num_q_heads heads while K and V each have
+     * num_kv_heads heads (num_q_heads must be divisible by num_kv_heads).
+     * K and V are tiled to num_q_heads before the scaled-dot-product-attention.
+     *
+     * Inputs (in order):
+     *   [0] Q    [1, num_q_heads,  S, D]
+     *   [1] K    [1, num_kv_heads, S, D]
+     *   [2] V    [1, num_kv_heads, S, D]
+     *   [3] mask [1, 1,            S, S]  (optional)
+     * Output: [1, num_q_heads, S, D]
+     *
+     * Use libane_graph_add_sdpa_gqa() as the convenience wrapper.
+     * S and D must both be multiples of 32.
+     * num_q_heads % num_kv_heads == 0.
+     *
+     * No weights blob — num_q_heads and num_kv_heads are derived from input shapes.
+     */
+    LIBANE_OP_SDPA_GQA = 56,
+
+    /* ── Elementary math ops ────────────────────────────────────────────── */
+    LIBANE_OP_EXP   = 57,  /**< Element-wise natural exponential: out = exp(x) */
+    LIBANE_OP_SIN   = 58,  /**< Element-wise sine (radians): out = sin(x) */
+    LIBANE_OP_COS   = 59,  /**< Element-wise cosine (radians): out = cos(x) */
+    LIBANE_OP_ABS   = 60,  /**< Element-wise absolute value: out = |x| */
+
+    /**
+     * Element-wise power: out = base ^ exponent.
+     *
+     * inputs[0] = base     [1, C, 1, S]
+     * inputs[1] = exponent [1, C, 1, S]  (same shape as base)
+     * output:               [1, C, 1, S]
+     *
+     * No weights. Both inputs must be provided at runtime.
+     */
+    LIBANE_OP_POW   = 61,
+
+    LIBANE_OP_CEIL  = 62,  /**< Element-wise ceiling: out = ceil(x) */
+    LIBANE_OP_FLOOR = 63,  /**< Element-wise floor:   out = floor(x) */
+    LIBANE_OP_ROUND = 64,  /**< Element-wise round to nearest even: out = round(x) */
+    LIBANE_OP_SIGN  = 65,  /**< Element-wise sign: out = -1/0/+1 */
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */
@@ -142,7 +294,7 @@ typedef enum {
 /**
  * ANE tensors are always [1, C, 1, S] (NCHW with H=1).
  * dims[0] = batch (always 1 for ANE), dims[1] = C, dims[2] = 1, dims[3] = S.
- * S must be a multiple of 16 (ANE constraint #1).
+ * S must be a multiple of 32 (ANE activation-output stride constraint).
  *
  * For matmul(A[M,K], B[K,N]) the caller maps:
  *   A shape: {1, K, 1, M}   B shape: {1, N, 1, K}
@@ -289,7 +441,29 @@ LIBANE_API libane_status_t libane_execute2(libane_handle_t h,
 LIBANE_API libane_status_t libane_delta_reload(libane_handle_t h);
 
 /**
+ * Remove a compiled program from ANE SRAM without freeing the compile slot.
+ *
+ * Calls unloadWithQoS: on the model but does NOT call
+ * purgeCompiledModelMatchingHash:, so aned's compile-slot entry remains alive.
+ * A subsequent libane_delta_reload() on the same handle will skip
+ * compileWithQoS: and reload in ~1 ms (aned in-memory cache, Layer 3).
+ *
+ * Use this for LRU-style SRAM management when the slot limit (~16) allows it:
+ *
+ *   libane_unload_sram(h_a);       // free SRAM, keep compile slot
+ *   libane_delta_reload(h_b);      // swap b into SRAM in ~1 ms
+ *   libane_delta_reload(h_a);      // swap a back in ~1 ms (slot intact)
+ *
+ * Call libane_release() when you are done with the handle entirely.
+ * Safe to call with NULL.
+ */
+LIBANE_API void libane_unload_sram(libane_handle_t h);
+
+/**
  * Release a compiled program handle and return resources to the pool.
+ * Calls unloadWithQoS: (SRAM) + purgeCompiledModelMatchingHash: (compile slot).
+ * A subsequent libane_compile() with the same content will pay the
+ * ANECompilerService cost (~40 ms from disk cache, or ~4000 ms cold).
  * Safe to call with NULL.
  */
 LIBANE_API void libane_release(libane_handle_t h);
@@ -343,6 +517,14 @@ LIBANE_API void libane_set_backend(const char* backend);
 /** Flush the compile cache and release all cached program handles. */
 LIBANE_API void libane_cache_flush(void);
 
+/**
+ * Mark an explicit end-of-job boundary.
+ *
+ * Equivalent to libane_cache_flush(); provided as a lifecycle-oriented API for
+ * long-running workloads that batch many temporary compilations.
+ */
+LIBANE_API void libane_end_job(void);
+
 /** Return current cache usage in bytes. */
 LIBANE_API size_t libane_cache_size_bytes(void);
 
@@ -379,11 +561,39 @@ typedef struct {
 LIBANE_API libane_status_t libane_device_info(libane_device_info_t* out);
 
 /**
+ * Return the number of ANE compile slots consumed in this process lifetime.
+ *
+ * aned (the ANE daemon) enforces a hard per-process limit of approximately
+ * 119 unique model compilations.  Exceeding it produces silent failures
+ * followed by a hard crash (SIGSEGV).  libane refuses further compiles at
+ * 115 (kCompileHardLimit) with a descriptive error, and prints a warning
+ * to stderr at 100 (kCompileWarnAt).
+ *
+ * Slots are consumed only by actual `compileWithQoS:` calls — warm-path
+ * hits (compiledModelExists=YES, Path C) do NOT consume a slot.
+ *
+ * The count is monotonically increasing within a process.  Unloading or
+ * releasing a model does NOT return its slot.
+ *
+ * Recommended use in long-running processes or training loops:
+ *   if (libane_compile_count() > 90) { // reconsider compile strategy }
+ */
+LIBANE_API int libane_compile_count(void);
+
+/**
+ * Return the number of compile slots remaining before the hard limit.
+ *
+ * Returns 0 when the budget is exhausted — further libane_compile() /
+ * libane_mil_compile() calls will return NULL with a descriptive error.
+ */
+LIBANE_API int libane_compile_slots_remaining(void);
+
+/**
  * Per-chip ANE tensor shape limits.
  *
  * max_seq       — maximum S dimension (must also be a multiple of seq_alignment).
  * max_channels  — maximum C dimension.
- * seq_alignment — S must be a multiple of this value (always 16).
+ * seq_alignment — S must be a multiple of this value (always 32).
  *
  * SRAM BUDGET WARNING:
  *   max_seq and max_channels are independent dimension caps, but the real
@@ -405,7 +615,7 @@ LIBANE_API libane_status_t libane_device_info(libane_device_info_t* out);
 typedef struct {
     int32_t max_seq;        /**< maximum sequence / spatial dimension */
     int32_t max_channels;   /**< maximum channel dimension */
-    int32_t seq_alignment;  /**< S must be a multiple of this (always 16) */
+    int32_t seq_alignment;  /**< S must be a multiple of this (always 32) */
 } libane_shape_limits_t;
 
 /**
@@ -444,6 +654,90 @@ typedef struct {
 } libane_perf_stats_t;
 
 
+/* ── KV Cache API ────────────────────────────────────────────────────────── */
+
+/**
+ * Opaque KV-cache handle.
+ *
+ * Holds CPU-side fp16 buffers for K and V at a fixed maximum sequence length.
+ * Designed for autoregressive decode with SDPA/SDPA_GQA graphs compiled at
+ * the maximum sequence length (static-mask strategy).
+ *
+ * Workflow:
+ *   1. Compile your SDPA graph with K/V shape [1, num_heads, max_seq, head_dim].
+ *   2. Create a KV cache that matches those dimensions.
+ *   3. At each decode step:
+ *        a. Pass one new token's K/V slice to libane_kv_cache_update().
+ *        b. Pass libane_kv_cache_k() and libane_kv_cache_v() (the full buffers)
+ *           as K and V inputs to your compiled SDPA graph.
+ *        c. The buffers are zero-initialised beyond the current position,
+ *           so attend over garbage is suppressed without an explicit mask.
+ *           For exact causal masking, provide a mask tensor to your SDPA graph.
+ *   4. Call libane_kv_cache_reset() to reuse the cache for a new sequence.
+ */
+typedef struct libane_kv_cache_s* libane_kv_cache_t;
+
+/**
+ * Create a KV cache for num_heads attention heads, head_dim D, and max_seq positions.
+ *
+ * Both K and V buffers are allocated as zeroed fp16 arrays of size
+ * num_heads × max_seq × head_dim elements.  The cache layout matches the
+ * matrix tensor format expected by SDPA/SDPA_GQA:
+ *   [1, num_heads, max_seq, head_dim]  →  channels=num_heads, height=max_seq, seq=head_dim
+ *
+ * @param num_heads  Number of attention heads (= num_kv_heads for GQA).
+ * @param head_dim   Head dimension D.
+ * @param max_seq    Maximum sequence length to cache.
+ * @return Non-null handle on success; NULL on invalid args or OOM.
+ *         Must be freed with libane_kv_cache_release().
+ */
+LIBANE_API libane_kv_cache_t libane_kv_cache_create(int num_heads,
+                                                      int head_dim,
+                                                      int max_seq);
+
+/**
+ * Append one new token's K and V slices to the cache.
+ *
+ * new_k and new_v must each point to num_heads × head_dim fp16 elements
+ * in [head, dim] row-major order (i.e. the per-token contribution from all heads).
+ *
+ * If pos >= max_seq the cache is full and the call returns -1 without
+ * modifying the cache (the caller should stop or evict).
+ *
+ * @param cache   KV cache handle.
+ * @param new_k   Source fp16 array [num_heads × head_dim].
+ * @param new_v   Source fp16 array [num_heads × head_dim].
+ * @return        New position (1-based count of filled slots) on success,
+ *                or -1 if the cache is full or arguments are invalid.
+ */
+LIBANE_API int libane_kv_cache_update(libane_kv_cache_t cache,
+                                       const void*       new_k,
+                                       const void*       new_v);
+
+/**
+ * Return a read-only pointer to the full K buffer
+ * (num_heads × max_seq × head_dim fp16 elements).
+ */
+LIBANE_API const void* libane_kv_cache_k(libane_kv_cache_t cache);
+
+/**
+ * Return a read-only pointer to the full V buffer
+ * (num_heads × max_seq × head_dim fp16 elements).
+ */
+LIBANE_API const void* libane_kv_cache_v(libane_kv_cache_t cache);
+
+/** Return the number of valid token positions written so far. */
+LIBANE_API int libane_kv_cache_position(libane_kv_cache_t cache);
+
+/**
+ * Reset the position counter to 0 without freeing memory.
+ * The K/V buffers are also zeroed so stale data cannot affect new sequences.
+ */
+LIBANE_API void libane_kv_cache_reset(libane_kv_cache_t cache);
+
+/** Free a KV cache. Safe to call with NULL. */
+LIBANE_API void libane_kv_cache_release(libane_kv_cache_t cache);
+
 /* ── Graph API ───────────────────────────────────────────────────────────── */
 
 /**
@@ -475,7 +769,7 @@ LIBANE_API void libane_graph_release(libane_graph_t g);
  *
  * @param g      Graph handle.
  * @param name   Human-readable name (used in debug output).
- * @param shape  ANE tensor shape [1, C, 1, S].  S must be a multiple of 16.
+ * @param shape  ANE tensor shape [1, C, 1, S].  S must be a multiple of 32.
  * @return       Tensor ID, or LIBANE_INVALID_TENSOR_ID on error.
  */
 LIBANE_API uint32_t libane_graph_add_input(libane_graph_t  g,
@@ -542,6 +836,172 @@ LIBANE_API uint32_t libane_graph_add_pwl_activation(libane_graph_t g,
                                                      uint32_t       n_samples);
 
 /**
+ * Add a 2D convolution op to the graph.
+ *
+ * Convenience wrapper around libane_graph_add_op(LIBANE_OP_CONV2D).
+ * Packs the 11 integer hyperparameters and the fp16 kernel blob into the
+ * internal weight format expected by the graph compiler.
+ *
+ * Input must be a conv image tensor: [1, IC, H_in, W_in] where H_in > 1
+ * and W_in is a multiple of 32 (IOSurface 64-byte DMA alignment).
+ * Output must be:  [1, OC, H_out, W_out]  where:
+ *   H_out = (H_in + pad_top  + pad_bottom - dilation_h*(kH-1) - 1) / stride_h + 1
+ *   W_out = (W_in + pad_left + pad_right  - dilation_w*(kW-1) - 1) / stride_w + 1
+ * W_out must also be a multiple of 32.
+ *
+ * Bias is not supported; chain a graph ADD node if needed.
+ *
+ * @param g             Graph handle.
+ * @param input_id      Input tensor ID.
+ * @param output_shape  Output shape [1, OC, H_out, W_out].
+ * @param kH            Kernel height (≥ 1).
+ * @param kW            Kernel width  (≥ 1).
+ * @param stride_h      Vertical stride   (≥ 1).
+ * @param stride_w      Horizontal stride (≥ 1).
+ * @param pad_top       Top    padding in pixels (≥ 0).
+ * @param pad_left      Left   padding in pixels (≥ 0).
+ * @param pad_bottom    Bottom padding in pixels (≥ 0).
+ * @param pad_right     Right  padding in pixels (≥ 0).
+ * @param dilation_h    Vertical dilation   (≥ 1).
+ * @param dilation_w    Horizontal dilation (≥ 1).
+ * @param groups        Depthwise/group factor (≥ 1; IC % groups == 0).
+ * @param kernel        fp16 kernel data, shape [OC, IC/groups, kH, kW] row-major.
+ * @param kernel_bytes  Byte length of kernel (must equal OC × IC/groups × kH × kW × 2).
+ * @return              Tensor ID of the output, or LIBANE_INVALID_TENSOR_ID on error.
+ */
+LIBANE_API uint32_t libane_graph_add_conv2d(libane_graph_t g,
+                                             uint32_t       input_id,
+                                             libane_shape_t output_shape,
+                                             int            kH,
+                                             int            kW,
+                                             int            stride_h,
+                                             int            stride_w,
+                                             int            pad_top,
+                                             int            pad_left,
+                                             int            pad_bottom,
+                                             int            pad_right,
+                                             int            dilation_h,
+                                             int            dilation_w,
+                                             int            groups,
+                                             const void*    kernel,
+                                             size_t         kernel_bytes);
+
+/**
+ * Add a W8A16 quantized matrix multiply op to the graph.
+ *
+ * Convenience wrapper around libane_graph_add_op(LIBANE_OP_MATMUL_W8A16).
+ * Packs the int8 weight matrix and float32 per-channel scale vector into the
+ * internal blob format expected by the graph compiler.
+ *
+ * Dequantization is performed at compile time (fused into the conv1x1 path):
+ *   W_fp16[ic, oc] = (float)weights[ic * OC + oc] × scales[oc]
+ *
+ * The resulting fp16 weight matrix is then compiled exactly like a standard
+ * MATMUL, so W8A16 nodes fuse with downstream elementwise ops (GELU, ADD, …)
+ * at zero extra cost.
+ *
+ * @param g            Graph handle.
+ * @param input_id     Input tensor ID; must have shape [1, IC, 1, S].
+ * @param output_shape [1, OC, 1, S]; S must match the input's S.
+ * @param weights      int8 weight matrix, shape [IC, OC] row-major.
+ *                     (Same layout convention as MATMUL: IC rows, OC columns.)
+ * @param scales       float32 per-output-channel scales, length OC.
+ *                     Symmetric quantization only (zero-point implicitly 0).
+ * @param IC           Input channel count.  Must equal input tensor's channels.
+ * @param OC           Output channel count. Must equal output tensor's channels.
+ * @return             Tensor ID of the output, or LIBANE_INVALID_TENSOR_ID on error.
+ */
+LIBANE_API uint32_t libane_graph_add_matmul_w8a16(libane_graph_t g,
+                                                    uint32_t       input_id,
+                                                    libane_shape_t output_shape,
+                                                    const int8_t*  weights,
+                                                    const float*   scales,
+                                                    int            IC,
+                                                    int            OC);
+
+/**
+ * Add a W8A8 quantized matrix multiply op to the graph.
+ *
+ * Like MATMUL_W8A16 but the caller also quantizes activations to int8 before
+ * calling execute.  The executor dequantizes them transparently:
+ *   A_fp16[n] = (A_int8[n] - act_zero_point) × act_scale
+ *
+ * Weight dequantization is identical to W8A16 (performed at compile time).
+ *
+ * @param g               Graph handle.
+ * @param input_id        Input tensor ID; shape [1, IC, 1, S].
+ *                        At execute time the caller passes int8 data
+ *                        (IC × S bytes, not fp16).
+ * @param output_shape    [1, OC, 1, S].
+ * @param weights         int8 weight matrix [IC, OC] row-major.
+ * @param scales          float32 per-channel weight scales [OC].
+ * @param IC              Input channel count.
+ * @param OC              Output channel count.
+ * @param act_scale       Per-tensor activation scale.
+ * @param act_zero_point  Per-tensor activation zero-point.
+ * @return                Output tensor ID, or LIBANE_INVALID_TENSOR_ID on error.
+ */
+LIBANE_API uint32_t libane_graph_add_matmul_w8a8(libane_graph_t g,
+                                                   uint32_t       input_id,
+                                                   libane_shape_t output_shape,
+                                                   const int8_t*  weights,
+                                                   const float*   scales,
+                                                   int            IC,
+                                                   int            OC,
+                                                   float          act_scale,
+                                                   int32_t        act_zero_point);
+
+/**
+ * Convenience wrapper around libane_graph_add_op(LIBANE_OP_SDPA_GQA).
+ *
+ * Adds a Grouped Query Attention node to the graph.  K and V tensors carry
+ * num_kv_heads heads; they are tiled to num_q_heads before scaled-dot-product
+ * attention is applied.
+ *
+ *   Q_id   : tensor [1, num_q_heads,  S, D]
+ *   K_id   : tensor [1, num_kv_heads, S, D]
+ *   V_id   : tensor [1, num_kv_heads, S, D]
+ *   mask_id: tensor [1, 1, S, S]  or LIBANE_INVALID_TENSOR_ID for unmasked
+ *
+ * Output shape: [1, num_q_heads, S, D]  (derived from Q shape).
+ *
+ * Constraints:
+ *   - num_q_heads % num_kv_heads == 0
+ *   - S and D must each be a multiple of 32
+ *   - all tensors use matrix format  [1, H, S, D] with H=channels, seq=D
+ *
+ * @param g       Graph handle.
+ * @param Q_id    Query tensor ID.
+ * @param K_id    Key tensor ID.
+ * @param V_id    Value tensor ID.
+ * @param mask_id Attention mask tensor ID, or LIBANE_INVALID_TENSOR_ID.
+ * @return        Output tensor ID, or LIBANE_INVALID_TENSOR_ID on error.
+ */
+LIBANE_API uint32_t libane_graph_add_sdpa_gqa(libane_graph_t g,
+                                               uint32_t       Q_id,
+                                               uint32_t       K_id,
+                                               uint32_t       V_id,
+                                               uint32_t       mask_id);
+
+/**
+ * Quantize a flat fp16 array to int8 using symmetric or asymmetric quantization.
+ *
+ * Convenience helper for preparing activations before passing to a W8A8 graph:
+ *   out[i] = clamp(round(in_fp16[i] / act_scale) + act_zero_point, -128, 127)
+ *
+ * @param in_fp16         Source fp16 data.
+ * @param out_i8          Destination int8 buffer (must have capacity >= n).
+ * @param n               Number of elements.
+ * @param act_scale       Scale factor (> 0).
+ * @param act_zero_point  Zero-point offset.
+ */
+LIBANE_API void libane_quantize_i8(const void* in_fp16,
+                                    int8_t*     out_i8,
+                                    size_t      n,
+                                    float       act_scale,
+                                    int32_t     act_zero_point);
+
+/**
  * Validate, fuse, and compile the graph for ANE execution.
  *
  * @param g  Graph handle.  The graph is not consumed — it can be compiled again.
@@ -555,6 +1015,54 @@ LIBANE_API libane_compiled_graph_t libane_graph_compile(libane_graph_t g);
  * Free a compiled graph. Safe to call with NULL.
  */
 LIBANE_API void libane_compiled_graph_release(libane_compiled_graph_t cg);
+
+/**
+ * Save a compiled graph to a file for fast cold-start restoration.
+ *
+ * Writes MIL text, weight blobs, and compiled HWX binaries to a binary file
+ * (magic "ANEG", version 1).  On reload via libane_compiled_graph_load(),
+ * the expensive compileWithQoS: step is skipped — only loadWithQoS: is
+ * called, which is ~8.5× faster (~494 ms vs ~4200 ms per group).
+ *
+ * @param cg    Non-null compiled graph to serialize.
+ * @param path  Destination file path.  Created or overwritten.
+ * @return      LIBANE_OK on success;
+ *              LIBANE_ERR_INVALID_ARG if cg or path is NULL;
+ *              LIBANE_ERR_EXECUTE_FAILED if serialization fails (e.g. I/O error).
+ */
+LIBANE_API libane_status_t libane_compiled_graph_save(libane_compiled_graph_t cg,
+                                                       const char* path);
+
+/**
+ * Load a compiled graph from a file produced by libane_compiled_graph_save().
+ *
+ * Calls ane_restore_program() per group, which writes the saved HWX back to a
+ * temp dir and calls loadWithQoS: — skipping recompilation for an ~8.5×
+ * cold-start speedup.  Gracefully falls back to full recompilation if the
+ * saved HWX is incompatible with the current macOS version.
+ *
+ * @param path  File path produced by libane_compiled_graph_save().
+ * @return      Non-null compiled graph on success;
+ *              NULL on format error, I/O error, or ANE failure.
+ *              Must be freed with libane_compiled_graph_release().
+ */
+LIBANE_API libane_compiled_graph_t libane_compiled_graph_load(const char* path);
+
+/**
+ * Reload all ANE programs in a compiled graph into SRAM without recompiling.
+ *
+ * This is ~8.5× faster than recompiling and is the correct recovery operation
+ * after a host suspend/resume cycle or any ANE context reset.
+ *
+ * It also enables LoRA-style weight hot-swap: mutate the weight blobs held by
+ * each group's AneProgram, then call libane_compiled_graph_delta_reload() to
+ * push the updated weights to the accelerator without rebuilding the graph.
+ *
+ * @param cg  Non-null compiled graph handle.
+ * @return    LIBANE_OK on success; LIBANE_ERR_EXECUTE_FAILED if any reload fails;
+ *            LIBANE_ERR_INVALID_ARG if cg is NULL.
+ */
+LIBANE_API libane_status_t libane_compiled_graph_delta_reload(libane_compiled_graph_t cg);
 
 /**
  * Execute a compiled graph.
@@ -692,6 +1200,33 @@ LIBANE_API int libane_mil_sram_spill(libane_mil_handle_t h);
  * Free a compiled MIL program.  Safe to call with NULL.
  */
 LIBANE_API void libane_mil_release(libane_mil_handle_t h);
+
+/**
+ * Save a compiled MIL program to a file for fast cold-start restoration.
+ *
+ * Writes MIL source text, weight blobs, and compiled HWX binary to a
+ * binary file (magic "ANEM", version 1).  On reload via libane_mil_load(),
+ * the expensive compileWithQoS: step is skipped — only loadWithQoS: is
+ * called, giving ~8.5× faster cold-start.
+ *
+ * @param h     Non-null MIL handle.
+ * @param path  Destination file path (created or overwritten).
+ * @return      LIBANE_OK on success;
+ *              LIBANE_ERR_INVALID_ARG if h or path is NULL;
+ *              LIBANE_ERR_EXECUTE_FAILED on I/O error or serialization failure.
+ */
+LIBANE_API libane_status_t libane_mil_save(libane_mil_handle_t h,
+                                            const char*         path);
+
+/**
+ * Load a compiled MIL program saved by libane_mil_save().
+ *
+ * @param path  File path produced by libane_mil_save().
+ * @return      Non-null handle on success;
+ *              NULL on format error, I/O error, or ANE failure.
+ *              Must be freed with libane_mil_release().
+ */
+LIBANE_API libane_mil_handle_t libane_mil_load(const char* path);
 
 #ifdef __cplusplus
 }

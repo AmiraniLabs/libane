@@ -26,8 +26,16 @@ TensorId AneGraph::alloc_tensor(const std::string& name,
 /* ── add_input ───────────────────────────────────────────────────────────── */
 
 TensorId AneGraph::add_input(const std::string& name, mil::TensorShape shape) {
-    // Basic ANE constraint check (batch==1, height==1, seq%8==0)
-    shape.validate();
+    // Three shape classes:
+    //   Standard activation [1,C,1,S]    : validate()
+    //   Matrix tensor [1,1,H,S]  (C=1)   : validate_matrix()  (DYNAMIC_MATMUL/SDPA)
+    //   Conv image [1,C,H,W]     (C>1,H>1): validate_conv_image()  (CONV2D)
+    if (shape.channels == 1 && shape.height > 1)
+        shape.validate_matrix();
+    else if (shape.channels > 1 && shape.height > 1)
+        shape.validate_conv_image();
+    else
+        shape.validate();
     TensorId id = alloc_tensor(name, shape, kInvalidNodeId);
     graph_inputs_.push_back(id);
     return id;
@@ -40,8 +48,13 @@ TensorId AneGraph::add_op(libane_op_t op,
                            mil::TensorShape output_shape,
                            const void* weights,
                            size_t weights_len) {
-    // Validate output shape
-    output_shape.validate();
+    // Validate output shape — same three-way dispatch as add_input.
+    if (output_shape.channels == 1 && output_shape.height > 1)
+        output_shape.validate_matrix();
+    else if (output_shape.channels > 1 && output_shape.height > 1)
+        output_shape.validate_conv_image();
+    else
+        output_shape.validate();
 
     // Validate all input tensor IDs
     for (TensorId tid : inputs) {

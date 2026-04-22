@@ -46,7 +46,12 @@ void GraphValidator::check_structure(const AneGraph& g, ValidationResult& r) {
 void GraphValidator::check_shapes(const AneGraph& g, ValidationResult& r) {
     for (const auto& t : g.tensors()) {
         try {
-            t.shape.validate();
+            if (t.shape.channels == 1 && t.shape.height > 1)
+                t.shape.validate_matrix();
+            else if (t.shape.channels > 1 && t.shape.height > 1)
+                t.shape.validate_conv_image();
+            else
+                t.shape.validate();
         } catch (const std::exception& e) {
             r.errors.push_back("tensor " + std::to_string(t.id) +
                                " (\"" + t.name + "\"): " + e.what());
@@ -266,11 +271,28 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
         case LIBANE_OP_HARDSWISH:
         case LIBANE_OP_LEAKY_RELU:
         case LIBANE_OP_ELU:
+        case LIBANE_OP_EXP:
+        case LIBANE_OP_SIN:
+        case LIBANE_OP_COS:
+        case LIBANE_OP_ABS:
+        case LIBANE_OP_CEIL:
+        case LIBANE_OP_FLOOR:
+        case LIBANE_OP_ROUND:
+        case LIBANE_OP_SIGN:
             if (!n.weights.empty())
                 err("op is weight-free but " + std::to_string(n.weights.size()) +
                     " weight bytes were provided");
             if (n.inputs.size() != 1)
                 err("requires exactly one input, got " + std::to_string(n.inputs.size()));
+            break;
+
+        case LIBANE_OP_POW:
+            if (!n.weights.empty())
+                err("pow is weight-free but " + std::to_string(n.weights.size()) +
+                    " weight bytes were provided");
+            if (n.inputs.size() != 2)
+                err("pow requires exactly two inputs (base, exponent), got " +
+                    std::to_string(n.inputs.size()));
             break;
 
         case LIBANE_OP_PIXEL_SHUFFLE: {
@@ -589,9 +611,279 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
             break;
         }
 
-        case LIBANE_OP_CONV2D:
-            err("CONV2D is not supported in the graph API");
+        case LIBANE_OP_DYNAMIC_MATMUL: {
+            // Matrix format: X=[1,1,K,M]  W=[1,1,N,K]  Y=[1,1,N,M]
+            // K/N/M are derived from shapes; no static weights.
+            if (!n.weights.empty()) {
+                err("dynamic_matmul: no weights expected (K/N/M derived from shapes), got " +
+                    std::to_string(n.weights.size()) + " bytes");
+                break;
+            }
+            if (n.inputs.size() != 2) {
+                err("dynamic_matmul requires exactly 2 inputs (X, W), got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            const auto& x_s = g.tensor(n.inputs[0]).shape;
+            const auto& w_s = g.tensor(n.inputs[1]).shape;
+            if (x_s.channels != 1 || w_s.channels != 1 || out_t.shape.channels != 1)
+                err("dynamic_matmul: all tensors must have channels=1 (matrix format)");
+            // X=[1,1,K,M]: height=K (inner), seq=M (output cols)
+            // W=[1,1,N,K]: height=N (output rows), seq=K (inner)
+            if (x_s.height != w_s.seq)
+                err("dynamic_matmul: X.height (K=" + std::to_string(x_s.height) +
+                    ") must equal W.seq (K=" + std::to_string(w_s.seq) + ")");
+            if (out_t.shape.height != w_s.height)
+                err("dynamic_matmul: output.height (N=" + std::to_string(out_t.shape.height) +
+                    ") must equal W.height (N=" + std::to_string(w_s.height) + ")");
+            if (out_t.shape.seq != x_s.seq)
+                err("dynamic_matmul: output.seq (M=" + std::to_string(out_t.shape.seq) +
+                    ") must equal X.seq (M=" + std::to_string(x_s.seq) + ")");
             break;
+        }
+
+        case LIBANE_OP_SDPA: {
+            // Matrix format: Q/K/V=[1,H,S,D]  mask=[1,1,S,S]  out=[1,H,S,D]
+            // H/S/D derived from shapes; no static weights.
+            if (n.inputs.size() < 3 || n.inputs.size() > 4) {
+                err("sdpa requires 3 or 4 inputs (Q, K, V[, mask]), got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            if (!n.weights.empty()) {
+                err("sdpa: no weights expected (H/S/D derived from shapes), got " +
+                    std::to_string(n.weights.size()) + " bytes");
+                break;
+            }
+            const auto& q_s = g.tensor(n.inputs[0]).shape;
+            const auto& k_s = g.tensor(n.inputs[1]).shape;
+            const auto& v_s = g.tensor(n.inputs[2]).shape;
+            int H = q_s.channels;
+            int S = q_s.height;
+            int D = q_s.seq;
+            if (!(k_s == q_s))
+                err("sdpa: K shape must match Q shape [1," + std::to_string(H) +
+                    "," + std::to_string(S) + "," + std::to_string(D) + "]");
+            if (!(v_s == q_s))
+                err("sdpa: V shape must match Q shape");
+            if (out_t.shape.channels != H || out_t.shape.height != S || out_t.shape.seq != D)
+                err("sdpa: output shape must match Q/K/V shape [1," +
+                    std::to_string(H) + "," + std::to_string(S) + "," + std::to_string(D) + "]");
+            if (n.inputs.size() == 4) {
+                const auto& m_s = g.tensor(n.inputs[3]).shape;
+                if (m_s.channels != 1 || m_s.height != S || m_s.seq != S)
+                    err("sdpa: mask shape must be [1,1,S,S]=[1,1," +
+                        std::to_string(S) + "," + std::to_string(S) + "], got [1," +
+                        std::to_string(m_s.channels) + "," + std::to_string(m_s.height) +
+                        "," + std::to_string(m_s.seq) + "]");
+            }
+            break;
+        }
+
+        case LIBANE_OP_SDPA_GQA: {
+            // Matrix format: Q=[1,H_q,S,D]  K/V=[1,H_kv,S,D]  mask=[1,1,S,S]  out=[1,H_q,S,D]
+            // H_q/H_kv/S/D derived from input shapes; no static weights.
+            if (n.inputs.size() < 3 || n.inputs.size() > 4) {
+                err("sdpa_gqa requires 3 or 4 inputs (Q, K, V[, mask]), got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            if (!n.weights.empty()) {
+                err("sdpa_gqa: no weights expected (shapes derived from inputs), got " +
+                    std::to_string(n.weights.size()) + " bytes");
+                break;
+            }
+            const auto& q_s = g.tensor(n.inputs[0]).shape;
+            const auto& k_s = g.tensor(n.inputs[1]).shape;
+            const auto& v_s = g.tensor(n.inputs[2]).shape;
+            int H_q  = q_s.channels;
+            int H_kv = k_s.channels;
+            int S    = q_s.height;
+            int D    = q_s.seq;
+            // K and V must share shape
+            if (!(k_s == v_s))
+                err("sdpa_gqa: K and V shapes must match; K=[1," +
+                    std::to_string(k_s.channels) + "," + std::to_string(k_s.height) +
+                    "," + std::to_string(k_s.seq) + "] V=[1," +
+                    std::to_string(v_s.channels) + "," + std::to_string(v_s.height) +
+                    "," + std::to_string(v_s.seq) + "]");
+            // K/V sequence/depth must match Q
+            if (k_s.height != S || k_s.seq != D)
+                err("sdpa_gqa: K S and D must match Q S=" + std::to_string(S) +
+                    " D=" + std::to_string(D));
+            // Head divisibility
+            if (H_kv <= 0 || H_q % H_kv != 0)
+                err("sdpa_gqa: num_q_heads (" + std::to_string(H_q) +
+                    ") must be divisible by num_kv_heads (" + std::to_string(H_kv) + ")");
+            // Output shape must match Q
+            if (out_t.shape.channels != H_q || out_t.shape.height != S || out_t.shape.seq != D)
+                err("sdpa_gqa: output shape must be [1," + std::to_string(H_q) +
+                    "," + std::to_string(S) + "," + std::to_string(D) +
+                    "], got [1," + std::to_string(out_t.shape.channels) + "," +
+                    std::to_string(out_t.shape.height) + "," + std::to_string(out_t.shape.seq) + "]");
+            // Optional mask: [1,1,S,S]
+            if (n.inputs.size() == 4) {
+                const auto& m_s = g.tensor(n.inputs[3]).shape;
+                if (m_s.channels != 1 || m_s.height != S || m_s.seq != S)
+                    err("sdpa_gqa: mask shape must be [1,1,S,S]=[1,1," +
+                        std::to_string(S) + "," + std::to_string(S) + "], got [1," +
+                        std::to_string(m_s.channels) + "," + std::to_string(m_s.height) +
+                        "," + std::to_string(m_s.seq) + "]");
+            }
+            break;
+        }
+
+        case LIBANE_OP_CONV2D: {
+            // Weight blob encoding:
+            //   Bytes [0..43]  : int32[11] = {kH, kW, stride_h, stride_w,
+            //                                 pad_top, pad_left, pad_bottom, pad_right,
+            //                                 dilation_h, dilation_w, groups}
+            //   Bytes [44..]   : fp16 kernel [OC, IC/groups, kH, kW] row-major
+            if (n.inputs.size() != 1) {
+                err("conv2d requires exactly 1 input, got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            constexpr size_t kParamBytes = 11 * sizeof(int32_t);
+            if (n.weights.size() <= kParamBytes) {
+                err("conv2d weights too small: need > " + std::to_string(kParamBytes) +
+                    " bytes (params + kernel), got " + std::to_string(n.weights.size()));
+                break;
+            }
+            const int32_t* wp = reinterpret_cast<const int32_t*>(n.weights.data());
+            int kH_v        = wp[0],  kW_v      = wp[1];
+            int stride_h_v  = wp[2],  stride_w_v = wp[3];
+            int pad_top_v   = wp[4],  pad_left_v = wp[5];
+            int pad_bot_v   = wp[6],  pad_right_v = wp[7];
+            int dil_h_v     = wp[8],  dil_w_v    = wp[9];
+            int groups_v    = wp[10];
+
+            if (kH_v <= 0 || kW_v <= 0)
+                err("conv2d kH/kW must be > 0, got kH=" + std::to_string(kH_v) +
+                    " kW=" + std::to_string(kW_v));
+            if (stride_h_v <= 0 || stride_w_v <= 0)
+                err("conv2d strides must be > 0, got " + std::to_string(stride_h_v) +
+                    "×" + std::to_string(stride_w_v));
+            if (dil_h_v <= 0 || dil_w_v <= 0)
+                err("conv2d dilations must be > 0");
+            if (groups_v <= 0)
+                err("conv2d groups must be > 0, got " + std::to_string(groups_v));
+            if (pad_top_v < 0 || pad_left_v < 0 || pad_bot_v < 0 || pad_right_v < 0)
+                err("conv2d padding values must be >= 0");
+            if (IC % groups_v != 0)
+                err("conv2d IC=" + std::to_string(IC) + " not divisible by groups=" +
+                    std::to_string(groups_v));
+
+            // Verify kernel byte count
+            size_t expected_kernel = static_cast<size_t>(OC) *
+                                     (IC / groups_v) * kH_v * kW_v * 2;
+            size_t actual_kernel   = n.weights.size() - kParamBytes;
+            if (actual_kernel != expected_kernel)
+                err("conv2d kernel size mismatch: expected " +
+                    std::to_string(expected_kernel) + " bytes (OC=" +
+                    std::to_string(OC) + " × IC/groups=" +
+                    std::to_string(IC / groups_v) + " × kH=" +
+                    std::to_string(kH_v) + " × kW=" + std::to_string(kW_v) +
+                    " × 2), got " + std::to_string(actual_kernel));
+
+            // Verify output shape matches computed dimensions
+            const auto& in_s_c = g.tensor(n.inputs[0]).shape;
+            int H_in_v  = in_s_c.height;
+            int W_in_v  = in_s_c.seq;
+            int H_out_v = (H_in_v + pad_top_v + pad_bot_v -
+                           dil_h_v * (kH_v - 1) - 1) / stride_h_v + 1;
+            int W_out_v = (W_in_v + pad_left_v + pad_right_v -
+                           dil_w_v * (kW_v - 1) - 1) / stride_w_v + 1;
+
+            if (out_t.shape.channels != OC)
+                err("conv2d output channels must equal OC=" + std::to_string(OC) +
+                    ", got " + std::to_string(out_t.shape.channels));
+            if (out_t.shape.height != H_out_v)
+                err("conv2d output H mismatch: expected " + std::to_string(H_out_v) +
+                    " got " + std::to_string(out_t.shape.height));
+            if (out_t.shape.seq != W_out_v)
+                err("conv2d output W mismatch: expected " + std::to_string(W_out_v) +
+                    " got " + std::to_string(out_t.shape.seq));
+            break;
+        }
+
+        case LIBANE_OP_MATMUL_W8A16: {
+            // Blob: int32[2]={OC,IC} + int8[IC×OC] + pad-to-4 + float32[OC]
+            if (n.inputs.size() != 1) {
+                err("matmul_w8a16 requires exactly one input, got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            constexpr size_t kHdrBytes = 2 * sizeof(int32_t);
+            if (n.weights.size() < kHdrBytes + 1) {
+                err("matmul_w8a16 weight blob too small (minimum " +
+                    std::to_string(kHdrBytes + 1) + " bytes), got " +
+                    std::to_string(n.weights.size()));
+                break;
+            }
+            const int32_t* hdr = reinterpret_cast<const int32_t*>(n.weights.data());
+            int blob_OC = hdr[0];
+            int blob_IC = hdr[1];
+            if (blob_OC != OC)
+                err("matmul_w8a16 blob OC=" + std::to_string(blob_OC) +
+                    " mismatches output channels OC=" + std::to_string(OC));
+            if (blob_IC != IC)
+                err("matmul_w8a16 blob IC=" + std::to_string(blob_IC) +
+                    " mismatches input channels IC=" + std::to_string(IC));
+            if (blob_IC <= 0 || blob_OC <= 0) {
+                err("matmul_w8a16 IC and OC must be positive");
+                break;
+            }
+            size_t weights_end  = kHdrBytes + static_cast<size_t>(blob_IC) * blob_OC;
+            size_t scales_start = (weights_end + 3) & ~size_t(3);
+            size_t expected     = scales_start + static_cast<size_t>(blob_OC) * sizeof(float);
+            if (n.weights.size() != expected)
+                err("matmul_w8a16 weight blob size mismatch: expected " +
+                    std::to_string(expected) + " bytes (IC=" + std::to_string(blob_IC) +
+                    ", OC=" + std::to_string(blob_OC) + "), got " +
+                    std::to_string(n.weights.size()));
+            break;
+        }
+
+        case LIBANE_OP_MATMUL_W8A8: {
+            // Blob: int32[2]={OC,IC} + int8[IC×OC] + pad-to-4
+            //       + float32[OC] (weight scales) + float32 (act_scale) + int32 (act_zp)
+            if (n.inputs.size() != 1) {
+                err("matmul_w8a8 requires exactly one input, got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            constexpr size_t kHdrBytes = 2 * sizeof(int32_t);
+            if (n.weights.size() < kHdrBytes + 1) {
+                err("matmul_w8a8 weight blob too small, got " +
+                    std::to_string(n.weights.size()));
+                break;
+            }
+            const int32_t* hdr = reinterpret_cast<const int32_t*>(n.weights.data());
+            int blob_OC = hdr[0];
+            int blob_IC = hdr[1];
+            if (blob_OC != OC)
+                err("matmul_w8a8 blob OC=" + std::to_string(blob_OC) +
+                    " mismatches output channels OC=" + std::to_string(OC));
+            if (blob_IC != IC)
+                err("matmul_w8a8 blob IC=" + std::to_string(blob_IC) +
+                    " mismatches input channels IC=" + std::to_string(IC));
+            if (blob_IC <= 0 || blob_OC <= 0) {
+                err("matmul_w8a8 IC and OC must be positive");
+                break;
+            }
+            size_t weights_end  = kHdrBytes + static_cast<size_t>(blob_IC) * blob_OC;
+            size_t scales_start = (weights_end + 3) & ~size_t(3);
+            // weight scales + act_scale + act_zero_point
+            size_t expected = scales_start + static_cast<size_t>(blob_OC) * sizeof(float)
+                              + sizeof(float) + sizeof(int32_t);
+            if (n.weights.size() != expected)
+                err("matmul_w8a8 weight blob size mismatch: expected " +
+                    std::to_string(expected) + " bytes (IC=" + std::to_string(blob_IC) +
+                    ", OC=" + std::to_string(blob_OC) + "), got " +
+                    std::to_string(n.weights.size()));
+            break;
+        }
 
         default:
             err("unknown op code " + std::to_string(static_cast<int>(n.op)));

@@ -83,6 +83,19 @@ struct CompiledPlanGroup {
     TensorId               output = kInvalidTensorId;
 };
 
+/* ── QuantParams ─────────────────────────────────────────────────────────── */
+
+/**
+ * Per-tensor int8 quantization parameters.
+ * Stored for graph inputs that are quantized to int8 by the caller
+ * (e.g. the primary input of a MATMUL_W8A8 group).
+ * The executor uses these to dequantize int8 → fp16 before dispatching.
+ */
+struct QuantParams {
+    float   scale      = 1.0f;  ///< input_val_fp16 = (int8_val - zero_point) * scale
+    int32_t zero_point = 0;
+};
+
 /* ── CompiledGraph ───────────────────────────────────────────────────────── */
 
 class CompiledGraph {
@@ -113,6 +126,30 @@ public:
         return it == tensor_shapes_.end() ? nullptr : &it->second;
     }
 
+    /**
+     * Return per-input int8 quantization parameters.
+     * Non-empty only when the graph contains MATMUL_W8A8 ops whose
+     * primary input is a graph input tensor.
+     */
+    const std::unordered_map<TensorId, QuantParams>& quant_params() const {
+        return quant_params_;
+    }
+
+    /* ── Serialization ───────────────────────────────────────────────────── */
+
+    /**
+     * Save this compiled graph to a file.
+     *
+     * Writes MIL text, weight blobs, compiled HWX binaries, and graph
+     * metadata in a simple binary format (magic "ANEG", version 1).
+     * On restore via GraphCompiler::load(), the expensive compileWithQoS:
+     * step is skipped — only loadWithQoS: is called (~8.5× faster).
+     *
+     * @param path  Destination file path.  Created or overwritten.
+     * @return      true on success; false if any write or HWX extraction fails.
+     */
+    bool save(const std::string& path) const;
+
     /* ── Accessors for tests ─────────────────────────────────────────────── */
 
     size_t group_count()              const { return groups_.size(); }
@@ -128,6 +165,7 @@ private:
     std::unordered_map<TensorId, std::unique_ptr<AneBuffer>> ane_bufs_;
     std::vector<TensorId>                                    graph_input_ids_;
     std::vector<TensorId>                                    graph_output_ids_;
+    std::unordered_map<TensorId, QuantParams>                quant_params_;  ///< int8 input quantization
 };
 
 /* ── GraphCompiler ───────────────────────────────────────────────────────── */
@@ -157,6 +195,21 @@ public:
     static std::unique_ptr<CompiledGraph> compile(const AneGraph& graph,
                                                    CompilerBackend& backend);
     static std::unique_ptr<CompiledGraph> compile(const AneGraph& graph);
+
+    /**
+     * Load a previously saved CompiledGraph from a file.
+     *
+     * Restores each group via ane_restore_program(), which calls loadWithQoS:
+     * with the saved HWX — skipping compileWithQoS: (~8.5× faster than
+     * recompiling from the original graph).
+     *
+     * Falls back to ane_compile() per group if the HWX load fails (e.g.
+     * macOS upgrade changed the binary format).
+     *
+     * @param path  File produced by CompiledGraph::save().
+     * @return      Loaded CompiledGraph, or nullptr on format error or ANE failure.
+     */
+    static std::unique_ptr<CompiledGraph> load(const std::string& path);
 };
 
 } // namespace graph

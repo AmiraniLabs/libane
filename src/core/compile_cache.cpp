@@ -79,6 +79,16 @@ std::shared_ptr<CacheEntry> CompileCache::put(std::unique_ptr<CacheEntry> entry)
     return shared;
 }
 
+bool CompileCache::erase(const CacheKey& key) {
+    std::unique_lock lock(mutex_);
+    auto it = map_.find(key);
+    if (it == map_.end()) return false;
+    current_bytes_ -= it->second.entry->size_bytes;
+    lru_.erase(it->second.lru_pos);
+    map_.erase(it);
+    return true;
+}
+
 void CompileCache::evict_lru_locked() {
     if (lru_.empty()) return;
     auto& victim = lru_.back();

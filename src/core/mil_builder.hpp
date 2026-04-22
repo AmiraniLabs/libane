@@ -26,7 +26,7 @@
  * Key facts from Orion §4 and maderix/ANE:
  *  - ANE tensors are ALWAYS [1, C, 1, S] (batch=1, height=1, no exceptions)
  *  - conv 1×1 is 3× faster than matmul on ANE — use conv for all linear projections
- *  - S must be a multiple of 16, ≤ 65536; C ≤ 16384
+ *  - S must be a multiple of 32, ≤ 65536; C ≤ 16384
  *  - conv bias is NOT supported — use a separate add op
  *  - GELU must use tanh approximation only
  *  - matmul transpose flags require named const nodes, not inline literals
@@ -50,11 +50,25 @@ namespace mil {
 struct TensorShape {
     int32_t batch    = 1;    // must be 1 (ANE constraint)
     int32_t channels = 0;    // C — number of channels
-    int32_t height   = 1;    // must be 1 (ANE constraint)
+    int32_t height   = 1;    // must be 1 for activations; matrix tensors (C=1) may have height>1
     int32_t seq      = 0;    // S — spatial / sequence dimension
 
-    /** Validate all ANE constraints. Throws std::invalid_argument on violation. */
+    /** Validate activation tensor constraints (height must be 1). */
     void validate() const;
+
+    /** Validate matrix tensor constraints (channels must be 1, height≥1 allowed). */
+    void validate_matrix() const;
+
+    /**
+     * Validate conv image tensor constraints.
+     * Allows [1, C, H, W] where C≥1, H≥1, W%32==0 (IOSurface DMA alignment on W).
+     * Used for CONV2D input/output tensors.
+     */
+    void validate_conv_image() const;
+
+private:
+    void validate_impl(bool allow_matrix) const;
+public:
 
     /** Total fp16 elements. */
     size_t numel() const {
@@ -509,6 +523,52 @@ public:
                                       const std::string& in_var,
                                       const std::string& out_var);
 
+    /** Element-wise natural exponential: out = exp(x). */
+    static MilFragment exp_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& out_var);
+
+    /** Element-wise sine (radians): out = sin(x). */
+    static MilFragment sin_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& out_var);
+
+    /** Element-wise cosine (radians): out = cos(x). */
+    static MilFragment cos_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& out_var);
+
+    /** Element-wise absolute value: out = abs(x). */
+    static MilFragment abs_fragment(int C, int SP,
+                                     const std::string& in_var,
+                                     const std::string& out_var);
+
+    /** Element-wise power: out = base ^ exponent. Binary op. */
+    static MilFragment pow_fragment(int C, int SP,
+                                     const std::string& base_var,
+                                     const std::string& exp_var,
+                                     const std::string& out_var);
+
+    /** Element-wise ceiling: out = ceil(x). */
+    static MilFragment ceil_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
+    /** Element-wise floor: out = floor(x). */
+    static MilFragment floor_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var);
+
+    /** Element-wise round to nearest even: out = round(x). */
+    static MilFragment round_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var);
+
+    /** Element-wise sign: out = sign(x) ∈ {-1, 0, +1}. */
+    static MilFragment sign_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var);
+
     static MilFragment sub_fragment(int C, int SP,
                                      const std::string& in_var,
                                      const std::string& side_var,
@@ -653,6 +713,83 @@ public:
                                                 const float* samples, int n_samples,
                                                 const std::string& in_var,
                                                 const std::string& out_var);
+
+    /**
+     * Dynamic matmul: Y = X @ W^T (both inputs are runtime tensors).
+     *
+     * x_var: [1, K, 1, M], w_var: [1, N, 1, K], output: [1, N, 1, M].
+     * No weight file — both matrices are live IOSurface inputs.
+     */
+    static MilFragment dynamic_matmul_fragment(int K, int N, int M,
+                                                const std::string& x_var,
+                                                const std::string& w_var,
+                                                const std::string& out_var);
+
+    /**
+     * Scaled dot-product attention.
+     *
+     * q_var/k_var/v_var: [1, H, 1, S*D] libane tensors.
+     * mask_var: [1, 1, 1, S*S] or empty string for unmasked.
+     * Internally reshapes to [1,H,S,D], runs SDPA, reshapes back.
+     */
+    static MilFragment sdpa_fragment(int H, int S, int D,
+                                      const std::string& q_var,
+                                      const std::string& k_var,
+                                      const std::string& v_var,
+                                      const std::string& mask_var,
+                                      const std::string& out_var);
+
+    /**
+     * Grouped Query Attention SDPA fragment.
+     *
+     * Like sdpa_fragment but K and V have fewer heads (H_kv < H_q).
+     * K and V are tiled from H_kv heads to H_q heads before the SDPA call,
+     * implementing GQA in a single fused MIL program.
+     *
+     *   Q shape: [1, H_q,  S, D]
+     *   K shape: [1, H_kv, S, D]   (H_q % H_kv == 0)
+     *   V shape: [1, H_kv, S, D]
+     *   mask:    [1, 1,    S, S]  or empty for unmasked
+     *   output:  [1, H_q,  S, D]
+     *
+     * Emits:
+     *   reps  = const tensor<int32,[4]>([1, H_q/H_kv, 1, 1])
+     *   K_tiled = tile(x=k_var, reps=reps)
+     *   V_tiled = tile(x=v_var, reps=reps)
+     *   out     = scaled_dot_product_attention(q_var, K_tiled, V_tiled [, mask])
+     */
+    static MilFragment sdpa_gqa_fragment(int H_q, int H_kv, int S, int D,
+                                          const std::string& q_var,
+                                          const std::string& k_var,
+                                          const std::string& v_var,
+                                          const std::string& mask_var,
+                                          const std::string& out_var);
+
+    /**
+     * General 2D convolution fragment.
+     *
+     * Input:  [1, IC, H_in, W_in]   — conv image tensor, W_in % 32 == 0.
+     * Output: [1, OC, H_out, W_out] — H_out and W_out computed from params.
+     * Weight: [OC, IC/groups, kH, kW] — row-major fp16, no transpose.
+     *
+     * Output spatial dimensions (dilation-aware):
+     *   H_out = (H_in + pad_top + pad_bottom - dilation_h*(kH-1) - 1) / stride_h + 1
+     *   W_out = (W_in + pad_left + pad_right - dilation_w*(kW-1) - 1) / stride_w + 1
+     *
+     * W_out must be a multiple of 32 (IOSurface DMA alignment).
+     * Bias is not supported — use a separate ADD op after conv.
+     */
+    static MilFragment conv2d_fragment(int IC, int OC,
+                                        int H_in, int W_in,
+                                        int kH, int kW,
+                                        int stride_h, int stride_w,
+                                        int pad_top,  int pad_left,
+                                        int pad_bottom, int pad_right,
+                                        int dilation_h, int dilation_w,
+                                        int groups,
+                                        const std::string& in_var,
+                                        const std::string& out_var,
+                                        const std::string& weight_file = "weight.bin");
 
     /* ── Fused program assembly ──────────────────────────────────────────── */
 

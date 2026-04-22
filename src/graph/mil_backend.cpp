@@ -181,6 +181,43 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
         return mil::MilBuilder::acos_fragment(
             out_shape.channels, out_shape.seq, in_var, out_var);
 
+    case LIBANE_OP_EXP:
+        return mil::MilBuilder::exp_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_SIN:
+        return mil::MilBuilder::sin_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_COS:
+        return mil::MilBuilder::cos_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_ABS:
+        return mil::MilBuilder::abs_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_POW:
+        return mil::MilBuilder::pow_fragment(
+            out_shape.channels, out_shape.seq,
+            in_var, tensor_var(node.inputs[1]), out_var);
+
+    case LIBANE_OP_CEIL:
+        return mil::MilBuilder::ceil_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_FLOOR:
+        return mil::MilBuilder::floor_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_ROUND:
+        return mil::MilBuilder::round_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
+    case LIBANE_OP_SIGN:
+        return mil::MilBuilder::sign_fragment(
+            out_shape.channels, out_shape.seq, in_var, out_var);
+
     case LIBANE_OP_SELECT:
         return mil::MilBuilder::select_fragment(
             out_shape.channels, out_shape.seq,
@@ -299,6 +336,80 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
             in_var, out_var);
     }
 
+    case LIBANE_OP_MATMUL_W8A16:
+    case LIBANE_OP_MATMUL_W8A8:
+        // MIL program is identical to MATMUL — only the weight blob differs.
+        // Weight dequantization (int8 × scales → fp16) is done in compile_group().
+        // Activation dequantization (for W8A8) is done at execute time.
+        return mil::MilBuilder::matmul_fragment(
+            in_shape.channels, out_shape.channels, out_shape.seq,
+            in_var, out_var, node.weight_file);
+
+    case LIBANE_OP_DYNAMIC_MATMUL: {
+        // X=[1,1,K,M]  W=[1,1,N,K]  Y=[1,1,N,M] — K/N/M derived from shapes.
+        const mil::TensorShape& x_s = graph.tensor(node.inputs[0]).shape;
+        const mil::TensorShape& w_s = graph.tensor(node.inputs[1]).shape;
+        int K = x_s.height;
+        int M = x_s.seq;
+        int N = w_s.height;
+        return mil::MilBuilder::dynamic_matmul_fragment(
+            K, N, M, in_var, tensor_var(node.inputs[1]), out_var);
+    }
+
+    case LIBANE_OP_CONV2D: {
+        // Unpack 11 × int32 header from weights blob
+        constexpr size_t kParamBytes = 11 * sizeof(int32_t);
+        const int32_t* p = reinterpret_cast<const int32_t*>(node.weights.data());
+        int kH       = p[0],  kW       = p[1];
+        int stride_h = p[2],  stride_w = p[3];
+        int pad_top  = p[4],  pad_left = p[5];
+        int pad_bot  = p[6],  pad_right= p[7];
+        int dil_h    = p[8],  dil_w   = p[9];
+        int groups   = p[10];
+        (void)kParamBytes;  // used below in compile_group
+        return mil::MilBuilder::conv2d_fragment(
+            in_shape.channels, out_shape.channels,
+            in_shape.height, in_shape.seq,
+            kH, kW,
+            stride_h, stride_w,
+            pad_top, pad_left, pad_bot, pad_right,
+            dil_h, dil_w, groups,
+            in_var, out_var, node.weight_file);
+    }
+
+    case LIBANE_OP_SDPA: {
+        // Q/K/V=[1,H,S,D]  mask=[1,1,S,S] — H/S/D derived from shapes.
+        int H = in_shape.channels;
+        int S = in_shape.height;
+        int D = in_shape.seq;
+        std::string mask_var = (node.inputs.size() >= 4)
+                               ? tensor_var(node.inputs[3]) : "";
+        return mil::MilBuilder::sdpa_fragment(
+            H, S, D,
+            in_var,
+            tensor_var(node.inputs[1]),
+            tensor_var(node.inputs[2]),
+            mask_var,
+            out_var);
+    }
+
+    case LIBANE_OP_SDPA_GQA: {
+        // Q=[1,H_q,S,D]  K/V=[1,H_kv,S,D]  mask=[1,1,S,S] — all derived from shapes.
+        int H_q  = in_shape.channels;           // Q channels = num_q_heads
+        int S    = in_shape.height;
+        int D    = in_shape.seq;
+        int H_kv = graph.tensor(node.inputs[1]).shape.channels;  // K channels = num_kv_heads
+        std::string mask_var = (node.inputs.size() >= 4)
+                               ? tensor_var(node.inputs[3]) : "";
+        return mil::MilBuilder::sdpa_gqa_fragment(
+            H_q, H_kv, S, D,
+            in_var,
+            tensor_var(node.inputs[1]),
+            tensor_var(node.inputs[2]),
+            mask_var,
+            out_var);
+    }
+
     default:
         throw std::runtime_error(
             "MilBackend::node_to_fragment: unsupported op " +
@@ -361,6 +472,41 @@ runtime::AneProgram* MilBackend::compile_group(const AneGraph&    graph,
                 int OC = graph.tensor(node.output).shape.channels;
                 auto blob = mil::WeightBlob::from_fp16_transposed(
                     node.weights.data(), IC, OC);
+                weight_entries.push_back({ node.weight_file, std::move(blob.data) });
+            } else if (node.op == LIBANE_OP_MATMUL_W8A8 ||
+                       node.op == LIBANE_OP_MATMUL_W8A16) {
+                // Blob layout: int32[2]={OC,IC} + int8[IC×OC] + pad + float32[OC]
+                const int32_t* hdr = reinterpret_cast<const int32_t*>(
+                    node.weights.data());
+                int OC = hdr[0];
+                int IC = hdr[1];
+                constexpr size_t kHdrBytes = 2 * sizeof(int32_t);
+                const int8_t* W_q = reinterpret_cast<const int8_t*>(
+                    node.weights.data() + kHdrBytes);
+                size_t wbytes      = static_cast<size_t>(IC) * OC;
+                size_t scales_off  = (kHdrBytes + wbytes + 3) & ~size_t(3);
+                const float* scales = reinterpret_cast<const float*>(
+                    node.weights.data() + scales_off);
+
+                // Dequantize int8 → float32: W_fp32[ic, oc] = W_q[ic,oc] × scale[oc]
+                // Layout [IC, OC] matches from_fp32(data, IC, OC, true) expectation.
+                std::vector<float> W_fp32(static_cast<size_t>(IC) * OC);
+                for (int ic = 0; ic < IC; ++ic)
+                    for (int oc = 0; oc < OC; ++oc)
+                        W_fp32[static_cast<size_t>(ic) * OC + oc] =
+                            static_cast<float>(W_q[static_cast<size_t>(ic) * OC + oc])
+                            * scales[oc];
+
+                // from_fp32 with transpose=true: [IC,OC] → [OC,IC] for conv1x1
+                auto blob = mil::WeightBlob::from_fp32(W_fp32.data(), IC, OC, true);
+                weight_entries.push_back({ node.weight_file, std::move(blob.data) });
+            } else if (node.op == LIBANE_OP_CONV2D) {
+                // Kernel fp16 data starts at byte 44 (after 11 × int32 params).
+                // No transpose — user provides [OC, IC/groups, kH, kW] directly.
+                constexpr size_t kParamBytes = 11 * sizeof(int32_t);
+                auto blob = mil::WeightBlob::from_fp16(
+                    node.weights.data() + kParamBytes,
+                    node.weights.size() - kParamBytes);
                 weight_entries.push_back({ node.weight_file, std::move(blob.data) });
             } else {
                 auto blob = mil::WeightBlob::from_fp16(

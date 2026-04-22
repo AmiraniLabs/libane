@@ -32,14 +32,26 @@ namespace mil {
 /* ── TensorShape::validate ───────────────────────────────────────────────── */
 
 void TensorShape::validate() const {
+    validate_impl(false);
+}
+
+void TensorShape::validate_matrix() const {
+    validate_impl(true);
+}
+
+void TensorShape::validate_impl(bool allow_matrix) const {
     if (batch != 1)
         throw std::invalid_argument("ANE: batch must be 1, got " +
                                     std::to_string(batch));
-    if (height != 1)
+    if (!allow_matrix && height != 1)
         throw std::invalid_argument("ANE: height must be 1, got " +
                                     std::to_string(height));
-    if (seq <= 0 || seq % 16 != 0)
-        throw std::invalid_argument("ANE: S must be > 0 and multiple of 16, got " +
+    if (height < 1)
+        throw std::invalid_argument("ANE: height must be >= 1, got " +
+                                    std::to_string(height));
+    // No C=1 restriction for matrix tensors — stride check uses height*seq.
+    if (seq <= 0 || seq % 32 != 0)
+        throw std::invalid_argument("ANE: S must be > 0 and multiple of 32, got " +
                                     std::to_string(seq));
     if (seq > 65536)
         throw std::invalid_argument("ANE: S must be ≤ 65536, got " +
@@ -47,6 +59,26 @@ void TensorShape::validate() const {
     if (channels <= 0 || channels > 16384)
         throw std::invalid_argument("ANE: C must be in [1, 16384], got " +
                                     std::to_string(channels));
+}
+
+void TensorShape::validate_conv_image() const {
+    if (batch != 1)
+        throw std::invalid_argument("ANE conv: batch must be 1, got " +
+                                    std::to_string(batch));
+    if (channels <= 0 || channels > 16384)
+        throw std::invalid_argument("ANE conv: C must be in [1, 16384], got " +
+                                    std::to_string(channels));
+    if (height < 1)
+        throw std::invalid_argument("ANE conv: H must be >= 1, got " +
+                                    std::to_string(height));
+    // W (seq) must be 32-aligned — IOSurface DMA requires 64-byte row alignment;
+    // for fp16 (2 bytes/element) that means W % 32 == 0.
+    if (seq <= 0 || seq % 32 != 0)
+        throw std::invalid_argument("ANE conv: W (seq) must be > 0 and multiple of "
+                                    "32, got " + std::to_string(seq));
+    if (seq > 65536)
+        throw std::invalid_argument("ANE conv: W (seq) must be <= 65536, got " +
+                                    std::to_string(seq));
 }
 
 /* ── WeightBlob ──────────────────────────────────────────────────────────── */
@@ -1763,6 +1795,162 @@ MilFragment MilBuilder::acos_fragment(int C, int SP,
     return f;
 }
 
+MilFragment MilBuilder::exp_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + out_var + " = exp(x=" + in_var + ")[name=string(\"" + p + "exp\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::sin_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + out_var + " = sin(x=" + in_var + ")[name=string(\"" + p + "sin\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::cos_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + out_var + " = cos(x=" + in_var + ")[name=string(\"" + p + "cos\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::abs_fragment(int C, int SP,
+                                      const std::string& in_var,
+                                      const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + out_var + " = abs(x=" + in_var + ")[name=string(\"" + p + "abs\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::pow_fragment(int C, int SP,
+                                      const std::string& base_var,
+                                      const std::string& exp_var,
+                                      const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    // CoreML MIL pow(base=..., alpha=...) for elementwise tensor^tensor.
+    body += "        " + tt + " " + out_var + " = pow(alpha=" + exp_var + ", base=" + base_var + ")[name=string(\"" + p + "pow\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name      = base_var;
+    f.side_input_name = exp_var;
+    f.output_name     = out_var;
+    f.output_shape    = shape;
+    return f;
+}
+
+MilFragment MilBuilder::ceil_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + out_var + " = ceil(x=" + in_var + ")[name=string(\"" + p + "ceil\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::floor_fragment(int C, int SP,
+                                        const std::string& in_var,
+                                        const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + out_var + " = floor(x=" + in_var + ")[name=string(\"" + p + "floor\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::round_fragment(int C, int SP,
+                                        const std::string& in_var,
+                                        const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + out_var + " = round(x=" + in_var + ")[name=string(\"" + p + "round\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
+MilFragment MilBuilder::sign_fragment(int C, int SP,
+                                       const std::string& in_var,
+                                       const std::string& out_var) {
+    TensorShape shape{1, C, 1, SP};
+    shape.validate();
+    const std::string p = out_var + "_";
+    std::string tt = tensor_type(shape);
+    std::string body;
+    body += "        " + tt + " " + out_var + " = sign(x=" + in_var + ")[name=string(\"" + p + "sign\")];\n";
+    MilFragment f;
+    f.body = std::move(body);
+    f.input_name = in_var;
+    f.output_name = out_var;
+    f.output_shape = shape;
+    return f;
+}
+
 MilFragment MilBuilder::sub_fragment(int C, int SP,
                                       const std::string& in_var,
                                       const std::string& side_var,
@@ -2537,6 +2725,142 @@ MilFragment MilBuilder::pwl_activation_fragment(int C, int SP,
     return f;
 }
 
+/* ── dynamic_matmul_fragment ─────────────────────────────────────────────── */
+
+MilFragment MilBuilder::dynamic_matmul_fragment(int K, int N, int M,
+                                                 const std::string& x_var,
+                                                 const std::string& w_var,
+                                                 const std::string& out_var) {
+    // Inputs are direct function parameters — ANECCompile rejects any reshape
+    // before matmul.  X=[1,1,K,M]  W=[1,1,N,K]  Y=[1,1,N,M].
+    TensorShape out_shape{1, 1, N, M};
+    out_shape.validate_matrix();
+
+    const std::string p = out_var + "_";
+    std::string t_out = tensor_type(out_shape);
+
+    std::string body;
+    body += "        bool " + p + "bF = const()[name=string(\"" + p + "bF\"), val=bool(false)];\n";
+    body += "        " + t_out + " " + out_var + " = matmul(transpose_x = " + p + "bF,"
+            " transpose_y = " + p + "bF, x = " + w_var + ", y = " + x_var + ")"
+            "[name=string(\"" + p + "dmm\")];\n";
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = x_var;
+    f.side_input_name = w_var;
+    f.output_name     = out_var;
+    f.output_shape    = out_shape;
+    return f;
+}
+
+/* ── sdpa_fragment ───────────────────────────────────────────────────────── */
+
+MilFragment MilBuilder::sdpa_fragment(int H, int S, int D,
+                                       const std::string& q_var,
+                                       const std::string& k_var,
+                                       const std::string& v_var,
+                                       const std::string& mask_var,
+                                       const std::string& out_var) {
+    // Inputs are direct function parameters — ANECCompile rejects any reshape
+    // before scaled_dot_product_attention.  Q/K/V=[1,H,S,D], mask=[1,1,S,S].
+    TensorShape out_shape{1, H, S, D};
+    out_shape.validate_matrix();
+
+    const std::string p = out_var + "_";
+    std::string t_out = tensor_type(out_shape);
+
+    std::string body;
+    if (mask_var.empty()) {
+        body += "        " + t_out + " " + out_var + " = scaled_dot_product_attention("
+                "query = " + q_var + ", "
+                "key = "   + k_var + ", "
+                "value = " + v_var + ")"
+                "[name=string(\"" + p + "sdpa\")];\n";
+    } else {
+        body += "        " + t_out + " " + out_var + " = scaled_dot_product_attention("
+                "query = " + q_var + ", "
+                "key = "   + k_var + ", "
+                "value = " + v_var + ", "
+                "mask = "  + mask_var + ")"
+                "[name=string(\"" + p + "sdpa\")];\n";
+    }
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = q_var;
+    f.side_input_name = k_var;
+    f.output_name     = out_var;
+    f.output_shape    = out_shape;
+    return f;
+}
+
+/* ── sdpa_gqa_fragment ───────────────────────────────────────────────────── */
+
+MilFragment MilBuilder::sdpa_gqa_fragment(int H_q, int H_kv, int S, int D,
+                                           const std::string& q_var,
+                                           const std::string& k_var,
+                                           const std::string& v_var,
+                                           const std::string& mask_var,
+                                           const std::string& out_var) {
+    if (H_kv <= 0 || H_q <= 0 || H_q % H_kv != 0)
+        throw std::invalid_argument(
+            "sdpa_gqa_fragment: H_q (" + std::to_string(H_q) +
+            ") must be divisible by H_kv (" + std::to_string(H_kv) + ")");
+
+    TensorShape out_shape{1, H_q, S, D};
+    out_shape.validate_matrix();
+
+    const int ratio = H_q / H_kv;
+    const std::string p = out_var + "_";
+
+    // MIL type strings
+    std::string t_kv_tile = "tensor<fp16, [1, " + std::to_string(H_q) +
+                            ", " + std::to_string(S) + ", " + std::to_string(D) + "]>";
+    std::string t_out = tensor_type(out_shape);
+
+    std::string body;
+
+    // Tile reps constant: [1, ratio, 1, 1]
+    body += "        tensor<int32, [4]> " + p + "reps = const()"
+            "[name=string(\"" + p + "reps\"), "
+            "val=tensor<int32, [4]>([1," + std::to_string(ratio) + ",1,1])];\n";
+
+    // Tile K and V along the heads dimension
+    body += "        " + t_kv_tile + " " + p + "k_t = tile("
+            "x=" + k_var + ", reps=" + p + "reps)"
+            "[name=string(\"" + p + "k_t\")];\n";
+    body += "        " + t_kv_tile + " " + p + "v_t = tile("
+            "x=" + v_var + ", reps=" + p + "reps)"
+            "[name=string(\"" + p + "v_t\")];\n";
+
+    // Scaled dot-product attention
+    if (mask_var.empty()) {
+        body += "        " + t_out + " " + out_var +
+                " = scaled_dot_product_attention("
+                "query=" + q_var + ", "
+                "key=" + p + "k_t, "
+                "value=" + p + "v_t)"
+                "[name=string(\"" + p + "sdpa_gqa\")];\n";
+    } else {
+        body += "        " + t_out + " " + out_var +
+                " = scaled_dot_product_attention("
+                "query=" + q_var + ", "
+                "key=" + p + "k_t, "
+                "value=" + p + "v_t, "
+                "mask=" + mask_var + ")"
+                "[name=string(\"" + p + "sdpa_gqa\")];\n";
+    }
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = q_var;
+    f.side_input_name = k_var;   // first side input (K)
+    f.output_name     = out_var;
+    f.output_shape    = out_shape;
+    return f;
+}
+
 /* ── build_fused ─────────────────────────────────────────────────────────── */
 
 MilProgram MilBuilder::build_fused(const std::vector<FusedInput>&  inputs,
@@ -2597,6 +2921,103 @@ MilProgram MilBuilder::build_fused(const std::string& input_name,
                                     TensorShape        input_shape,
                                     const std::vector<MilFragment>& fragments) {
     return build_fused(std::vector<FusedInput>{{input_name, input_shape}}, fragments);
+}
+
+/* ── conv2d_fragment ─────────────────────────────────────────────────────── */
+
+MilFragment MilBuilder::conv2d_fragment(int IC, int OC,
+                                          int H_in,  int W_in,
+                                          int kH,    int kW,
+                                          int stride_h, int stride_w,
+                                          int pad_top,  int pad_left,
+                                          int pad_bottom, int pad_right,
+                                          int dilation_h, int dilation_w,
+                                          int groups,
+                                          const std::string& in_var,
+                                          const std::string& out_var,
+                                          const std::string& weight_file) {
+    // Output spatial dimensions (standard dilated-conv formula)
+    int H_out = (H_in + pad_top + pad_bottom - dilation_h * (kH - 1) - 1) / stride_h + 1;
+    int W_out = (W_in + pad_left + pad_right - dilation_w * (kW - 1) - 1) / stride_w + 1;
+
+    // Weight blob shape treated as [OC, IC/groups, kH, kW].
+    // Map into TensorShape fields: batch=OC, channels=IC/groups, height=kH, seq=kW.
+    // Do NOT call validate() — kW may not be a multiple of 32; this struct is only
+    // used for the BLOBFILE type-string inside file_ref(), not for IOSurface sizing.
+    TensorShape wshape;
+    wshape.batch    = OC;
+    wshape.channels = IC / groups;
+    wshape.height   = kH;
+    wshape.seq      = kW;
+
+    // Unique name prefix — all const nodes use out_var+"_" to avoid collisions when
+    // multiple fragments share the same fused MIL function scope.
+    const std::string p = out_var + "_";
+
+    std::string body;
+
+    // ── Conv parameter const nodes ──────────────────────────────────────────
+    // pad_type: always "valid" — explicit padding is expressed in the pad array.
+    body += "        string " + p + "pt = const()"
+            "[name=string(\"" + p + "pt\"), val=string(\"valid\")];\n";
+
+    body += "        tensor<int32, [2]> " + p + "st = const()"
+            "[name=string(\"" + p + "st\"), val=tensor<int32, [2]>(["
+            + std::to_string(stride_h) + "," + std::to_string(stride_w) + "])];\n";
+
+    body += "        tensor<int32, [4]> " + p + "pd = const()"
+            "[name=string(\"" + p + "pd\"), val=tensor<int32, [4]>(["
+            + std::to_string(pad_top)    + "," + std::to_string(pad_left) + ","
+            + std::to_string(pad_bottom) + "," + std::to_string(pad_right) + "])];\n";
+
+    body += "        tensor<int32, [2]> " + p + "dl = const()"
+            "[name=string(\"" + p + "dl\"), val=tensor<int32, [2]>(["
+            + std::to_string(dilation_h) + "," + std::to_string(dilation_w) + "])];\n";
+
+    body += "        int32 " + p + "gr = const()"
+            "[name=string(\"" + p + "gr\"), val=int32("
+            + std::to_string(groups) + ")];\n";
+
+    // ── Weight const node ───────────────────────────────────────────────────
+    // Type: tensor<fp16, [OC, IC/groups, kH, kW]>
+    const std::string wtype =
+        "tensor<fp16, [" +
+        std::to_string(OC)           + "," +
+        std::to_string(IC / groups)  + "," +
+        std::to_string(kH)           + "," +
+        std::to_string(kW)           + "]>";
+
+    const std::string wval = file_ref(weight_file, WeightBlob::kWeightDictOffset, wshape);
+    body += "        " + wtype + " " + p + "W = const()"
+            "[name=string(\"" + p + "W\"), val=" + wval + "];\n";
+
+    // ── Conv op ─────────────────────────────────────────────────────────────
+    // Output type: tensor<fp16, [1, OC, H_out, W_out]>
+    const std::string out_type =
+        "tensor<fp16, [1," +
+        std::to_string(OC)    + "," +
+        std::to_string(H_out) + "," +
+        std::to_string(W_out) + "]>";
+
+    body += "        " + out_type + " " + out_var + " = conv("
+            "dilations=" + p + "dl, "
+            "groups="    + p + "gr, "
+            "pad="       + p + "pd, "
+            "pad_type="  + p + "pt, "
+            "strides="   + p + "st, "
+            "weight="    + p + "W, "
+            "x=" + in_var + ")"
+            "[name=string(\"" + out_var + "\")];\n";
+
+    TensorShape out_shape{1, OC, H_out, W_out};
+
+    MilFragment frag;
+    frag.body         = std::move(body);
+    frag.input_name   = in_var;
+    frag.output_name  = out_var;
+    frag.weight_file  = weight_file;
+    frag.output_shape = out_shape;
+    return frag;
 }
 
 } // namespace mil
