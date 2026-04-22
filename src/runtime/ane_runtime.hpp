@@ -94,6 +94,8 @@ struct AneProgram {
     bool     sram_spill        = false;    ///< true if intermediateBufferHandle != 0 after load
     std::string debug_name;
     std::string model_dir;               ///< Temp dir path for delta compilation
+    std::string mil_text;                ///< Original MIL source (stored for serialization)
+    std::string model_url;               ///< URL from _ANEInMemoryModel.modelURL after compile; inject via setModelURL: + loadWithQoS: for ~0.722ms Path C reconnect
     std::vector<WeightEntry> weights;    ///< stored for delta reload
     std::vector<std::string> input_param_names;
     std::vector<std::string> output_var_names;
@@ -169,6 +171,32 @@ AneProgram* ane_compile(const std::string& mil_text,
                         const std::string& debug_name = "");
 
 /**
+ * Reconnect to an existing aned compile slot without triggering compileWithQoS:.
+ *
+ * Creates a fresh _ANEInMemoryModel from the given MIL text and weights,
+ * injects model_url via setModelURL:, then calls loadWithQoS: directly.
+ * If aned still holds the compiled slot for this hexID, the load completes
+ * in ~0.722ms and no compile slot is consumed.
+ *
+ * This is the Path C warm path for macOS 26+, where no HWX binary is ever
+ * written to disk.  Discovered via test_compiler_options_probe.mm Opts-3
+ * (2026-04-22, M3 Pro / macOS 26.3.1).
+ *
+ * @param mil_text   UTF-8 MIL source — must produce the same hexID as the
+ *                   original compile (i.e., identical text + identical weights).
+ * @param weights    Same weight blobs as the original compile.
+ * @param model_url  AneProgram::model_url from a previous ane_compile() call.
+ * @param debug_name Optional label.
+ *
+ * @return Non-null AneProgram* on success (caller calls ane_unload()).
+ *         Returns nullptr if aned slot is dead (caller must call ane_compile()).
+ */
+AneProgram* ane_reconnect(const std::string&              mil_text,
+                           const std::vector<WeightEntry>& weights,
+                           const std::string&              model_url,
+                           const std::string&              debug_name = "");
+
+/**
  * Execute a compiled ANE program.
  *
  * Wraps the IOSurfaces in _ANEIOSurfaceObject and dispatches via _ANERequest.
@@ -232,15 +260,90 @@ bool ane_execute(AneProgram* program, void* input, void* output);
 bool ane_delta_reload(AneProgram* program);
 
 /**
- * Unload a compiled ANE program and release its resources.
- * Calls unloadWithQoS: on the model before releasing, enabling delta
- * compilation on the next ane_compile() call for the same model_dir.
+ * Remove a compiled program from ANE SRAM without freeing the compile slot.
+ *
+ * Releases SRAM (unloadWithQoS:) but keeps the ObjC model object alive and
+ * aned's compile-slot entry intact.  A subsequent ane_delta_reload() on the
+ * same program will skip compileWithQoS: and reload in ~1 ms (Layer 3 cache).
+ *
+ * Use this for LRU SRAM management when the slot limit (~16) is not yet
+ * reached and you want to swap models in/out of SRAM cheaply:
+ *
+ *   ane_unload_sram(prog_a);       // free SRAM, keep slot
+ *   ane_delta_reload(prog_b);      // reload b into SRAM — ~1 ms if slot alive
+ *   ane_delta_reload(prog_a);      // reload a into SRAM — ~1 ms (slot intact)
+ *
+ * To fully release a program (SRAM + compile slot + memory), use ane_unload().
+ * Safe to call with nullptr.
+ */
+void ane_unload_sram(AneProgram* program);
+
+/**
+ * Unload a compiled ANE program and release all resources.
+ *
+ * Calls unloadWithQoS: (SRAM) + purgeCompiledModelMatchingHash: (compile slot)
+ * + releases ObjC objects + deletes the model_dir temp directory.
+ * A subsequent ane_compile() with the same MIL text will pay the full
+ * ANECompilerService cost (Layer 2 ~40 ms from disk cache, or Layer 1
+ * ~4000 ms on first-ever compile).
+ *
  * Safe to call with nullptr.
  */
 void ane_unload(AneProgram* program);
 
 /** Last error string from the ANE runtime (thread-local). */
 const char* ane_last_error();
+
+/* ── Program serialization ───────────────────────────────────────────────── */
+
+/**
+ * All data needed to restore a compiled AneProgram.
+ * Produced by ane_serialize_program(); consumed by ane_restore_program().
+ *
+ * NOTE: hwx_bytes and hwx_rel_path are always empty.  The compiled ANE binary
+ * lives exclusively inside aned (Apple Neural Engine daemon) and cannot be
+ * extracted to the client filesystem.  These fields are retained in the struct
+ * for binary compatibility with any previously serialized files; they are
+ * ignored on restore.  Serialization stores only mil_text + weights, which are
+ * sufficient for ane_restore_program() to fully reconstruct the program.
+ */
+struct SerializedProgram {
+    std::string              mil_text;          ///< MIL source text
+    std::vector<WeightEntry> weights;           ///< weight blobs (with 128-byte headers)
+    std::vector<uint8_t>     hwx_bytes;         ///< always empty (reserved, unused)
+    std::string              hwx_rel_path;      ///< always empty (reserved, unused)
+    std::string              debug_name;
+    std::vector<std::string> input_param_names;
+    std::vector<std::string> output_var_names;
+};
+
+/**
+ * Extract serializable data from a compiled program.
+ *
+ * Copies mil_text, weights, and I/O names from the program.  hwx_bytes is
+ * always left empty — the compiled ANE binary cannot be extracted from aned.
+ *
+ * @param program  Compiled program (must have mil_text set).
+ * @param out      Populated on success.
+ * @return         true on success; false if mil_text is absent.
+ */
+bool ane_serialize_program(const AneProgram* program, SerializedProgram& out);
+
+/**
+ * Restore a compiled program from serialized data.
+ *
+ * Calls ane_compile() with the stored MIL text and weights.  If aned's
+ * per-process in-memory cache still holds the hexID for this model (Path C
+ * warm path), load completes in ~1 ms; otherwise the full ~4200 ms cold
+ * compile round-trip is required.
+ *
+ * sp.hwx_bytes is intentionally ignored — see SerializedProgram above.
+ *
+ * @param sp   Data from ane_serialize_program().
+ * @return     Heap-allocated AneProgram* on success (caller calls ane_unload()).
+ *             Returns nullptr on failure.
+ */
+AneProgram* ane_restore_program(const SerializedProgram& sp);
 
 /**
  * Return cached device info (populated during initialize()).
@@ -249,26 +352,31 @@ const char* ane_last_error();
 AneDeviceInfo device_info();
 
 /**
- * Load a pre-built HWX binary directly, bypassing ANE compilation.
+ * Load a pre-compiled HWX binary by pre-staging it in localModelPath before
+ * compileWithQoS:.  On macOS 26+, aned's "compileAsNeeded" logic uses an
+ * existing model.hwx in the model directory rather than running ANECCompile().
+ * The caller must supply the matching MIL text for the target op — aned checks
+ * that the staged binary produces correct output for that op before registering
+ * it (confirmed by XPC-18, 2026-04-22).
  *
- * Compiles a minimal stub model (matching I/O shape) to establish a
- * model_dir and correct IOSurface buffer layout, overwrites the compiled
- * HWX with the provided bytes, then unloads and reloads from disk.
+ * On success, the returned AneProgram executes the op described by mil_text
+ * but uses hwx_bytes as the compiled binary (enabling cross-op patching).
  *
- * This is the Path C runtime entry point used by HwxBackend.  The first
- * call per (channels, seq) shape still incurs a full ane_compile() for the
- * stub; subsequent calls for the same shape skip compilation entirely.
+ * @param hwx_bytes   BEEFFACE-magic HWX binary to stage as model.hwx.
+ * @param mil_text    MIL source for the target op.  Must be consistent with
+ *                    the computation hwx_bytes performs (aned validates this).
+ * @param channels    Output tensor channel count.
+ * @param seq         Output tensor sequence length.
+ * @param input_name  MIL variable name for the input tensor.
+ * @param output_name MIL variable name for the output tensor.
+ * @param debug_name  Optional label.
  *
- * @param hwx_bytes      BEEFFACE HWX binary (magic 0xBEEFFACE).
- * @param channels       I/O tensor channels dimension.
- * @param seq            I/O tensor seq dimension.
- * @param input_name     MIL input parameter name (e.g., "t0").
- * @param output_name    MIL output variable name  (e.g., "t1").
- * @param debug_name     Optional label for error messages.
- * @return               Loaded AneProgram* on success (caller calls ane_unload()).
- *                       Returns nullptr on failure (check ane_last_error()).
+ * @return Non-null AneProgram* on success; caller must call ane_unload().
+ *         Returns nullptr on failure (check ane_last_error()).
+ *         Returns nullptr in Fallback mode or if hwx_bytes is empty.
  */
 AneProgram* ane_load_hwx(const std::vector<uint8_t>& hwx_bytes,
+                          const std::string&          mil_text,
                           int                         channels,
                           int                         seq,
                           const std::string&          input_name  = "x",
@@ -280,6 +388,29 @@ AneProgram* ane_load_hwx(const std::vector<uint8_t>& hwx_bytes,
  * successfully resolved during initialize().  Always false in Fallback mode.
  */
 bool path_b_available();
+
+/**
+ * Return the number of `compileWithQoS:` calls consumed in this process.
+ *
+ * aned enforces a hard per-process limit of ~119 unique compilations.
+ * Exceeding it causes silent failures followed by SIGSEGV (confirmed
+ * empirically, 2026-04-22).  libane refuses new compiles at
+ * kCompileHardLimit (115) with a descriptive error, and warns to stderr
+ * at kCompileWarnAt (100).
+ *
+ * The count is NOT decremented by purge / unload — slots appear to be
+ * per-process-lifetime in the kernel.
+ *
+ * Path C warm-path hits (compiledModelExists=YES) do NOT consume a slot
+ * and are not counted here.
+ */
+int ane_compile_count();
+
+/**
+ * Return the number of compile slots remaining before the hard limit.
+ * Returns 0 once the budget is exhausted (further compiles will fail).
+ */
+int ane_compile_slots_remaining();
 
 /**
  * Load a pre-built Espresso .mlmodelc bundle via _ANEClient (Path B).

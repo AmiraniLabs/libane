@@ -54,6 +54,7 @@
 #include <mutex>
 #include <atomic>
 #include <algorithm>
+#include <unordered_map>
 
 // QOS_CLASS_DEFAULT = 0x15 = 21  (matches Orion's proven value)
 static constexpr unsigned int kQoS = 21;
@@ -110,7 +111,11 @@ struct AneSymbols {
     SEL sel_modelAtURLKey     = nullptr; // modelAtURL:key:
     SEL sel_initWithSurface_b = nullptr; // initWithIOSurface:startOffset:shouldRetain:
     SEL sel_initRequest_b     = nullptr; // initWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:sharedEvents:transactionHandle:
-    bool path_b_loaded        = false;
+    SEL sel_purgeMatchingHash    = nullptr; // purgeCompiledModelMatchingHash: (Path A slot release)
+    SEL sel_compiledModelExists  = nullptr; // compiledModelExists (Path C warm-path skip)
+    SEL sel_modelURL             = nullptr; // modelURL (getter — Path C URL reconnect)
+    SEL sel_setModelURL          = nullptr; // setModelURL: (setter — Path C URL reconnect)
+    bool path_b_loaded           = false;
 };
 
 static AneSymbols     g_syms;
@@ -118,6 +123,47 @@ static std::once_flag g_init_flag;
 static std::atomic<AneState> g_state{AneState::Uninitialized};
 static char g_fallback_reason[512] = "";
 static AneDeviceInfo  g_device_info;
+
+// ── Compile-slot budget ───────────────────────────────────────────────────────
+// aned enforces a hard limit of ~119 unique compilations per process lifetime.
+// Exceeding it produces silent failures then a hard crash (SIGSEGV).
+// Empirically confirmed by test_qos_sweep.mm Probe 4 (2026-04-22).
+//
+// Slots consumed by `compileWithQoS:` calls where compiledModelExists=NO.
+// `purgeCompiledModel` / `purgeCompiledModelMatchingHash:` may free a slot
+// in aned's table but the kernel-side limit appears to be per-process and
+// does NOT reset on purge; treat this counter as monotonically increasing.
+//
+// Hard limit:  kCompileHardLimit  — refuse with a descriptive error
+// Warn limit:  kCompileWarnAt     — print to stderr, allow compile
+static constexpr int         kCompileHardLimit = 115; // safe margin below 119
+static constexpr int         kCompileWarnAt    = 100;
+static std::atomic<int>      g_compile_count{0};
+
+// model_dir paths are not guaranteed to be unique per live program (Path A uses
+// hexStringIdentifier-derived temp dirs), so teardown must only remove a path
+// once the final live program referencing it is gone.
+static std::mutex g_model_dir_refs_mu;
+static std::unordered_map<std::string, size_t> g_model_dir_refs;
+
+static void retain_model_dir(const std::string& model_dir) {
+    if (model_dir.empty()) return;
+    std::lock_guard<std::mutex> lock(g_model_dir_refs_mu);
+    ++g_model_dir_refs[model_dir];
+}
+
+static bool release_model_dir_ref(const std::string& model_dir) {
+    if (model_dir.empty()) return false;
+    std::lock_guard<std::mutex> lock(g_model_dir_refs_mu);
+    auto it = g_model_dir_refs.find(model_dir);
+    if (it == g_model_dir_refs.end()) return true; // fail-safe cleanup
+    if (it->second > 1) {
+        --it->second;
+        return false;
+    }
+    g_model_dir_refs.erase(it);
+    return true;
+}
 
 /* ── IOReport perf sampler ───────────────────────────────────────────────── */
 // Translates ane-perf's Python Sampler to C. Uses libIOReport.dylib which
@@ -328,16 +374,30 @@ static void do_initialize() {
     }
 
     // Resolve selectors
-    g_syms.sel_modelWithMILText  = sel_registerName("modelWithMILText:weights:optionsPlist:");
-    g_syms.sel_inMemoryModel     = sel_registerName("inMemoryModelWithDescriptor:");
-    g_syms.sel_hexID             = sel_registerName("hexStringIdentifier");
-    g_syms.sel_compile           = sel_registerName("compileWithQoS:options:error:");
-    g_syms.sel_load              = sel_registerName("loadWithQoS:options:error:");
-    g_syms.sel_unload            = sel_registerName("unloadWithQoS:error:");
-    g_syms.sel_evaluate          = sel_registerName("evaluateWithQoS:options:request:error:");
-    g_syms.sel_objectWithSurface = sel_registerName("objectWithIOSurface:");
-    g_syms.sel_buildRequest      = sel_registerName("requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:");
-    g_syms.sel_processRequest    = sel_registerName("processRequest:model:qos:qIndex:modelStringID:options:returnValue:error:");
+    g_syms.sel_modelWithMILText     = sel_registerName("modelWithMILText:weights:optionsPlist:");
+    g_syms.sel_inMemoryModel        = sel_registerName("inMemoryModelWithDescriptor:");
+    g_syms.sel_hexID                = sel_registerName("hexStringIdentifier");
+    g_syms.sel_compile              = sel_registerName("compileWithQoS:options:error:");
+    g_syms.sel_load                 = sel_registerName("loadWithQoS:options:error:");
+    g_syms.sel_unload               = sel_registerName("unloadWithQoS:error:");
+    g_syms.sel_evaluate             = sel_registerName("evaluateWithQoS:options:request:error:");
+    g_syms.sel_objectWithSurface    = sel_registerName("objectWithIOSurface:");
+    g_syms.sel_buildRequest         = sel_registerName("requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:");
+    g_syms.sel_processRequest       = sel_registerName("processRequest:model:qos:qIndex:modelStringID:options:returnValue:error:");
+    g_syms.sel_compiledModelExists  = sel_registerName("compiledModelExists");
+
+    // Optional: setModelURL: / modelURL for Path C URL reconnect (macOS 26+).
+    // Discovered in test_compiler_options_probe.mm Opts-3 (2026-04-22):
+    // setModelURL: + loadWithQoS: (no compileWithQoS:) = ~0.722ms when aned slot alive.
+    @try {
+        SEL sel_mu  = sel_registerName("modelURL");
+        SEL sel_smu = sel_registerName("setModelURL:");
+        if ([g_syms.cls_Model instancesRespondToSelector:sel_mu] &&
+            [g_syms.cls_Model instancesRespondToSelector:sel_smu]) {
+            g_syms.sel_modelURL    = sel_mu;
+            g_syms.sel_setModelURL = sel_smu;
+        }
+    } @catch (...) {}
 
     // Verify the model class responds to compile
     if (![g_syms.cls_Model instancesRespondToSelector:g_syms.sel_compile]) {
@@ -411,6 +471,7 @@ static void do_initialize() {
             g_syms.sel_modelAtURLKey     = sel_registerName("modelAtURL:key:");
             g_syms.sel_initWithSurface_b = sel_registerName("initWithIOSurface:startOffset:shouldRetain:");
             g_syms.sel_initRequest_b     = sel_registerName("initWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:sharedEvents:transactionHandle:");
+            g_syms.sel_purgeMatchingHash = sel_registerName("purgeCompiledModelMatchingHash:");
             g_syms.path_b_loaded = true;
         }
     } @catch (...) {
@@ -443,6 +504,16 @@ const char* ane_last_error() {
 
 bool path_b_available() {
     return g_syms.path_b_loaded;
+}
+
+int ane_compile_count() {
+    return g_compile_count.load(std::memory_order_relaxed);
+}
+
+int ane_compile_slots_remaining() {
+    int used = g_compile_count.load(std::memory_order_relaxed);
+    int remaining = kCompileHardLimit - used;
+    return remaining < 0 ? 0 : remaining;
 }
 
 /* ── MIL Parameter Extraction ────────────────────────────────────────────── */
@@ -650,16 +721,60 @@ AneProgram* ane_compile(const std::string& mil_text,
             [data writeToFile:full atomically:YES];
         }
 
-        // --- Step 4: Compile to E5 FlatBuffer ---
-        // CRITICAL: QoS must be 21 (DEFAULT), options must be @{} not nil
-        // (matches Orion's proven compileWithQoS:options:error: call)
+        // --- Step 3b: Path C warm path — skip compile if aned already has this hexID ---
+        // aned deduplicates compiled programs by content hash (hexID).
+        // compiledModelExists returns YES if aned's compile table has this hexID,
+        // even if we haven't called compileWithQoS: on this particular model object.
+        // Skipping compile saves the full ~4200ms ANECompilerService round-trip.
+        //
+        // Confirmed by test_pathc3_reconnect.mm Probes 1-3 (2026-04-21):
+        //   Probe 1:  loadWithQoS: after initWithModelIdentifier inject  → 2.8ms
+        //   Probe 2:  loadWithQoS: after setProgramHandle: inject        → 1.0ms
+        //   Probe 3:  loadWithQoS: on fresh model, same hexID alive      → 0.7ms
+        bool already_compiled = false;
+        if (g_syms.sel_compiledModelExists &&
+            [g_syms.cls_Model instancesRespondToSelector:g_syms.sel_compiledModelExists]) {
+            already_compiled = ((BOOL(*)(id,SEL))objc_msgSend)(
+                model, g_syms.sel_compiledModelExists);
+        }
+
         typedef BOOL (*QoSFn3)(id, SEL, unsigned int, id, NSError**);
-        BOOL ok = ((QoSFn3)objc_msgSend)(
-            model, g_syms.sel_compile, kQoS, @{}, &error);
-        if (!ok || error) {
-            set_error("ANE compile failed: %s",
-                      error ? [[error localizedDescription] UTF8String] : "unknown");
-            return nullptr;
+        BOOL ok = YES;
+
+        if (!already_compiled) {
+            // --- Step 4: Compile to E5 FlatBuffer ---
+            // CRITICAL: QoS must be 21 (DEFAULT), options must be @{} not nil
+            // (matches Orion's proven compileWithQoS:options:error: call)
+
+            // Guard against the per-process compile slot limit (~119).
+            // Exceeding it causes silent failures then SIGSEGV.
+            // Confirmed empirically: test_qos_sweep Probe 4 (2026-04-22).
+            int current_count = g_compile_count.load(std::memory_order_relaxed);
+            if (current_count >= kCompileHardLimit) {
+                set_error(
+                    "ANE compile slot budget exhausted (%d/%d). "
+                    "aned enforces a per-process limit of ~119 compilations. "
+                    "Use ane_compile_count() to monitor usage. "
+                    "Restart the process to reset the budget.",
+                    current_count, kCompileHardLimit);
+                return nullptr;
+            }
+            if (current_count >= kCompileWarnAt) {
+                fprintf(stderr,
+                    "libane: WARNING: ANE compile slot budget at %d/%d. "
+                    "Approaching per-process limit (~119). "
+                    "Consider reusing compiled programs.\n",
+                    current_count, kCompileHardLimit);
+            }
+
+            ok = ((QoSFn3)objc_msgSend)(
+                model, g_syms.sel_compile, kQoS, @{}, &error);
+            if (!ok || error) {
+                set_error("ANE compile failed: %s",
+                          error ? [[error localizedDescription] UTF8String] : "unknown");
+                return nullptr;
+            }
+            g_compile_count.fetch_add(1, std::memory_order_relaxed);
         }
 
         // --- Step 5: Load into ANE SRAM ---
@@ -672,7 +787,21 @@ AneProgram* ane_compile(const std::string& mil_text,
             return nullptr;
         }
 
-        // --- Step 5b: Detect SRAM spill via intermediateBufferHandle ---
+        // --- Step 5b: Capture model URL for Path C reconnect ---
+        // After loadWithQoS:, modelURL holds the URL aned uses to key the compile
+        // slot.  Injecting it via setModelURL: on a fresh model + calling
+        // loadWithQoS: (no compile) reconnects in ~0.722ms when the slot is alive.
+        // Confirmed: test_compiler_options_probe.mm Opts-3 (2026-04-22).
+        std::string captured_model_url;
+        if (g_syms.sel_modelURL) {
+            @try {
+                typedef NSURL* (*URLFn)(id, SEL);
+                NSURL* url = ((URLFn)objc_msgSend)(model, g_syms.sel_modelURL);
+                if (url) captured_model_url = [[url absoluteString] UTF8String];
+            } @catch (...) {}
+        }
+
+        // --- Step 5c: Detect SRAM spill via intermediateBufferHandle ---
         // After loadWithQoS: the firmware sets intermediateBufferHandle on
         // _ANEInMemoryModel to a non-zero IOSurface handle if the model's
         // intermediate activations exceeded ~32 MB on-chip SRAM and were
@@ -730,7 +859,10 @@ AneProgram* ane_compile(const std::string& mil_text,
         for (const auto& w : weights) prog->size_bytes += w.data.size();
         prog->debug_name = debug_name;
         prog->model_dir  = [model_dir UTF8String];
-        prog->weights    = weights;  // copy for delta reload
+        retain_model_dir(prog->model_dir);
+        prog->mil_text   = mil_text;
+        prog->weights    = weights;
+        prog->model_url  = captured_model_url;
 
         // Extract parameter and output names for constraint validation
         prog->input_param_names = extract_input_params(mil_text);
@@ -1013,101 +1145,396 @@ bool ane_delta_reload(AneProgram* program) {
             return false;
         }
 
+        // Invalidate cached _ANEProgramForEvaluation after reload.
+        //
+        // loadWithQoS: assigns a NEW kernel handle to the outer _ANEInMemoryModel.
+        // The previously-retained _ANEProgramForEvaluation (prog->objc_program) still
+        // references the OLD kernel handle and causes "Program Inference error" when
+        // processRequest: is called with it.
+        //
+        // The outer model's evaluateWithQoS: always uses the current programHandle
+        // (updated by loadWithQoS:), so falling back to Tier 1 is correct.
+        // The performance difference vs processRequest: is ~13% — acceptable for
+        // a reload scenario.
+        //
+        // TODO: investigate whether inner._ANEModel.program is refreshed after
+        // loadWithQoS: so the fast path can be re-enabled post-reload.
+        if (program->objc_program) {
+            [(id)program->objc_program release];
+            program->objc_program = nullptr;
+        }
+        if (program->objc_inner_model) {
+            [(id)program->objc_inner_model release];
+            program->objc_inner_model = nullptr;
+        }
+
         return true;
     }
 }
 
-/* ── Load HWX ────────────────────────────────────────────────────────────── */
+/* ── Program serialization ───────────────────────────────────────────────── */
 
+// HOW ANE COMPILATION WORKS (confirmed by probe_save_files, 2026-04-22):
+//
+// After compileWithQoS: the model_dir contains only:
+//   weights/   — weight blobs written before compile
+//   model.mil  — the MIL source text
+//   net.plist  — byte-for-byte copy of model.mil (written by aned as a receipt)
+//
+// No .hwx binary, no compiled flatbuffer, no artifact of any kind.
+// The compiled ANE binary lives exclusively inside aned (Apple Neural Engine
+// daemon) in its per-process in-memory compile table, keyed by hexID.
+//
+// saveModelFiles — discovered via ObjC introspection — returns an NSURL
+// pointing to the existing model_dir but writes nothing new.  It is a
+// read-only accessor, not a serialization mechanism.
+//
+// Consequence: ane_serialize_program stores only the MIL source + weights.
+// ane_restore_program recompiles from scratch.  If aned's per-process cache
+// still holds the hexID (Path C warm path), recompile completes in ~1 ms
+// instead of the full ~4200 ms cold round-trip.
+
+bool ane_serialize_program(const AneProgram* program, SerializedProgram& out) {
+    if (!program) {
+        set_error("ane_serialize_program: null program");
+        return false;
+    }
+    if (program->mil_text.empty()) {
+        set_error("ane_serialize_program: mil_text not stored "
+                  "(program created via ane_load_mlmodelc cannot be serialized)");
+        return false;
+    }
+
+    out.mil_text          = program->mil_text;
+    out.weights           = program->weights;
+    out.hwx_bytes.clear();        // always empty — no compiled binary on disk
+    out.hwx_rel_path.clear();     // reserved; unused
+    out.debug_name        = program->debug_name;
+    out.input_param_names = program->input_param_names;
+    out.output_var_names  = program->output_var_names;
+    return true;
+}
+
+AneProgram* ane_restore_program(const SerializedProgram& sp) {
+    if (g_state != AneState::Available) {
+        set_error("ane_restore_program: ANE not available: %s", g_fallback_reason);
+        return nullptr;
+    }
+    if (sp.mil_text.empty()) {
+        set_error("ane_restore_program: empty MIL text");
+        return nullptr;
+    }
+
+    // The compiled ANE binary lives exclusively inside aned and cannot be
+    // restored from a serialized blob — ane_compile() is the only path to a
+    // live AneProgram.  sp.hwx_bytes is intentionally ignored: it is always
+    // empty in files written by the current ane_serialize_program(); any
+    // non-empty value from a hypothetical older file is harmless dead data.
+    //
+    // Performance: if aned's per-process in-memory cache still holds the
+    // hexID for this MIL+weights, ane_compile() takes ~1 ms (Path C warm
+    // path); otherwise the full ~4200 ms cold compile round-trip is required.
+    return ane_compile(sp.mil_text, sp.weights, sp.debug_name);
+}
+
+/* ── Path C URL reconnect ────────────────────────────────────────────────── */
+
+AneProgram* ane_reconnect(const std::string&              mil_text,
+                           const std::vector<WeightEntry>& weights,
+                           const std::string&              model_url,
+                           const std::string&              debug_name) {
+    if (g_state != AneState::Available) {
+        set_error("ane_reconnect: ANE not available: %s", g_fallback_reason);
+        return nullptr;
+    }
+    if (model_url.empty()) {
+        set_error("ane_reconnect: empty model_url");
+        return nullptr;
+    }
+    if (!g_syms.sel_setModelURL || !g_syms.sel_modelURL) {
+        set_error("ane_reconnect: setModelURL: not available on this OS");
+        return nullptr;
+    }
+
+    @autoreleasepool {
+        // --- Steps 1-2: Descriptor + model (same as ane_compile) ---
+        NSData* mil_data = [NSData dataWithBytes:mil_text.data() length:mil_text.size()];
+        NSMutableDictionary* weights_dict = [NSMutableDictionary dictionary];
+        for (const auto& w : weights) {
+            NSString* full_path = [NSString stringWithFormat:@"@model_path/weights/%s",
+                                   w.filename.c_str()];
+            NSData* blob = [NSData dataWithBytes:w.data.data() length:w.data.size()];
+            weights_dict[full_path] = @{@"offset": @0, @"data": blob};
+        }
+        NSDictionary* final_weights = (weights_dict.count > 0) ? weights_dict : @{};
+
+        typedef id (*DescFn)(Class, SEL, NSData*, NSDictionary*, id);
+        id descriptor = ((DescFn)objc_msgSend)(
+            g_syms.cls_Descriptor, g_syms.sel_modelWithMILText,
+            mil_data, final_weights, nil);
+        if (!descriptor) {
+            set_error("ane_reconnect: descriptor creation failed");
+            return nullptr;
+        }
+
+        typedef id (*ModelFn)(Class, SEL, id);
+        id model = ((ModelFn)objc_msgSend)(
+            g_syms.cls_Model, g_syms.sel_inMemoryModel, descriptor);
+        if (!model) {
+            set_error("ane_reconnect: model creation failed");
+            return nullptr;
+        }
+
+        // --- Step 3: Write temp dir (idempotent — hexID dir may already exist) ---
+        typedef NSString* (*StrFn)(id, SEL);
+        NSString* hex_id = ((StrFn)objc_msgSend)(model, g_syms.sel_hexID);
+        if (!hex_id || hex_id.length == 0) {
+            set_error("ane_reconnect: hexStringIdentifier empty");
+            return nullptr;
+        }
+        NSFileManager* fm = [NSFileManager defaultManager];
+        NSString* model_dir_ns = [NSTemporaryDirectory() stringByAppendingPathComponent:hex_id];
+        NSString* weights_dir  = [model_dir_ns stringByAppendingPathComponent:@"weights"];
+        [fm createDirectoryAtPath:model_dir_ns withIntermediateDirectories:YES
+                       attributes:nil error:nil];
+        [fm createDirectoryAtPath:weights_dir withIntermediateDirectories:YES
+                       attributes:nil error:nil];
+        NSString* mil_path = [model_dir_ns stringByAppendingPathComponent:@"model.mil"];
+        [mil_data writeToFile:mil_path atomically:YES];
+        for (NSString* path in final_weights) {
+            NSDictionary* entry = final_weights[path];
+            NSData* data = entry[@"data"];
+            if (!data) continue;
+            NSString* rel  = [path stringByReplacingOccurrencesOfString:@"@model_path/"
+                                                             withString:@""];
+            NSString* full = [model_dir_ns stringByAppendingPathComponent:rel];
+            NSString* dir  = [full stringByDeletingLastPathComponent];
+            [fm createDirectoryAtPath:dir withIntermediateDirectories:YES
+                           attributes:nil error:nil];
+            [data writeToFile:full atomically:YES];
+        }
+
+        // --- Step 4: Inject the stored model URL ---
+        NSURL* nsurl = [NSURL URLWithString:[NSString stringWithUTF8String:model_url.c_str()]];
+        if (!nsurl) {
+            set_error("ane_reconnect: malformed model_url: %s", model_url.c_str());
+            return nullptr;
+        }
+        typedef void (*SetURLFn)(id, SEL, NSURL*);
+        ((SetURLFn)objc_msgSend)(model, g_syms.sel_setModelURL, nsurl);
+
+        // --- Step 5: Verify aned still holds the compile slot ---
+        if (g_syms.sel_compiledModelExists) {
+            BOOL exists = ((BOOL(*)(id,SEL))objc_msgSend)(model, g_syms.sel_compiledModelExists);
+            if (!exists) {
+                set_error("ane_reconnect: aned slot purged (compiledModelExists=NO) "
+                          "for hexID %s — caller must fall back to ane_compile()",
+                          [hex_id UTF8String]);
+                return nullptr;
+            }
+        }
+
+        // --- Step 6: Load directly (no compileWithQoS:, no slot consumed) ---
+        NSError* error = nil;
+        typedef BOOL (*QoSFn3)(id, SEL, unsigned int, id, NSError**);
+        BOOL ok = ((QoSFn3)objc_msgSend)(model, g_syms.sel_load, kQoS, @{}, &error);
+        if (!ok || error) {
+            set_error("ane_reconnect: loadWithQoS: failed: %s",
+                      error ? [[error localizedDescription] UTF8String] : "unknown");
+            return nullptr;
+        }
+
+        // --- Step 7: Build AneProgram ---
+        [model retain];
+        auto* prog        = new AneProgram{};
+        prog->objc_model  = (void*)model;
+        prog->debug_name  = debug_name;
+        prog->model_dir   = [model_dir_ns UTF8String];
+        retain_model_dir(prog->model_dir);
+        prog->mil_text    = mil_text;
+        prog->weights     = weights;
+        prog->model_url   = model_url;
+        prog->size_bytes  = mil_text.size();
+        for (const auto& w : weights) prog->size_bytes += w.data.size();
+
+        @try {
+            id inner = [model valueForKey:@"model"];
+            if (inner) {
+                id prog_eval = [inner valueForKey:@"program"];
+                if (prog_eval) {
+                    [inner retain];
+                    [prog_eval retain];
+                    prog->objc_inner_model = (void*)inner;
+                    prog->objc_program     = (void*)prog_eval;
+                    prog->model_string_id  =
+                        ((uint64_t(*)(id,SEL))objc_msgSend)(inner, sel_registerName("string_id"));
+                }
+            }
+        } @catch (...) {}
+
+        prog->input_param_names = extract_input_params(mil_text);
+        prog->output_var_names  = extract_output_vars(mil_text);
+
+        return prog;
+    }
+}
+
+/* ── Load HWX (not supported) ────────────────────────────────────────────── */
+
+// ane_load_hwx is not supported and cannot be made to work.
+//
+// The premise was: compile a stub model, find its .hwx on disk, overwrite it
+// with the caller's bytes, then reload.  This premise is false.  After
+// compileWithQoS: the model_dir contains only model.mil + net.plist (a copy of
+// model.mil) + an empty weights/ directory.  No .hwx file is written to disk
+// at any point in the compile pipeline — confirmed by probe_save_files
+// (2026-04-22), which also tested saveModelFiles and found it writes nothing.
+//
+// The compiled binary lives exclusively inside aned's per-process IPC table.
+// There is no client-side filesystem path to intercept.
+//
+// For program persistence use ane_serialize_program() / ane_restore_program(),
+// which serialize the source MIL text and weights instead.
 AneProgram* ane_load_hwx(const std::vector<uint8_t>& hwx_bytes,
-                          int channels, int seq,
-                          const std::string& input_name,
-                          const std::string& output_name,
-                          const std::string& debug_name) {
+                          const std::string&          mil_text,
+                          int                         /*channels*/,
+                          int                         /*seq*/,
+                          const std::string&          /*input_name*/,
+                          const std::string&          /*output_name*/,
+                          const std::string&          debug_name) {
     if (g_state != AneState::Available) {
         set_error("ane_load_hwx: ANE not available: %s", g_fallback_reason);
         return nullptr;
     }
-
-    // Build a minimal relu stub for the given I/O shape.
-    // Purpose: establish a model_dir with the correct IOSurface buffer layout.
-    // The stub's compiled HWX is then overwritten with the caller's bytes.
-    auto tt = [&]() -> std::string {
-        return "tensor<fp16, [1, " + std::to_string(channels) +
-               ", 1, " + std::to_string(seq) + "]>";
-    };
-    std::string stub_mil =
-        "program(1.3)\n"
-        "[buildInfo = dict<string, string>({"
-        "{\"coremlc-component-MIL\", \"3510.2.1\"}, "
-        "{\"coremlc-version\", \"3505.4.1\"}, "
-        "{\"coremltools-component-milinternal\", \"\"}, "
-        "{\"coremltools-version\", \"9.0\"}"
-        "})]\n"
-        "{\n"
-        "    func main<ios18>(" + tt() + " " + input_name + ") {\n"
-        "        " + tt() + " " + output_name +
-        " = relu(x=" + input_name + ")[name=string(\"hwx_stub\")];\n"
-        "    } -> (" + output_name + ");\n"
-        "}\n";
-
-    AneProgram* prog = ane_compile(stub_mil, {}, debug_name.empty()
-                                                      ? "hwx_stub"
-                                                      : debug_name + "_stub");
-    if (!prog) return nullptr;
+    if (hwx_bytes.empty()) {
+        set_error("ane_load_hwx: hwx_bytes is empty");
+        return nullptr;
+    }
+    if (mil_text.empty()) {
+        set_error("ane_load_hwx: mil_text is empty");
+        return nullptr;
+    }
 
     @autoreleasepool {
-        NSString* model_dir_ns =
-            [NSString stringWithUTF8String:prog->model_dir.c_str()];
-        NSFileManager* fm = [NSFileManager defaultManager];
-
-        // Scan model_dir for the compiled HWX (may be in a subdirectory)
-        NSString* hwx_path = nil;
-        NSDirectoryEnumerator* en = [fm enumeratorAtPath:model_dir_ns];
-        for (NSString* f in en) {
-            if ([f hasSuffix:@".hwx"]) {
-                hwx_path = [model_dir_ns stringByAppendingPathComponent:f];
-                break;
-            }
-        }
-
-        if (!hwx_path) {
-            set_error("ane_load_hwx: no .hwx file found in model_dir %s",
-                      prog->model_dir.c_str());
-            ane_unload(prog);
-            return nullptr;
-        }
-
-        // Overwrite the stub HWX with the caller's bytes
-        NSData* our_data = [NSData dataWithBytes:hwx_bytes.data()
-                                          length:hwx_bytes.size()];
-        if (![our_data writeToFile:hwx_path atomically:YES]) {
-            set_error("ane_load_hwx: write to %s failed", [hwx_path UTF8String]);
-            ane_unload(prog);
-            return nullptr;
-        }
-
-        // Unload stub from SRAM, then reload with our HWX
-        id model = (id)prog->objc_model;
         NSError* error = nil;
-        typedef BOOL (*UnloadFn)(id, SEL, unsigned int, NSError**);
+
+        // Steps 1-3: same as ane_compile — create descriptor, model, get hexID.
+        NSData* mil_data = [NSData dataWithBytes:mil_text.data()
+                                          length:mil_text.size()];
+        typedef id (*DescFn)(Class, SEL, NSData*, NSDictionary*, id);
+        id descriptor = ((DescFn)objc_msgSend)(
+            g_syms.cls_Descriptor, g_syms.sel_modelWithMILText,
+            mil_data, @{}, nil);
+        if (!descriptor) {
+            set_error("ane_load_hwx: _ANEInMemoryModelDescriptor creation failed");
+            return nullptr;
+        }
+
+        typedef id (*ModelFn)(Class, SEL, id);
+        id model = ((ModelFn)objc_msgSend)(
+            g_syms.cls_Model, g_syms.sel_inMemoryModel, descriptor);
+        if (!model) {
+            set_error("ane_load_hwx: _ANEInMemoryModel creation failed");
+            return nullptr;
+        }
+
+        typedef NSString* (*StrFn)(id, SEL);
+        NSString* hex_id = ((StrFn)objc_msgSend)(model, g_syms.sel_hexID);
+        if (!hex_id || hex_id.length == 0) {
+            set_error("ane_load_hwx: hexStringIdentifier returned empty string");
+            return nullptr;
+        }
+
+        NSFileManager* fm = [NSFileManager defaultManager];
+        NSString* model_dir = [NSTemporaryDirectory()
+                               stringByAppendingPathComponent:hex_id];
+        [fm createDirectoryAtPath:model_dir
+          withIntermediateDirectories:YES attributes:nil error:nil];
+
+        [mil_data writeToFile:[model_dir stringByAppendingPathComponent:@"model.mil"]
+                   atomically:YES];
+
+        // Pre-stage the HWX binary before compileWithQoS:.
+        // aned's "compileAsNeeded" path uses the existing model.hwx rather than
+        // running ANECCompile().  Confirmed by XPC-18 (2026-04-22).
+        [[NSData dataWithBytes:hwx_bytes.data() length:hwx_bytes.size()]
+            writeToFile:[model_dir stringByAppendingPathComponent:@"model.hwx"]
+            atomically:YES];
+
+        // Check if aned already has this hexID cached (compiledModelExists).
+        // If so, skip compileWithQoS: — aned's cached binary will be used at load.
+        bool already_compiled = false;
+        if (g_syms.sel_compiledModelExists &&
+            [g_syms.cls_Model instancesRespondToSelector:g_syms.sel_compiledModelExists]) {
+            already_compiled = ((BOOL(*)(id,SEL))objc_msgSend)(
+                model, g_syms.sel_compiledModelExists);
+        }
+
         typedef BOOL (*QoSFn3)(id, SEL, unsigned int, id, NSError**);
 
-        ((UnloadFn)objc_msgSend)(model, g_syms.sel_unload, kQoS, &error);
+        if (!already_compiled) {
+            int current_count = g_compile_count.load(std::memory_order_relaxed);
+            if (current_count >= kCompileHardLimit) {
+                set_error("ane_load_hwx: compile slot budget exhausted (%d/%d)",
+                          current_count, kCompileHardLimit);
+                return nullptr;
+            }
+            BOOL ok = ((QoSFn3)objc_msgSend)(
+                model, g_syms.sel_compile, kQoS, @{}, &error);
+            if (!ok || error) {
+                set_error("ane_load_hwx: compileWithQoS: failed: %s",
+                          error ? [[error localizedDescription] UTF8String] : "unknown");
+                return nullptr;
+            }
+            g_compile_count.fetch_add(1, std::memory_order_relaxed);
+        }
 
         error = nil;
-        BOOL ok = ((QoSFn3)objc_msgSend)(model, g_syms.sel_load, kQoS, @{}, &error);
+        BOOL ok = ((QoSFn3)objc_msgSend)(
+            model, g_syms.sel_load, kQoS, @{}, &error);
         if (!ok || error) {
-            set_error("ane_load_hwx: reload failed: %s",
+            set_error("ane_load_hwx: loadWithQoS: failed: %s",
                       error ? [[error localizedDescription] UTF8String] : "unknown");
-            ane_unload(prog);
             return nullptr;
         }
 
-        // Override tensor names with the caller's names (not the stub's)
-        prog->input_param_names = {input_name};
-        prog->output_var_names  = {output_name};
-        prog->debug_name        = debug_name;
+        std::string captured_model_url;
+        if (g_syms.sel_modelURL) {
+            @try {
+                typedef NSURL* (*URLFn)(id, SEL);
+                NSURL* url = ((URLFn)objc_msgSend)(model, g_syms.sel_modelURL);
+                if (url) captured_model_url = [[url absoluteString] UTF8String];
+            } @catch (...) {}
+        }
+
+        [model retain];
+        auto* prog        = new AneProgram{};
+        prog->objc_model  = (void*)model;
+        prog->debug_name  = debug_name;
+        prog->model_dir   = [model_dir UTF8String];
+        retain_model_dir(prog->model_dir);
+        prog->mil_text    = mil_text;
+        prog->model_url   = captured_model_url;
+        prog->size_bytes  = mil_text.size() + hwx_bytes.size();
+
+        @try {
+            id inner = [model valueForKey:@"model"];
+            if (inner) {
+                id prog_eval = [inner valueForKey:@"program"];
+                if (prog_eval) {
+                    [inner retain];
+                    [prog_eval retain];
+                    prog->objc_inner_model = (void*)inner;
+                    prog->objc_program     = (void*)prog_eval;
+                    prog->model_string_id  =
+                        ((uint64_t(*)(id,SEL))objc_msgSend)(
+                            inner, sel_registerName("string_id"));
+                }
+            }
+        } @catch (...) {}
+
+        prog->input_param_names = extract_input_params(mil_text);
+        prog->output_var_names  = extract_output_vars(mil_text);
 
         return prog;
     }
@@ -1194,6 +1621,11 @@ AneProgram* ane_load_mlmodelc(const std::string& model_dir_path,
         prog->client_in_seq       = in_seq;
         prog->client_out_seq      = out_seq;
         prog->debug_name          = debug_name;
+        // Store the .mlmodelc bundle path so ane_unload() can delete it.
+        // ane_delta_reload() is Path A only (it checks objc_model, which is
+        // null for Path B), so reusing model_dir here is safe.
+        prog->model_dir           = model_dir_path;
+        retain_model_dir(prog->model_dir);
 
         // ANE requires 64-byte plane alignment; plane stride = round64(seq * sizeof(fp16)).
         const size_t in_ps_fallback  = round64((size_t)in_seq  * 2);
@@ -1415,6 +1847,21 @@ bool ane_execute_client(AneProgram* program,
 
 /* ── Unload ──────────────────────────────────────────────────────────────── */
 
+void ane_unload_sram(AneProgram* program) {
+    if (!program || !program->objc_model || g_state != AneState::Available) return;
+
+    @autoreleasepool {
+        id model = (id)program->objc_model;
+        if (g_syms.loaded) {
+            NSError* err = nil;
+            typedef BOOL (*UnloadFn)(id, SEL, unsigned int, NSError**);
+            ((UnloadFn)objc_msgSend)(model, g_syms.sel_unload, kQoS, &err);
+            // Compile slot remains alive — compiledModelExists=YES on next
+            // ane_compile() / ane_delta_reload() for the same hexID.
+        }
+    }
+}
+
 void ane_unload(AneProgram* program) {
     if (!program) return;
 
@@ -1458,15 +1905,59 @@ void ane_unload(AneProgram* program) {
         @autoreleasepool {
             id model = (id)program->objc_model;
             if (g_syms.loaded) {
+                // Step 1: Grab hex ID before unload (needed for compile-slot purge below)
+                NSString* hex_id = nil;
+                @try {
+                    typedef NSString* (*StrFn)(id, SEL);
+                    hex_id = ((StrFn)objc_msgSend)(model, g_syms.sel_hexID);
+                } @catch (...) {}
+
+                // Step 2: Deregister from ANE SRAM (unloadWithQoS:)
                 NSError* error = nil;
                 typedef BOOL (*UnloadFn)(id, SEL, unsigned int, NSError**);
                 ((UnloadFn)objc_msgSend)(model, g_syms.sel_unload, kQoS, &error);
+
+                // Step 3: Purge the compile slot from aned's table.
+                //
+                // _ANEClient.purgeCompiledModelMatchingHash: was confirmed via
+                // test_pathc_probe (Probe C, macOS 26.3.1) to deregister the
+                // compile slot immediately, freeing it for reuse without requiring
+                // a reboot.  This is belt-and-suspenders on top of unloadWithQoS:
+                // and model_dir deletion; together the three mechanisms ensure
+                // no slot accumulation across repeated compile/unload cycles.
+                if (hex_id && g_syms.path_b_loaded && g_syms.sel_purgeMatchingHash) {
+                    @try {
+                        id client = ((id(*)(Class,SEL))objc_msgSend)(
+                            g_syms.cls_ANEClient, g_syms.sel_sharedConnection);
+                        if (client &&
+                            [client respondsToSelector:g_syms.sel_purgeMatchingHash]) {
+                            typedef BOOL (*PurgeFn)(id, SEL, NSString*, NSError**);
+                            NSError* perr = nil;
+                            ((PurgeFn)objc_msgSend)(
+                                client, g_syms.sel_purgeMatchingHash, hex_id, &perr);
+                        }
+                    } @catch (...) {}
+                }
             }
             if (program->objc_program)     [(id)program->objc_program release];
             if (program->objc_inner_model) [(id)program->objc_inner_model release];
             [model release];
         }
         program->objc_model = nullptr;
+    }
+
+    // Delete on-disk model assets only when no live program still references
+    // this path.
+    if (!program->model_dir.empty()) {
+        const std::string model_dir = program->model_dir;
+        const bool should_delete = release_model_dir_ref(model_dir);
+        if (should_delete) {
+            @autoreleasepool {
+                NSString* dir = [NSString stringWithUTF8String:model_dir.c_str()];
+                [[NSFileManager defaultManager] removeItemAtPath:dir error:nil];
+            }
+        }
+        program->model_dir.clear();
     }
 
     delete program;

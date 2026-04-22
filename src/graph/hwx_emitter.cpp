@@ -207,6 +207,21 @@ bool HwxEmitter::capture_from_model_dir(const std::string& model_dir,
     return true;
 }
 
+bool HwxEmitter::capture_from_bytes(const std::vector<uint8_t>& hwx,
+                                     int channels, int seq, libane_op_t op) {
+    if (!valid_hwx(hwx)) return false;
+
+    ShapeKey key{channels, seq};
+    if (!shape_cache_.count(key))
+        shape_cache_[key] = hwx;
+
+    int iop = static_cast<int>(op);
+    if (!op_cfg_cache_.count(iop))
+        op_cfg_cache_[iop] = extract_op_config(hwx);
+
+    return true;
+}
+
 bool HwxEmitter::has_shape(int channels, int seq) const {
     return shape_cache_.count(ShapeKey{channels, seq}) > 0;
 }

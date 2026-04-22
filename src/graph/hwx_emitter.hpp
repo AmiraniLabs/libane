@@ -59,6 +59,13 @@ public:
                                 int channels, int seq, libane_op_t op);
 
     /**
+     * Accept pre-read HWX bytes (e.g. from hwx_capture_inline on macOS 26).
+     * Identical contract to capture_from_model_dir.  Returns true on success.
+     */
+    bool capture_from_bytes(const std::vector<uint8_t>& hwx,
+                            int channels, int seq, libane_op_t op);
+
+    /**
      * Emit patched HWX bytes for (channels, seq, op).
      *
      * Returns empty vector if the required data is not yet cached

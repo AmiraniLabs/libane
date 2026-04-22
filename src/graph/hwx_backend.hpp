@@ -40,6 +40,9 @@
 #include "compiler_backend.hpp"
 #include "hwx_emitter.hpp"
 
+#include <string>
+#include <unordered_map>
+
 namespace libane {
 namespace graph {
 
@@ -62,6 +65,30 @@ private:
     HwxEmitter emitter_;
 
     static bool is_hwx_eligible(libane_op_t op);
+
+    // ── Path C URL reconnect cache (macOS 26+) ────────────────────────────
+    // Keyed by (channels, seq, op).  Populated on first cold compile;
+    // used by ane_reconnect() for subsequent calls at the same shape+op
+    // without consuming a new aned compile slot (~0.722ms warm path).
+    struct ShapeOpKey {
+        int channels, seq, op;
+        bool operator==(const ShapeOpKey& o) const noexcept {
+            return channels == o.channels && seq == o.seq && op == o.op;
+        }
+    };
+    struct ShapeOpKeyHash {
+        size_t operator()(const ShapeOpKey& k) const noexcept {
+            size_t h = std::hash<int>{}(k.channels);
+            h ^= std::hash<int>{}(k.seq) + 0x9e3779b9u + (h << 6) + (h >> 2);
+            h ^= std::hash<int>{}(k.op)  + 0x9e3779b9u + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+    struct UrlCacheEntry {
+        std::string model_url;
+        std::string mil_text;
+    };
+    std::unordered_map<ShapeOpKey, UrlCacheEntry, ShapeOpKeyHash> url_cache_;
 };
 
 } // namespace graph
