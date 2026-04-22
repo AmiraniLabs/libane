@@ -66,5 +66,15 @@ examples/13_c_api
 
 # ── Reference repos (cloned external projects, not tracked) ───────────────
 reference/
-probe_chaining/probe_chaining
-probe_offset/probe_offset
+
+# ── Probe binaries (keep sources: .m, .sh, .md, CMakeLists.txt) ────────────
+tools/probe_*/probe_*
+!tools/probe_*/probe_*.m
+!tools/probe_*/probe_*.sh
+!tools/probe_*/*.md
+!tools/probe_*/CMakeLists.txt
+research/probes/probe_*/probe_*
+!research/probes/probe_*/probe_*.m
+!research/probes/probe_*/*.sh
+!research/probes/probe_*/*.md
+!research/probes/probe_*/CMakeLists.txt

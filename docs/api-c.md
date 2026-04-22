@@ -30,7 +30,7 @@ typedef struct {
 } libane_shape_t;
 ```
 
-ANE tensors are always `[1, C, 1, S]`. `dims[0]` is always 1 (batch), `dims[1]` is C (channels), `dims[2]` is always 1 (height), `dims[3]` is S (sequence). S must be a multiple of 16.
+ANE tensors are always `[1, C, 1, S]`. `dims[0]` is always 1 (batch), `dims[1]` is C (channels), `dims[2]` is always 1 (height), `dims[3]` is S (sequence). **S must be a multiple of 32** (IOSurface DMA requires 64-byte row alignment; at fp16 that is 32 elements). `LIBANE_OP_DYNAMIC_MATMUL` and `LIBANE_OP_SDPA` use a matrix tensor variant where `height > 1` — see graph-ir.md.
 
 For matmul `A[M,K] × B[K,N]`: A shape is `{1, K, 1, M}`, B shape is `{1, N, 1, K}`.
 
@@ -108,6 +108,15 @@ void libane_cache_flush(void);
 ```
 
 Evicts all entries from the compile cache and releases cached program handles.
+
+### `libane_end_job`
+
+```c
+void libane_end_job(void);
+```
+
+Explicit lifecycle boundary for long-running workloads. Equivalent to
+`libane_cache_flush()`.
 
 ### `libane_cache_size_bytes`
 
@@ -194,7 +203,9 @@ Returns `LIBANE_ERR_UNAVAILABLE` if the handle is not ANE-compiled. Returns `LIB
 void libane_release(libane_handle_t h);
 ```
 
-Releases a compiled program handle and returns resources to the pool. Safe to call with `NULL`.
+Releases a compiled program handle. `libane_release()` also unpins the matching
+entry from the global compile cache so teardown is deterministic once the final
+reference is dropped. Safe to call with `NULL`.
 
 ---
 

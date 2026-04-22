@@ -15,6 +15,8 @@ matmul](https://arxiv.org/abs/2603.06728) on ANE.
 
 > **Private framework dependency**. libane loads `AppleNeuralEngine.framework` via `dlopen`.
 > It is intended for research use and low-level ANE experimentation, not production deployment.
+> See [NOTICE](NOTICE) for the interoperability basis (17 U.S.C. §1201(f), *Sega v. Accolade*,
+> *Sony v. Connectix*) and a statement of what libane does and does not do with Apple software.
 
 ---
 

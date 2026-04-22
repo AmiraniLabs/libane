@@ -1,0 +1,47 @@
+libane
+Copyright 2025-2026 AmiraniLabs
+
+This product includes software developed at AmiraniLabs. Licensed under
+the Apache License, Version 2.0 (see LICENSE).
+
+
+Interoperability Notice
+-----------------------
+
+libane interoperates with Apple Neural Engine hardware through macOS public
+programming interfaces (the Objective-C runtime, `dlopen`, `objc_msgSend`)
+and by observing file-format outputs produced by macOS's own compiler
+toolchain.
+
+libane does not:
+  - Redistribute Apple binaries, frameworks, or source code.
+  - Disassemble or decompile Apple code.
+  - Circumvent any technological protection measure or access control.
+  - Process encrypted models; the `isEncryptedModel:NO` code path is the
+    only one invoked.
+
+Access to private Apple classes in libane is performed through documented
+Objective-C runtime APIs (`objc_copyClassList`, `objc_copyMethodList`,
+`class_copyMethodList`, `NSClassFromString`, `sel_registerName`,
+`objc_msgSend`) and documented POSIX APIs (`dlopen`).
+
+Some components (specifically HWX binary format analysis for cross-op
+patching) involve observing the file-format outputs of Apple's compiler
+to identify structural offsets. To the extent such activity constitutes
+reverse engineering, it is undertaken solely for the purpose of achieving
+interoperability between an independently-created computer program
+(libane) and other programs (the Apple Neural Engine runtime), pursuant
+to:
+
+  - 17 U.S.C. § 1201(f) (reverse engineering exemption for
+    interoperability), and
+  - The fair-use doctrine as applied to intermediate copying for
+    interoperability purposes in Sega Enterprises Ltd. v. Accolade, Inc.,
+    977 F.2d 1510 (9th Cir. 1992), and Sony Computer Entertainment, Inc.
+    v. Connectix Corp., 203 F.3d 596 (9th Cir. 2000).
+
+No information obtained in the course of achieving interoperability is
+used for any purpose other than enabling libane to interoperate with the
+Apple Neural Engine, nor is any such information disclosed except where
+necessary to describe the interoperability achieved (e.g., in source-code
+comments, test cases, and research notes included in this repository).

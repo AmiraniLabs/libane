@@ -6,22 +6,45 @@ The Graph API describes a full neural network forward pass as a directed acyclic
 
 ## Tensor layout
 
-All ANE tensors use the `[1, C, 1, S]` layout (NCHW with batch=1, height=1):
+Most ANE tensors use the standard `[1, C, 1, S]` activation layout (NCHW, batch=1, height=1):
 
 - **C** — channels (feature dimension)
 - **S** — sequence / spatial dimension
 
-**S must always be a multiple of 16** (ANE hardware constraint). S=0 is invalid. C must be ≥ 1.
+**S must always be a multiple of 32** (ANE hardware constraint — see below). S=0 is invalid. C must be ≥ 1.
 
-### Matmul layout convention
+### The S%32 alignment constraint
 
-For `matmul(A[M,K], B[K,N]) → C[M,N]`:
+The ANE reads and writes tensors via IOSurface DMA, which requires the row stride (bytesPerRow) to be **64-byte aligned**. For fp16 tensors (2 bytes/element) this means `S × 2` must be divisible by 64, i.e. `S % 32 == 0`. This is the theoretical basis for the constraint; the exact minimum has not been exhaustively probed at sub-64 granularity — all empirical shape-sweep data used spatial values ≥ 64. libane enforces 32 as a conservative bound consistent with the DMA requirement.
+
+**Practical impact is minimal for most shapes.** Common values for transformer head dimensions (64, 96, 128) and sequence lengths (32, 64, 128, 256, 512 …) are all multiples of 32. If your logical S is not aligned, pad your input tensors to `ceil(S / 32) * 32` before calling libane and trim the output slice.
+
+**Practical implication for LLM inference.** The S≥32 floor means token-by-token autoregressive decode is not viable on the ANE directly — you would pad every single-token step to S=32, running 31 wasted positions per decode step. The recommended split (which Apple uses internally for on-device LLMs) is **ANE for prefill** (long prompt, S naturally large) and **GPU/CPU for decode** (seq_len=1). libane is optimized for the prefill path.
+
+### Matrix tensor format
+
+`LIBANE_OP_DYNAMIC_MATMUL` and `LIBANE_OP_SDPA` use a **matrix tensor format** where `height > 1`:
+
+| Op | Shape | Meaning |
+|---|---|---|
+| DYNAMIC_MATMUL X | `[1, 1, K, M]` | height=K inner dim, seq=M cols |
+| DYNAMIC_MATMUL W | `[1, 1, N, K]` | height=N rows, seq=K inner dim |
+| DYNAMIC_MATMUL Y | `[1, 1, N, M]` | height=N rows, seq=M cols |
+| SDPA Q/K/V | `[1, H, S, D]` | H heads, S tokens, D head dim |
+| SDPA mask | `[1, 1, S, S]` | attention mask (optional) |
+| SDPA output | `[1, H, S, D]` | same shape as Q/K/V |
+
+Matrix tensors require `channels=1` (DYNAMIC_MATMUL) or any H (SDPA), `seq%32 == 0`, and all dimension values must also be multiples of 32. The ANE compiler rejects any `reshape` or other op placed before `matmul` or `scaled_dot_product_attention` — inputs must be direct function parameters in the correct 4D shape.
+
+### Static matmul layout convention
+
+For `LIBANE_OP_MATMUL` (conv1×1 path, static weights):
 
 - A: shape `[1, K, 1, M]` — K channels, M sequence positions
-- B: shape `[1, N, 1, K]` — N channels, K sequence positions (weights)
+- B (weights): `[1, N, 1, K]` — N channels, K sequence positions
 - Output: shape `[1, N, 1, M]`
 
-This maps the matrix-vector product to ANE's conv1×1 formulation, which delivers ~3× higher throughput than MIL's native matmul op on current silicon.
+~3× higher throughput than `DYNAMIC_MATMUL` on current silicon because the weight matrix is compiled into the program.
 
 ### Shape limits
 
@@ -31,7 +54,7 @@ Per-dimension limits are chip-adaptive. Check `libane_get_shape_limits()` at run
 libane_shape_limits_t lim = libane_get_shape_limits();
 // lim.max_seq       — max S (must also be a multiple of lim.seq_alignment)
 // lim.max_channels  — max C
-// lim.seq_alignment — always 16
+// lim.seq_alignment — always 32
 ```
 
 **SRAM budget warning.** `max_seq` and `max_channels` are independent per-dimension caps, but both cannot be reached simultaneously. Activations at `[1, C, 1, S]` consume `C × S × 2` bytes of on-chip SRAM per live buffer. The ANE holds at least input + output simultaneously. On M3 (h15g) SRAM is approximately 32 MB. A shape at `max_seq × max_channels` would require ~4 GB — far beyond any current chip. Use these limits as per-dimension guards only; validate total tensor footprint against known SRAM before submission. `libane_graph_compile()` returns `LIBANE_ERR_COMPILE_FAILED` if firmware rejects the combined size.
@@ -86,6 +109,8 @@ libane_shape_limits_t lim = libane_get_shape_limits();
 | `LIBANE_OP_GATHER` | gather |
 | `LIBANE_OP_SCATTER_ND` | scatter ND |
 | `LIBANE_OP_SCATTER_ALONG_AXIS` | scatter along axis |
+| `LIBANE_OP_DYNAMIC_MATMUL` | runtime matmul Y=X@W^T; both inputs are IOSurfaces; matrix format `[1,1,K,M]` |
+| `LIBANE_OP_SDPA` | scaled dot-product attention; matrix format `[1,H,S,D]` |
 
 ### ANE-safe log and rsqrt
 
@@ -101,7 +126,7 @@ libane_shape_limits_t lim = libane_get_shape_limits();
 2. **All inputs declared** — every op's input tensor ID must be reachable
 3. **Output marked** — at least one output must be marked
 4. **Shape consistency** — output shapes must be compatible with op semantics
-5. **S divisibility** — S must be a multiple of 16 for all tensors
+5. **S divisibility** — S must be a multiple of 32 for all tensors (IOSurface 64-byte DMA alignment)
 6. **Channel cap** — C must be ≤ 16384
 7. **Weight presence** — ops that require weights (MATMUL, RMSNORM, etc.) must have non-null weight data
 
