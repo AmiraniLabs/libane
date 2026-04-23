@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -78,7 +79,11 @@ private:
     struct UrlCacheEntry {
         std::string model_url;
         std::string mil_text;
-        std::vector<runtime::WeightEntry> weights;
+        // Shared with the AneProgram that populated this entry (and any
+        // other program for the same (mil_text, weights) pair).  One copy
+        // of the weight bytes serves any number of live references; freed
+        // only when the last reference drops.
+        std::shared_ptr<const std::vector<runtime::WeightEntry>> weights;
     };
     std::unordered_map<std::string, UrlCacheEntry> url_cache_;
 

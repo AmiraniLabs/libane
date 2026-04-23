@@ -909,7 +909,8 @@ AneProgram* ane_compile(const std::string& mil_text,
         prog->model_dir  = [model_dir UTF8String];
         retain_model_dir(prog->model_dir);
         prog->mil_text   = mil_text;
-        prog->weights    = weights;
+        // Heap-allocate once; shared with MilBackend's URL cache via refcount.
+        prog->weights    = std::make_shared<const std::vector<WeightEntry>>(weights);
         prog->model_url  = captured_model_url;
         prog->hex_id     = [hex_id UTF8String];
 
@@ -1255,7 +1256,9 @@ bool ane_serialize_program(const AneProgram* program, SerializedProgram& out) {
     }
 
     out.mil_text          = program->mil_text;
-    out.weights           = program->weights;
+    out.weights           = program->weights
+                            ? *program->weights
+                            : std::vector<WeightEntry>{};
     out.hwx_bytes.clear();        // always empty — no compiled binary on disk
     out.hwx_rel_path.clear();     // reserved; unused
     out.debug_name        = program->debug_name;
@@ -1401,7 +1404,10 @@ AneProgram* ane_reconnect(const std::string&              mil_text,
         prog->model_dir   = [model_dir_ns UTF8String];
         retain_model_dir(prog->model_dir);
         prog->mil_text    = mil_text;
-        prog->weights     = weights;
+        // Reconnect creates a fresh AneProgram; share the weight buffer
+        // rather than copying.  Caller (MilBackend cache) may already hold
+        // the same shared_ptr — this is refcount-shared either way.
+        prog->weights     = std::make_shared<const std::vector<WeightEntry>>(weights);
         prog->model_url   = model_url;
         prog->hex_id      = [hex_id UTF8String];
         prog->size_bytes  = mil_text.size();

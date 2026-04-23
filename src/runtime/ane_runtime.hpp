@@ -30,6 +30,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 #include <string>
 
@@ -97,7 +98,7 @@ struct AneProgram {
     std::string mil_text;                ///< Original MIL source (stored for serialization)
     std::string model_url;               ///< URL from _ANEInMemoryModel.modelURL after compile; inject via setModelURL: + loadWithQoS: for ~0.722ms Path C reconnect
     std::string hex_id;                  ///< hexStringIdentifier — aned's cache key for this (mil_text, weights) pair
-    std::vector<WeightEntry> weights;    ///< stored for delta reload
+    std::shared_ptr<const std::vector<WeightEntry>> weights; ///< shared with MilBackend cache to avoid per-program weight copies
     std::vector<std::string> input_param_names;
     std::vector<std::string> output_var_names;
 

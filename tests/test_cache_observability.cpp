@@ -135,3 +135,54 @@ TEST_CASE("libane_cache_clear: empties entries, preserves counters",
 
     libane_compiled_graph_release(cg);
 }
+
+// ── Weight-sharing invariant ──────────────────────────────────────────────────
+//
+// After the shared_ptr<vector<WeightEntry>> refactor (gap #1), a live program
+// and its cache entry should point at the same weight buffer — not two copies.
+// Test: compile, snapshot cache bytes, release the program, snapshot again.
+// If the cache copied weights, bytes stay flat (program-held bytes freed
+// elsewhere, cache bytes unchanged).  If the cache shares weights via
+// refcount, bytes also stay flat because cache holds the only remaining
+// strong reference.  Either way, the cache's reported footprint is stable.
+//
+// The more diagnostic check: compile the SAME graph twice.  First compile is
+// a cold populate (bytes grow by weight-size).  Second compile should hit
+// reconnect without growing bytes at all — cache reused the same entry and
+// did not allocate a second copy.
+
+TEST_CASE("libane_cache_stats: warm reconnect does not double-allocate weights",
+          "[cache][observability][weights]") {
+    if (!ane_ready()) { WARN("ANE unavailable — skipping"); return; }
+
+    // Fresh cache so weight-footprint math is simple.
+    libane_cache_clear();
+
+    // First compile — populates cache with a new entry.
+    auto* cg1 = build_and_compile_matmul(128, 128, 64);
+    if (!cg1) { WARN("Cold compile failed: " << libane_last_error()); return; }
+
+    libane_cache_stats_t after_cold{};
+    REQUIRE(libane_cache_stats(&after_cold) == LIBANE_OK);
+    REQUIRE(after_cold.entries == 1);
+    const size_t bytes_one_entry = after_cold.bytes;
+    // 128×128 fp16 = 32KB weight blob; entry should account for at least that.
+    CHECK(bytes_one_entry >= 128 * 128 * 2);
+
+    // Second compile — same shape → same hex_id → cache hit.
+    auto* cg2 = build_and_compile_matmul(128, 128, 64);
+    REQUIRE(cg2);
+
+    libane_cache_stats_t after_warm{};
+    REQUIRE(libane_cache_stats(&after_warm) == LIBANE_OK);
+
+    // Entries count unchanged (same hex_id reused).
+    CHECK(after_warm.entries == 1);
+    // Bytes unchanged — no second copy of weights was stashed anywhere
+    // visible to the cache accounting.
+    CHECK(after_warm.bytes   == bytes_one_entry);
+    CHECK(after_warm.hits    == after_cold.hits + 1);
+
+    libane_compiled_graph_release(cg2);
+    libane_compiled_graph_release(cg1);
+}

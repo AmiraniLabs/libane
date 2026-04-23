@@ -629,8 +629,11 @@ runtime::AneProgram* MilBackend::try_warm_reconnect(
     // Cache hit — attempt reconnect.  Returns nullptr if aned's compile
     // slot was purged (compiledModelExists=NO); caller falls through to
     // cold compile.
+    const auto& cached_weights = it->second.weights
+        ? *it->second.weights
+        : std::vector<runtime::WeightEntry>{};
     runtime::AneProgram* prog = runtime::ane_reconnect(
-        it->second.mil_text, it->second.weights, it->second.model_url, debug_name);
+        it->second.mil_text, cached_weights, it->second.model_url, debug_name);
     if (!prog) {
         // Slot purged — stale entry.  Drop it so the cold compile that
         // follows can refresh the URL on cache_populate().
@@ -645,6 +648,9 @@ runtime::AneProgram* MilBackend::try_warm_reconnect(
 
 void MilBackend::cache_populate(const runtime::AneProgram* prog) {
     if (!prog || prog->hex_id.empty() || prog->model_url.empty()) return;
+    // prog->weights is a shared_ptr; the cache stores a copy of the
+    // shared_ptr (refcount bump, not a buffer copy).  The AneProgram
+    // and cache now point at the same underlying vector<WeightEntry>.
     url_cache_[prog->hex_id] =
         UrlCacheEntry{prog->model_url, prog->mil_text, prog->weights};
     cold_compiles_.fetch_add(1, std::memory_order_relaxed);
@@ -652,7 +658,9 @@ void MilBackend::cache_populate(const runtime::AneProgram* prog) {
 
 size_t MilBackend::entry_bytes(const std::string& hex_id, const UrlCacheEntry& e) {
     size_t b = hex_id.size() + e.model_url.size() + e.mil_text.size();
-    for (const auto& w : e.weights) b += w.filename.size() + w.data.size();
+    if (e.weights) {
+        for (const auto& w : *e.weights) b += w.filename.size() + w.data.size();
+    }
     return b;
 }
 
