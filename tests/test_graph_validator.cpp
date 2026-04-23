@@ -445,12 +445,15 @@ TEST_CASE("reduce_max: output seq must match input seq", "[validator][weights]")
     REQUIRE_FALSE(r.ok());
 }
 
-TEST_CASE("conv2d: always fails in graph API", "[validator][weights]") {
+TEST_CASE("conv2d: missing weights fails validation", "[validator][weights]") {
+    // CONV2D requires an 11×int32 parameter header followed by kernel weights.
+    // Passing weights_len=0 must fail, and the error must identify conv2d as
+    // the offending op so callers can diagnose which node needs fixing.
     auto r = validate_single(LIBANE_OP_CONV2D, S(512, 128), S(512, 128), 0);
     REQUIRE_FALSE(r.ok());
     bool found = false;
     for (const auto& e : r.errors)
-        if (e.find("CONV2D") != std::string::npos) found = true;
+        if (e.find("conv2d") != std::string::npos) found = true;
     CHECK(found);
 }
 

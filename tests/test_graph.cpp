@@ -41,16 +41,17 @@ TEST_CASE("add_input stores shape and name", "[graph][ir]") {
 TEST_CASE("add_input rejects bad ANE shape", "[graph][ir]") {
     AneGraph g;
 
-    // seq not multiple of 16
+    // Activation shape [1,C,1,S]: seq not multiple of 32 → validate()
     CHECK_THROWS_AS(g.add_input("bad", shape(512, 7)), std::invalid_argument);
 
-    // batch != 1
+    // Activation shape [1,C,1,S]: batch != 1 → validate()
     TensorShape bad_batch{2, 512, 1, 128};
     CHECK_THROWS_AS(g.add_input("bad_batch", bad_batch), std::invalid_argument);
 
-    // height != 1
-    TensorShape bad_height{1, 512, 3, 128};
-    CHECK_THROWS_AS(g.add_input("bad_height", bad_height), std::invalid_argument);
+    // Conv-image shape [1,C,H,W] (C>1, H>1): W not multiple of 32 →
+    // validate_conv_image()
+    TensorShape bad_conv_w{1, 512, 3, 7};
+    CHECK_THROWS_AS(g.add_input("bad_conv_w", bad_conv_w), std::invalid_argument);
 }
 
 /* ── add_op ──────────────────────────────────────────────────────────────── */
