@@ -7,11 +7,28 @@
  *
  * ── Compile-path ordering (ascending cost) ───────────────────────────────
  *
- * 1. MilBackend::try_warm_reconnect (~0.7 ms) — same op, aned slot alive
- * 2. HwxEmitter cross-op patch + ane_load_hwx (~20–40 ms) — different op,
- *    shape template cached
- * 3. MilBackend::compile_group full cold compile (~100 ms on macOS 26) —
- *    first time for this shape and op
+ * Measured on M3 Pro / macOS 26.3.1 via tests/test_warmpath_tiers_bench.cpp
+ * (C=64, S=512 for activations; IC=OC=64, SP=128 for matmul).  Times are
+ * end-to-end compile_group() latency, not just the ANE-facing call.
+ *
+ * 1. MilBackend::try_warm_reconnect               ~1.3–1.7 ms
+ *    Same op, aned slot alive.  Hits the hexID-keyed URL cache populated
+ *    on any prior cold or cross-op compile.
+ *
+ * 2. HwxEmitter cross-op patch + ane_load_hwx     ~25–40 ms
+ *    Different op than any cached, but same shape template exists.
+ *    Patches the op-config words in the cached HWX and pre-stages it
+ *    at localModelPath for compileWithQoS:'s compileAsNeeded path.
+ *
+ * 3. MilBackend::compile_group full cold compile  ~15–70 ms
+ *    First time for this (mil_text, weights) pair.  Activation ops at
+ *    mid-scale ~65 ms; matmul ~15 ms; actual numbers vary with op
+ *    complexity and aned's internal disk cache state.
+ *
+ * Speedups on repeated compiles of the same graph node:
+ *   RELU    : 66 ms → 1.7 ms cold → reconnect  (~38×)
+ *   TANH    : 29 ms → 1.3 ms cross-op → reconnect  (~22×)
+ *   MATMUL  : 17 ms → 1.6 ms cold → reconnect  (~10×)
  *
  * After each successful cold compile, the HWX template + op-config words
  * are captured into HwxEmitter so subsequent cross-op hits at the same
