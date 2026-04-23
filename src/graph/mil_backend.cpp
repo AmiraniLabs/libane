@@ -620,44 +620,75 @@ runtime::AneProgram* MilBackend::try_warm_reconnect(
     std::string hex_id = runtime::ane_compute_hex_id(mil_text, weights);
     if (hex_id.empty()) { misses_.fetch_add(1, std::memory_order_relaxed); return nullptr; }
 
-    auto it = url_cache_.find(hex_id);
-    if (it == url_cache_.end()) {
+    auto map_it = url_cache_.find(hex_id);
+    if (map_it == url_cache_.end()) {
         misses_.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
+    LruIterator lru_it = map_it->second;
 
     // Cache hit — attempt reconnect.  Returns nullptr if aned's compile
     // slot was purged (compiledModelExists=NO); caller falls through to
     // cold compile.
-    const auto& cached_weights = it->second.weights
-        ? *it->second.weights
+    const auto& cached_weights = lru_it->weights
+        ? *lru_it->weights
         : std::vector<runtime::WeightEntry>{};
     runtime::AneProgram* prog = runtime::ane_reconnect(
-        it->second.mil_text, cached_weights, it->second.model_url, debug_name);
+        lru_it->mil_text, cached_weights, lru_it->model_url, debug_name);
     if (!prog) {
         // Slot purged — stale entry.  Drop it so the cold compile that
         // follows can refresh the URL on cache_populate().
-        url_cache_.erase(it);
+        lru_.erase(lru_it);
+        url_cache_.erase(map_it);
         evictions_.fetch_add(1, std::memory_order_relaxed);
         misses_.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
+    // Touch to front — most-recently-used.
+    lru_.splice(lru_.begin(), lru_, lru_it);
     hits_.fetch_add(1, std::memory_order_relaxed);
     return prog;
 }
 
 void MilBackend::cache_populate(const runtime::AneProgram* prog) {
     if (!prog || prog->hex_id.empty() || prog->model_url.empty()) return;
-    // prog->weights is a shared_ptr; the cache stores a copy of the
-    // shared_ptr (refcount bump, not a buffer copy).  The AneProgram
-    // and cache now point at the same underlying vector<WeightEntry>.
-    url_cache_[prog->hex_id] =
-        UrlCacheEntry{prog->model_url, prog->mil_text, prog->weights};
+
+    auto existing = url_cache_.find(prog->hex_id);
+    if (existing != url_cache_.end()) {
+        // Refresh model_url (aned may have re-issued the URL after a purge
+        // and recompile) and touch to front.
+        existing->second->model_url = prog->model_url;
+        existing->second->mil_text  = prog->mil_text;
+        existing->second->weights   = prog->weights;
+        lru_.splice(lru_.begin(), lru_, existing->second);
+        cold_compiles_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    // Insert at front.  prog->weights is a shared_ptr; we store a copy of
+    // the shared_ptr (refcount bump, not a buffer copy) so program and
+    // cache point at the same underlying vector<WeightEntry>.
+    lru_.push_front(UrlCacheEntry{
+        prog->hex_id, prog->model_url, prog->mil_text, prog->weights});
+    url_cache_[prog->hex_id] = lru_.begin();
     cold_compiles_.fetch_add(1, std::memory_order_relaxed);
+
+    // Enforce capacity — drop LRU tail if we overflowed.
+    while (lru_.size() > cache_capacity_) {
+        evict_lru_tail();
+    }
 }
 
-size_t MilBackend::entry_bytes(const std::string& hex_id, const UrlCacheEntry& e) {
-    size_t b = hex_id.size() + e.model_url.size() + e.mil_text.size();
+void MilBackend::evict_lru_tail() {
+    if (lru_.empty()) return;
+    auto& tail = lru_.back();
+    url_cache_.erase(tail.hex_id);
+    lru_.pop_back();
+    lru_evictions_.fetch_add(1, std::memory_order_relaxed);
+}
+
+size_t MilBackend::entry_bytes(const UrlCacheEntry& e) {
+    size_t b = e.hex_id.size() + e.model_url.size() + e.mil_text.size();
     if (e.weights) {
         for (const auto& w : *e.weights) b += w.filename.size() + w.data.size();
     }
@@ -666,20 +697,39 @@ size_t MilBackend::entry_bytes(const std::string& hex_id, const UrlCacheEntry& e
 
 MilBackendCacheStats MilBackend::cache_stats() const {
     MilBackendCacheStats s;
-    s.entries = url_cache_.size();
-    for (const auto& kv : url_cache_) s.bytes += entry_bytes(kv.first, kv.second);
+    s.entries       = lru_.size();
+    s.capacity      = cache_capacity_;
+    for (const auto& e : lru_) s.bytes += entry_bytes(e);
     s.hits          = hits_.load(std::memory_order_relaxed);
     s.misses        = misses_.load(std::memory_order_relaxed);
     s.cold_compiles = cold_compiles_.load(std::memory_order_relaxed);
     s.evictions     = evictions_.load(std::memory_order_relaxed);
+    s.lru_evictions = lru_evictions_.load(std::memory_order_relaxed);
     return s;
 }
 
 void MilBackend::cache_clear() {
+    lru_.clear();
     url_cache_.clear();
     // Counters are preserved so callers can reason about cumulative
-    // activity across clear() cycles.  Use cache_reset_counters() if you
-    // ever need to zero them (not currently exposed).
+    // activity across clear() cycles.
+}
+
+void MilBackend::set_cache_capacity(size_t capacity) {
+    cache_capacity_ = capacity;
+    while (lru_.size() > cache_capacity_) {
+        evict_lru_tail();
+    }
+}
+
+size_t MilBackend::cache_prune(size_t max_entries) {
+    if (max_entries == 0) max_entries = cache_capacity_;
+    size_t evicted = 0;
+    while (lru_.size() > max_entries) {
+        evict_lru_tail();
+        ++evicted;
+    }
+    return evicted;
 }
 
 } // namespace graph

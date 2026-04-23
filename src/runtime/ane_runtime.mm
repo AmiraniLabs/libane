@@ -848,6 +848,18 @@ AneProgram* ane_compile(const std::string& mil_text,
                 if (url) captured_model_url = [[url absoluteString] UTF8String];
             } @catch (...) {}
         }
+        // Fallback: when aned already had the hexID cached (compiledModelExists=YES)
+        // and we skipped compileWithQoS:, loadWithQoS: does not populate the
+        // modelURL property on this fresh _ANEInMemoryModel object.  The URL
+        // aned uses is deterministic — file://{TempDir}/{hexID}/ — so construct
+        // it locally.  Needed for MilBackend's warm-path cache to populate on
+        // skip-compile cold paths.
+        if (captured_model_url.empty()) {
+            NSString* fallback_dir = [NSTemporaryDirectory()
+                stringByAppendingPathComponent:hex_id];
+            NSURL* fallback_url = [NSURL fileURLWithPath:fallback_dir isDirectory:YES];
+            if (fallback_url) captured_model_url = [[fallback_url absoluteString] UTF8String];
+        }
 
         // --- Step 5c: Detect SRAM spill via intermediateBufferHandle ---
         // After loadWithQoS: the firmware sets intermediateBufferHandle on

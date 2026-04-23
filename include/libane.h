@@ -604,12 +604,14 @@ LIBANE_API int libane_compile_slots_remaining(void);
  * evictions      — stale entries dropped after a reconnect failure.
  */
 typedef struct {
-    size_t   entries;
-    size_t   bytes;
-    uint64_t hits;
-    uint64_t misses;
-    uint64_t cold_compiles;
-    uint64_t evictions;
+    size_t   entries;         /**< currently cached entries */
+    size_t   capacity;        /**< max entries before LRU eviction */
+    size_t   bytes;           /**< approximate footprint (mil+weights+strings) */
+    uint64_t hits;            /**< try_warm_reconnect calls that returned a program */
+    uint64_t misses;          /**< try_warm_reconnect calls that returned NULL */
+    uint64_t cold_compiles;   /**< successful cold compiles (cache populates) */
+    uint64_t evictions;       /**< stale entries dropped after reconnect failure */
+    uint64_t lru_evictions;   /**< entries dropped because cache hit capacity */
 } libane_cache_stats_t;
 
 /**
@@ -635,6 +637,29 @@ LIBANE_API libane_status_t libane_cache_stats(libane_cache_stats_t* out);
  * thread is not possible by construction (MilBackend is thread_local).
  */
 LIBANE_API void libane_cache_clear(void);
+
+/**
+ * Trim the calling thread's warm-path cache to at most `max_entries` via
+ * LRU eviction.
+ *
+ * Use this when coordinating with the compile-slot budget: if
+ * libane_compile_slots_remaining() is low, prune the cache aggressively
+ * so a follow-up cold compile has slot headroom.  Also useful for
+ * long-running processes that want periodic cache hygiene.
+ *
+ * If max_entries is 0, trims to the current configured capacity (default
+ * 128) — effectively a "force capacity enforcement" probe.
+ *
+ * Returns the number of entries evicted.
+ */
+LIBANE_API size_t libane_cache_prune(size_t max_entries);
+
+/**
+ * Override the LRU capacity for the calling thread's warm-path cache.
+ * Default is 128 entries.  Entries beyond the new capacity are evicted
+ * immediately.  Capacity of 0 disables caching entirely.
+ */
+LIBANE_API void libane_cache_set_capacity(size_t capacity);
 
 /**
  * Per-chip ANE tensor shape limits.

@@ -165,17 +165,29 @@ libane_status_t libane_cache_stats(libane_cache_stats_t* out) {
     libane::runtime::initialize();
     auto s = libane::graph::GraphCompiler::thread_mil_backend().cache_stats();
     out->entries       = s.entries;
+    out->capacity      = s.capacity;
     out->bytes         = s.bytes;
     out->hits          = s.hits;
     out->misses        = s.misses;
     out->cold_compiles = s.cold_compiles;
     out->evictions     = s.evictions;
+    out->lru_evictions = s.lru_evictions;
     return LIBANE_OK;
 }
 
 void libane_cache_clear(void) {
     libane::runtime::initialize();
     libane::graph::GraphCompiler::thread_mil_backend().cache_clear();
+}
+
+size_t libane_cache_prune(size_t max_entries) {
+    libane::runtime::initialize();
+    return libane::graph::GraphCompiler::thread_mil_backend().cache_prune(max_entries);
+}
+
+void libane_cache_set_capacity(size_t capacity) {
+    libane::runtime::initialize();
+    libane::graph::GraphCompiler::thread_mil_backend().set_cache_capacity(capacity);
 }
 
 /* ── Device introspection ────────────────────────────────────────────────── */

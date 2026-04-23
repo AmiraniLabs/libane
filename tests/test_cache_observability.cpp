@@ -186,3 +186,82 @@ TEST_CASE("libane_cache_stats: warm reconnect does not double-allocate weights",
     libane_compiled_graph_release(cg2);
     libane_compiled_graph_release(cg1);
 }
+
+// ── LRU capacity + prune (gaps #2 + #3) ───────────────────────────────────────
+
+TEST_CASE("libane_cache_set_capacity: shrinking evicts LRU tail",
+          "[cache][observability][lru]") {
+    if (!ane_ready()) { WARN("ANE unavailable — skipping"); return; }
+
+    libane_cache_clear();
+    // Restore sane default at end regardless of path.
+    struct RestoreCap { ~RestoreCap() { libane_cache_set_capacity(128); } } guard;
+
+    // Populate with two distinct entries by varying shape.
+    // seq != 32 so routing lands on MilBackend (EspressoBackend claims
+    // matmul specifically at seq==32 for its single-tile FC path).
+    auto* a = build_and_compile_matmul(64, 64, 64);
+    auto* b = build_and_compile_matmul(64, 64, 128);
+    if (!a || !b) {
+        WARN("Setup failed: " << libane_last_error());
+        if (a) libane_compiled_graph_release(a);
+        if (b) libane_compiled_graph_release(b);
+        return;
+    }
+
+    libane_cache_stats_t s{};
+    REQUIRE(libane_cache_stats(&s) == LIBANE_OK);
+    REQUIRE(s.entries == 2);
+
+    // Shrinking capacity to 1 must evict the least-recently-used entry.
+    libane_cache_set_capacity(1);
+
+    libane_cache_stats_t after{};
+    REQUIRE(libane_cache_stats(&after) == LIBANE_OK);
+    CHECK(after.entries       == 1);
+    CHECK(after.capacity      == 1);
+    CHECK(after.lru_evictions >= s.lru_evictions + 1);
+
+    libane_compiled_graph_release(b);
+    libane_compiled_graph_release(a);
+}
+
+TEST_CASE("libane_cache_prune: trims to target, reports evicted count",
+          "[cache][observability][lru]") {
+    if (!ane_ready()) { WARN("ANE unavailable — skipping"); return; }
+
+    libane_cache_clear();
+    libane_cache_set_capacity(128);
+
+    // seq != 32 so routing lands on MilBackend (see note in
+    // "libane_cache_set_capacity" test above).
+    auto* a = build_and_compile_matmul(64, 64, 64);
+    auto* b = build_and_compile_matmul(64, 64, 128);
+    auto* c = build_and_compile_matmul(64, 64, 256);
+    if (!a || !b || !c) {
+        WARN("Setup failed: " << libane_last_error());
+        if (a) libane_compiled_graph_release(a);
+        if (b) libane_compiled_graph_release(b);
+        if (c) libane_compiled_graph_release(c);
+        return;
+    }
+
+    libane_cache_stats_t s{};
+    REQUIRE(libane_cache_stats(&s) == LIBANE_OK);
+    REQUIRE(s.entries == 3);
+
+    // Prune down to 1.  Should evict 2 entries.
+    size_t evicted = libane_cache_prune(1);
+    CHECK(evicted == 2);
+
+    libane_cache_stats_t after{};
+    REQUIRE(libane_cache_stats(&after) == LIBANE_OK);
+    CHECK(after.entries == 1);
+
+    // prune(N) when entries <= N is a no-op.
+    CHECK(libane_cache_prune(10) == 0);
+
+    libane_compiled_graph_release(c);
+    libane_compiled_graph_release(b);
+    libane_compiled_graph_release(a);
+}
