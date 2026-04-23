@@ -206,14 +206,24 @@ private:
 
 /* ── GraphCompiler::compile (default routed overload) ───────────────────── */
 
+// File-scope thread_local so GraphCompiler::thread_mil_backend() can
+// return a reference to the same instance the default-routed compile()
+// overload uses.  Each thread has its own cache by design — the cross-
+// thread aggregation problem is a later phase.
+static thread_local MilBackend      g_thread_mil;
+static thread_local HwxBackend      g_thread_hwx(&g_thread_mil);
+static thread_local EspressoBackend g_thread_espresso;
+static thread_local RoutingBackend  g_thread_router(
+    {&g_thread_hwx, &g_thread_espresso, &g_thread_mil});
+
 std::unique_ptr<CompiledGraph> GraphCompiler::compile(const AneGraph& graph) {
-    // MilBackend owns the process-wide URL-reconnect cache; HwxBackend
+    // MilBackend owns the thread-local URL-reconnect cache; HwxBackend
     // borrows it so both paths populate and hit the same cache.
-    thread_local MilBackend      mil;
-    thread_local HwxBackend      hwx(&mil);
-    thread_local EspressoBackend espresso;
-    thread_local RoutingBackend  router({&hwx, &espresso, &mil});
-    return compile(graph, router);
+    return compile(graph, g_thread_router);
+}
+
+MilBackend& GraphCompiler::thread_mil_backend() {
+    return g_thread_mil;
 }
 
 /* ── Binary serialization helpers ────────────────────────────────────────── */

@@ -197,6 +197,17 @@ public:
     static std::unique_ptr<CompiledGraph> compile(const AneGraph& graph);
 
     /**
+     * Access to the thread-local MilBackend instance the default-routed
+     * compile() overload uses.  Exposes cache observability and lifecycle
+     * control (see MilBackend::cache_stats() / cache_clear()).
+     *
+     * Returns the MilBackend the *current* thread would use for compilation.
+     * Each thread has its own instance; stats from one thread do not reflect
+     * activity on another.
+     */
+    static class MilBackend& thread_mil_backend();
+
+    /**
      * Load a previously saved CompiledGraph from a file.
      *
      * Restores each group via ane_restore_program(), which calls loadWithQoS:

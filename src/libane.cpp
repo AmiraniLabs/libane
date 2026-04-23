@@ -9,6 +9,7 @@
  *  - CPU fallback (fallback)
  */
 #include "libane_internal.hpp"
+#include "graph/mil_backend.hpp"
 
 #include <cstring>
 #include <cstdio>
@@ -157,6 +158,24 @@ int libane_compile_count(void) {
 int libane_compile_slots_remaining(void) {
     libane::runtime::initialize();
     return libane::runtime::ane_compile_slots_remaining();
+}
+
+libane_status_t libane_cache_stats(libane_cache_stats_t* out) {
+    if (!out) { set_error("libane_cache_stats: out is NULL"); return LIBANE_ERR_INVALID_ARG; }
+    libane::runtime::initialize();
+    auto s = libane::graph::GraphCompiler::thread_mil_backend().cache_stats();
+    out->entries       = s.entries;
+    out->bytes         = s.bytes;
+    out->hits          = s.hits;
+    out->misses        = s.misses;
+    out->cold_compiles = s.cold_compiles;
+    out->evictions     = s.evictions;
+    return LIBANE_OK;
+}
+
+void libane_cache_clear(void) {
+    libane::runtime::initialize();
+    libane::graph::GraphCompiler::thread_mil_backend().cache_clear();
 }
 
 /* ── Device introspection ────────────────────────────────────────────────── */

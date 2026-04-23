@@ -22,12 +22,24 @@
 #include "compiler_backend.hpp"
 #include "../runtime/ane_runtime.hpp"
 
+#include <atomic>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace libane {
 namespace graph {
+
+/** Snapshot of MilBackend cache state at a point in time. */
+struct MilBackendCacheStats {
+    size_t   entries       = 0;  ///< number of cached (hex_id → URL entry) pairs
+    size_t   bytes         = 0;  ///< approximate footprint (mil_text + weights + strings)
+    uint64_t hits          = 0;  ///< try_warm_reconnect calls that returned a program
+    uint64_t misses        = 0;  ///< try_warm_reconnect calls that returned nullptr
+    uint64_t cold_compiles = 0;  ///< cache_populate calls (successful cold compiles)
+    uint64_t evictions     = 0;  ///< stale entries dropped after reconnect failure
+};
 
 class MilBackend final : public CompilerBackend {
 public:
@@ -54,6 +66,14 @@ public:
                                             const std::vector<runtime::WeightEntry>& weights,
                                             const std::string& debug_name);
 
+    /** Snapshot current cache state — safe to call from any thread that owns
+     *  this MilBackend instance. */
+    MilBackendCacheStats cache_stats() const;
+
+    /** Drop every cached entry. Subsequent compiles pay full cold cost until
+     *  the cache repopulates. */
+    void cache_clear();
+
 private:
     struct UrlCacheEntry {
         std::string model_url;
@@ -62,8 +82,19 @@ private:
     };
     std::unordered_map<std::string, UrlCacheEntry> url_cache_;
 
+    // Observability counters.  Use atomic to stay trivially correct if a
+    // debug inspector reads stats while another thread increments; update
+    // paths themselves are single-threaded per instance so no .load/.store
+    // contention matters.
+    std::atomic<uint64_t> hits_         {0};
+    std::atomic<uint64_t> misses_       {0};
+    std::atomic<uint64_t> cold_compiles_{0};
+    std::atomic<uint64_t> evictions_    {0};
+
     /** Populate the cache from a fresh cold-compile result. */
     void cache_populate(const runtime::AneProgram* prog);
+
+    static size_t entry_bytes(const std::string& hex_id, const UrlCacheEntry& e);
 };
 
 } // namespace graph

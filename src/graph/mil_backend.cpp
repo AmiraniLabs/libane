@@ -618,10 +618,13 @@ runtime::AneProgram* MilBackend::try_warm_reconnect(
     // Compute hexID without compiling — this is aned's own equivalence
     // class for (mil_text, weights), so the lookup is exact.
     std::string hex_id = runtime::ane_compute_hex_id(mil_text, weights);
-    if (hex_id.empty()) return nullptr;
+    if (hex_id.empty()) { misses_.fetch_add(1, std::memory_order_relaxed); return nullptr; }
 
     auto it = url_cache_.find(hex_id);
-    if (it == url_cache_.end()) return nullptr;
+    if (it == url_cache_.end()) {
+        misses_.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
 
     // Cache hit — attempt reconnect.  Returns nullptr if aned's compile
     // slot was purged (compiledModelExists=NO); caller falls through to
@@ -632,7 +635,11 @@ runtime::AneProgram* MilBackend::try_warm_reconnect(
         // Slot purged — stale entry.  Drop it so the cold compile that
         // follows can refresh the URL on cache_populate().
         url_cache_.erase(it);
+        evictions_.fetch_add(1, std::memory_order_relaxed);
+        misses_.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
     }
+    hits_.fetch_add(1, std::memory_order_relaxed);
     return prog;
 }
 
@@ -640,6 +647,31 @@ void MilBackend::cache_populate(const runtime::AneProgram* prog) {
     if (!prog || prog->hex_id.empty() || prog->model_url.empty()) return;
     url_cache_[prog->hex_id] =
         UrlCacheEntry{prog->model_url, prog->mil_text, prog->weights};
+    cold_compiles_.fetch_add(1, std::memory_order_relaxed);
+}
+
+size_t MilBackend::entry_bytes(const std::string& hex_id, const UrlCacheEntry& e) {
+    size_t b = hex_id.size() + e.model_url.size() + e.mil_text.size();
+    for (const auto& w : e.weights) b += w.filename.size() + w.data.size();
+    return b;
+}
+
+MilBackendCacheStats MilBackend::cache_stats() const {
+    MilBackendCacheStats s;
+    s.entries = url_cache_.size();
+    for (const auto& kv : url_cache_) s.bytes += entry_bytes(kv.first, kv.second);
+    s.hits          = hits_.load(std::memory_order_relaxed);
+    s.misses        = misses_.load(std::memory_order_relaxed);
+    s.cold_compiles = cold_compiles_.load(std::memory_order_relaxed);
+    s.evictions     = evictions_.load(std::memory_order_relaxed);
+    return s;
+}
+
+void MilBackend::cache_clear() {
+    url_cache_.clear();
+    // Counters are preserved so callers can reason about cumulative
+    // activity across clear() cycles.  Use cache_reset_counters() if you
+    // ever need to zero them (not currently exposed).
 }
 
 } // namespace graph

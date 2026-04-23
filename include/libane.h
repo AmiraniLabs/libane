@@ -589,6 +589,54 @@ LIBANE_API int libane_compile_count(void);
 LIBANE_API int libane_compile_slots_remaining(void);
 
 /**
+ * Warm-path URL-reconnect cache statistics.
+ *
+ * Populated by libane_cache_stats().  Counters are cumulative from process
+ * start (or from the last libane_cache_clear() — see cache_clear note).
+ *
+ * entries        — cached (hex_id → URL entry) pairs currently held.
+ * bytes          — approximate memory footprint of the cache, in bytes.
+ *                  Sums mil_text + weight blobs + string overhead per entry.
+ * hits           — try_warm_reconnect calls that returned a program.
+ * misses         — try_warm_reconnect calls that returned NULL (cache miss,
+ *                  or cache hit whose aned slot had been purged).
+ * cold_compiles  — cache_populate calls (successful cold compiles).
+ * evictions      — stale entries dropped after a reconnect failure.
+ */
+typedef struct {
+    size_t   entries;
+    size_t   bytes;
+    uint64_t hits;
+    uint64_t misses;
+    uint64_t cold_compiles;
+    uint64_t evictions;
+} libane_cache_stats_t;
+
+/**
+ * Read cache statistics for the calling thread's MilBackend instance.
+ *
+ * Each thread that compiles graphs has its own MilBackend (and therefore
+ * its own cache); this function reports stats for *this* thread.  Cross-
+ * thread aggregation is not currently supported.
+ *
+ * Returns LIBANE_OK and populates *out on success.
+ * Returns LIBANE_ERR if out is NULL.
+ */
+LIBANE_API libane_status_t libane_cache_stats(libane_cache_stats_t* out);
+
+/**
+ * Drop every entry from the calling thread's MilBackend cache.
+ *
+ * Subsequent compiles pay full cold cost until the cache repopulates.
+ * Counters (hits/misses/cold_compiles/evictions) are preserved so
+ * callers can reason about cumulative activity across clear() cycles.
+ *
+ * Safe to call at any time; a concurrent compile_group() on the same
+ * thread is not possible by construction (MilBackend is thread_local).
+ */
+LIBANE_API void libane_cache_clear(void);
+
+/**
  * Per-chip ANE tensor shape limits.
  *
  * max_seq       — maximum S dimension (must also be a multiple of seq_alignment).
