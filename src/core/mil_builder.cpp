@@ -21,6 +21,9 @@
 #include <sstream>
 #include <iomanip>
 
+#include <AvailabilityMacros.h>
+#include <sys/sysctl.h>
+
 // fp16 conversion helpers (software fallback — also used for blob building)
 #if defined(__ARM_FP16_FORMAT_IEEE) || defined(__aarch64__)
 #  include <arm_fp16.h>
@@ -1196,6 +1199,79 @@ MilFragment MilBuilder::matmul_fragment(int IC, int OC, int SP,
     f.output_name  = out_var;
     f.weight_file  = weight_file;
     f.output_shape = out;
+    return f;
+}
+
+/* ── os_supports_ios19 ───────────────────────────────────────────────────── */
+
+bool MilBuilder::os_supports_ios19() {
+    // ios19 NNCompiler ships with macOS 26 (Darwin kernel 25.x).
+    // Read kern.osrelease — major component >= 25 means macOS 26+.
+    char buf[32] = {};
+    size_t len = sizeof(buf);
+    if (sysctlbyname("kern.osrelease", buf, &len, nullptr, 0) != 0)
+        return false;
+    int major = 0;
+    for (int i = 0; buf[i] >= '0' && buf[i] <= '9'; ++i)
+        major = major * 10 + (buf[i] - '0');
+    return major >= 25;
+}
+
+/* ── matmul_multi_fragment ───────────────────────────────────────────────── */
+
+MilFragment MilBuilder::matmul_multi_fragment(int K, int M, int N,
+                                               const std::string& in_var_a,
+                                               const std::string& in_var_b,
+                                               const std::string& out_var,
+                                               bool dtype_int8) {
+    // A: [1, K, 1, M]  B: [1, K, 1, N]  C: [1, N, 1, M]
+    // MIL matmul: x=[K,M], y=[K,N]^T → output [N,M] (transpose_y=true)
+    const std::string p = out_var + "_";
+    std::string body;
+
+    if (dtype_int8) {
+        // ios19 path: dequantize both inputs then matmul.
+        // NNCompiler fuses the two dequantize ops + matmul into a single
+        // anec.linear call with kernel_scale baked in — no separate dq pass
+        // executes on the chip.
+        //
+        // Scale constants are fp16 scalar 1.0 (neutral dequantize).  Real
+        // per-tensor scales are applied by the caller before dispatch by
+        // writing into the IOSurface; the dequantize op here is structural
+        // — it signals the compiler that the inputs are int8.
+        body += "        fp16 " + p + "sca = const()[name=string(\"" + p + "sca\"), val=fp16(1.0)];\n";
+        body += "        int32 " + p + "ax = const()[name=string(\"" + p + "ax\"), val=int32(0)];\n";
+        body += "        tensor<fp16, [1," + std::to_string(K) + ",1," + std::to_string(M) + "]> " +
+                p + "ah = dequantize(input=" + in_var_a +
+                ", scale=" + p + "sca, axis=" + p + "ax)"
+                "[name=string(\"" + p + "ah\")];\n";
+        body += "        tensor<fp16, [1," + std::to_string(K) + ",1," + std::to_string(N) + "]> " +
+                p + "bh = dequantize(input=" + in_var_b +
+                ", scale=" + p + "sca, axis=" + p + "ax)"
+                "[name=string(\"" + p + "bh\")];\n";
+        body += "        bool " + p + "tx = const()[name=string(\"" + p + "tx\"), val=bool(false)];\n";
+        body += "        bool " + p + "ty = const()[name=string(\"" + p + "ty\"), val=bool(true)];\n";
+        body += "        tensor<fp16, [1," + std::to_string(N) + ",1," + std::to_string(M) + "]> " +
+                out_var + " = matmul(transpose_x=" + p + "tx, transpose_y=" + p + "ty"
+                ", x=" + p + "ah, y=" + p + "bh)[name=string(\"" + p + "mm\")];\n";
+    } else {
+        // ios18 path: plain fp16 matmul, no dequantize.
+        body += "        bool " + p + "tx = const()[name=string(\"" + p + "tx\"), val=bool(false)];\n";
+        body += "        bool " + p + "ty = const()[name=string(\"" + p + "ty\"), val=bool(true)];\n";
+        body += "        tensor<fp16, [1," + std::to_string(N) + ",1," + std::to_string(M) + "]> " +
+                out_var + " = matmul(transpose_x=" + p + "tx, transpose_y=" + p + "ty"
+                ", x=" + in_var_a + ", y=" + in_var_b + ")[name=string(\"" + p + "mm\")];\n";
+    }
+
+    TensorShape out_shape{1, N, 1, M};
+
+    MilFragment f;
+    f.body            = std::move(body);
+    f.input_name      = in_var_a;
+    f.side_input_name = in_var_b;
+    f.output_name     = out_var;
+    f.output_shape    = out_shape;
+    f.min_dialect     = dtype_int8 ? "ios19" : "ios18";
     return f;
 }
 
@@ -2877,13 +2953,26 @@ MilProgram MilBuilder::build_fused(const std::vector<FusedInput>&  inputs,
                   return a.var_name < b.var_name;
               });
 
+    // Pick the latest dialect required by any fragment.
+    std::string dialect = "ios18";
+    for (const auto& frag : fragments) {
+        if (frag.min_dialect > dialect)
+            dialect = frag.min_dialect;
+    }
+
     std::string t = header();
 
-    // func signature
-    t += "    func main<ios18>(";
+    // func signature — use each input's declared dtype in the type annotation.
+    t += "    func main<" + dialect + ">(";
     for (size_t i = 0; i < sorted.size(); ++i) {
         if (i > 0) t += ", ";
-        t += tensor_type(sorted[i].shape) + " " + sorted[i].var_name;
+        // Build "tensor<DTYPE, [B,C,H,S]> var_name"
+        const auto& fi = sorted[i];
+        t += "tensor<" + fi.dtype + ", [" +
+             std::to_string(fi.shape.batch)    + "," +
+             std::to_string(fi.shape.channels) + "," +
+             std::to_string(fi.shape.height)   + "," +
+             std::to_string(fi.shape.seq)      + "]> " + fi.var_name;
     }
     t += ") {\n";
 

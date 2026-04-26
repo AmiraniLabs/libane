@@ -287,6 +287,24 @@ typedef enum {
     LIBANE_OP_FLOOR = 63,  /**< Element-wise floor:   out = floor(x) */
     LIBANE_OP_ROUND = 64,  /**< Element-wise round to nearest even: out = round(x) */
     LIBANE_OP_SIGN  = 65,  /**< Element-wise sign: out = -1/0/+1 */
+
+    /* ── Two-input matmul ────────────────────────────────────────────────── */
+    /**
+     * Matrix multiplication with two live IOSurface inputs: C = A × B.
+     *
+     * Unlike LIBANE_OP_MATMUL (which bakes the weight into the program as a
+     * conv1x1), this op takes both A and B as runtime inputs — no weight file.
+     *
+     * A: [1, K, 1, M]   (input 0)
+     * B: [1, K, 1, N]   (input 1, treated as transposed)
+     * C: [1, N, 1, M]   (output)
+     *
+     * On macOS 26+ (ios19 NNCompiler): accepts fp16 or int8 IOSurfaces.
+     *   int8 inputs are dequantized and fused into a single quantized kernel.
+     * On older macOS (ios18 NNCompiler): fp16 inputs only.
+     *   Passing int8 IOSurfaces on older macOS returns LIBANE_STATUS_UNSUPPORTED.
+     */
+    LIBANE_OP_MATMUL_MULTI = 66,
 } libane_op_t;
 
 /* ── Shape descriptor ────────────────────────────────────────────────────── */

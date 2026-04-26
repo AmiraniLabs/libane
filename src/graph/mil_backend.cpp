@@ -38,6 +38,24 @@ static mil::MilFragment node_to_fragment(const AneGraph&    graph,
             in_shape.channels, out_shape.channels, out_shape.seq,
             in_var, out_var, node.weight_file);
 
+    case LIBANE_OP_MATMUL_MULTI: {
+        // A: [1, K, 1, M]  B: [1, K, 1, N]  → C: [1, N, 1, M]
+        // inputs[0] = A (chain var), inputs[1] = B (side input).
+        // On macOS 26+ (ios19 NNCompiler) we request the ios19 dialect so the
+        // Ios19Backend applies its tiling and fusion passes to the matmul.
+        // int8 activation inputs are deferred until the dtype system is extended.
+        const auto& b_shape = graph.tensor(node.inputs[1]).shape;
+        auto frag = mil::MilBuilder::matmul_multi_fragment(
+            in_shape.channels,            // K
+            in_shape.seq,                 // M
+            b_shape.seq,                  // N
+            in_var, tensor_var(node.inputs[1]), out_var,
+            /*dtype_int8=*/false);
+        if (mil::MilBuilder::os_supports_ios19())
+            frag.min_dialect = "ios19";
+        return frag;
+    }
+
     case LIBANE_OP_RMSNORM:
         return mil::MilBuilder::rmsnorm_fragment(
             in_shape.channels, in_shape.seq,

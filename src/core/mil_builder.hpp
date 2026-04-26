@@ -175,6 +175,7 @@ struct MilFragment {
     std::string      side_input_name;  // empty for single-input ops
     std::string      weight_file;      // empty for weight-free ops
     TensorShape      output_shape;
+    std::string      min_dialect = "ios18"; // minimum dialect required for body
 };
 
 /**
@@ -185,6 +186,7 @@ struct MilFragment {
 struct FusedInput {
     std::string  var_name;
     TensorShape  shape;
+    std::string  dtype = "fp16"; // "fp16" or "int8"
 };
 
 /** Weight file names for QKV projection. */
@@ -416,6 +418,24 @@ public:
                                         const std::string& in_var,
                                         const std::string& out_var,
                                         const std::string& weight_file = "weight.bin");
+
+    /**
+     * Two-input matmul fragment: C = A × B^T, both inputs live IOSurfaces.
+     *
+     * in_var_a / in_var_b are the MIL parameter names for the two inputs.
+     * dtype_int8: true → emit ios19 dequantize+matmul (int8 inputs, fused by
+     *   NNCompiler into a single quantized kernel on-chip).
+     *             false → emit ios18 matmul (fp16 inputs).
+     * Callers must check os_supports_ios19() before requesting dtype_int8=true.
+     */
+    static MilFragment matmul_multi_fragment(int K, int M, int N,
+                                              const std::string& in_var_a,
+                                              const std::string& in_var_b,
+                                              const std::string& out_var,
+                                              bool dtype_int8 = false);
+
+    /** Returns true when the current OS ships NNCompiler with ios19 support. */
+    static bool os_supports_ios19();
 
     static MilFragment rmsnorm_fragment(int C, int SP,
                                          const std::string& in_var,
