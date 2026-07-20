@@ -219,6 +219,41 @@ void GraphValidator::check_weights(const AneGraph& g, ValidationResult& r) {
             break;
         }
 
+        case LIBANE_OP_MATMUL_MULTI: {
+            // A: [1,1,K,M]  B: [1,1,N,K]  → C: [1,1,N,M]
+            // Matrix-tensor shapes: channels=1, height=K or N, seq=M or K.
+            if (!n.weights.empty())
+                err("matmul_multi is weight-free, got " +
+                    std::to_string(n.weights.size()) + " weight bytes");
+            if (n.inputs.size() != 2) {
+                err("matmul_multi requires exactly 2 inputs (A, B), got " +
+                    std::to_string(n.inputs.size()));
+                break;
+            }
+            const auto& a_s = g.tensor(n.inputs[0]).shape;
+            const auto& b_s = g.tensor(n.inputs[1]).shape;
+            if (a_s.channels != 1)
+                err("matmul_multi: A must be a matrix tensor with channels=1, got " +
+                    std::to_string(a_s.channels));
+            if (b_s.channels != 1)
+                err("matmul_multi: B must be a matrix tensor with channels=1, got " +
+                    std::to_string(b_s.channels));
+            // A.height=K, A.seq=M; B.height=N, B.seq=K → B.seq must equal A.height
+            if (b_s.seq != a_s.height)
+                err("matmul_multi: B.seq (K=" + std::to_string(b_s.seq) +
+                    ") must equal A.height (K=" + std::to_string(a_s.height) + ")");
+            if (out_t.shape.channels != 1)
+                err("matmul_multi: output must be a matrix tensor with channels=1, got " +
+                    std::to_string(out_t.shape.channels));
+            if (out_t.shape.height != b_s.height)
+                err("matmul_multi: output.height (N=" + std::to_string(out_t.shape.height) +
+                    ") must equal B.height (N=" + std::to_string(b_s.height) + ")");
+            if (out_t.shape.seq != a_s.seq)
+                err("matmul_multi: output.seq (M=" + std::to_string(out_t.shape.seq) +
+                    ") must equal A.seq (M=" + std::to_string(a_s.seq) + ")");
+            break;
+        }
+
         case LIBANE_OP_RMSNORM: {
             if (n.inputs.size() != 1) {
                 err("rmsnorm requires exactly one input, got " +
