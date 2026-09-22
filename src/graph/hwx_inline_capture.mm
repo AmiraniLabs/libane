@@ -20,10 +20,19 @@ static const char kCS_BINARY[] =
     "/System/Library/PrivateFrameworks/AppleNeuralEngine.framework"
     "/XPCServices/ANECompilerService.xpc/Contents/MacOS/ANECompilerService";
 
-// Selector for _ANEMILCompiler class method (confirmed via runtime introspection)
-static const char kCompileSel[] =
+// _ANEMILCompiler's compile selector has shipped in at least two shapes
+// across macOS 26.x point releases: an older 11-arg form, and a newer
+// 12-arg form that inserts maxModelMemorySize: before ok:/error:. Since
+// Apple's private API surface isn't versioned or documented, we probe for
+// whichever shape the running OS actually exposes rather than assuming one.
+static const char kCompileSelLegacy[] =
     "compileModelAt:modelName:csIdentity:optionsFilename:outputURL:"
     "saveSourceURL:aotModelBinaryPath:isEncryptedModel:options:ok:error:";
+
+static const char kCompileSelWithMaxMem[] =
+    "compileModelAt:modelName:csIdentity:optionsFilename:outputURL:"
+    "saveSourceURL:aotModelBinaryPath:isEncryptedModel:options:"
+    "maxModelMemorySize:ok:error:";
 
 namespace libane {
 namespace graph {
@@ -42,8 +51,11 @@ std::vector<uint8_t> hwx_capture_inline(const std::string& model_dir) {
         Class cls = NSClassFromString(@"_ANEMILCompiler");
         if (!cls) return {};
 
-        SEL sel = sel_registerName(kCompileSel);
-        if (![cls respondsToSelector:sel]) return {};
+        SEL sel_legacy      = sel_registerName(kCompileSelLegacy);
+        SEL sel_with_maxmem = sel_registerName(kCompileSelWithMaxMem);
+        bool has_maxmem = [cls respondsToSelector:sel_with_maxmem];
+        bool has_legacy = !has_maxmem && [cls respondsToSelector:sel_legacy];
+        if (!has_maxmem && !has_legacy) return {};
 
         NSString* src_dir_ns = [NSString stringWithUTF8String:model_dir.c_str()];
         NSURL*    src_url    = [NSURL fileURLWithPath:src_dir_ns];
@@ -61,7 +73,7 @@ std::vector<uint8_t> hwx_capture_inline(const std::string& model_dir) {
         BOOL ok = NO;
         NSError* err = nil;
 
-        typedef id (*CompileFn)(Class, SEL,
+        typedef id (*CompileFnLegacy)(Class, SEL,
                                 NSURL*,      // compileModelAt: (source dir)
                                 NSString*,   // modelName:
                                 NSString*,   // csIdentity:
@@ -74,19 +86,42 @@ std::vector<uint8_t> hwx_capture_inline(const std::string& model_dir) {
                                 BOOL*,       // ok:
                                 NSError**);  // error:
 
+        typedef id (*CompileFnWithMaxMem)(Class, SEL,
+                                NSURL*,      // compileModelAt: (source dir)
+                                NSString*,   // modelName:
+                                NSString*,   // csIdentity:
+                                NSString*,   // optionsFilename:
+                                NSURL*,      // outputURL:
+                                NSURL*,      // saveSourceURL:
+                                NSURL*,      // aotModelBinaryPath:
+                                BOOL,        // isEncryptedModel:
+                                NSDictionary*, // options:
+                                unsigned long long, // maxModelMemorySize: (0 = unset/default)
+                                BOOL*,       // ok:
+                                NSError**);  // error:
+
         @try {
-            ((CompileFn)objc_msgSend)(
-                cls, sel,
-                src_url,      // model source directory (contains model.mil)
-                @"model.mil", // model filename inside that directory
-                @"",          // csIdentity
-                nil,          // optionsFilename
-                out_url,      // outputURL — model.hwx written here
-                src_url,      // saveSourceURL
-                nil,          // aotModelBinaryPath (unused — binary goes to outputURL)
-                NO,           // isEncryptedModel
-                @{},          // options
-                &ok, &err);
+            if (has_maxmem) {
+                ((CompileFnWithMaxMem)objc_msgSend)(
+                    cls, sel_with_maxmem,
+                    src_url,      // model source directory (contains model.mil)
+                    @"model.mil", // model filename inside that directory
+                    @"",          // csIdentity
+                    nil,          // optionsFilename
+                    out_url,      // outputURL — model.hwx written here
+                    src_url,      // saveSourceURL
+                    nil,          // aotModelBinaryPath (unused — binary goes to outputURL)
+                    NO,           // isEncryptedModel
+                    @{},          // options
+                    0,            // maxModelMemorySize (0 = no explicit cap)
+                    &ok, &err);
+            } else {
+                ((CompileFnLegacy)objc_msgSend)(
+                    cls, sel_legacy,
+                    src_url, @"model.mil", @"", nil,
+                    out_url, src_url, nil, NO, @{},
+                    &ok, &err);
+            }
         } @catch (...) {
             return {};
         }
