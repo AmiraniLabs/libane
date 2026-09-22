@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "libane: a native Apple Neural Engine runtime"
+type: software
+authors:
+  - family-names: "Aristide"
+    given-names: "Sheldon"
+    affiliation: "Amirani Labs"
+repository-code: "https://github.com/AmiraniLabs/libane"
+url: "https://github.com/AmiraniLabs/libane"
+license: Apache-2.0
+version: "0.8.2"
+date-released: "2026-04-18"
+keywords:
+  - "Apple Neural Engine"
+  - "ANE"
+  - "machine learning"
+  - "Apple Silicon"
+  - "runtime"
