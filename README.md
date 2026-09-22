@@ -226,6 +226,24 @@ Full op documentation with constraints and notes: [docs/graph-ir.md](docs/graph-
 
 ---
 
+## Citing libane
+
+If you use libane in your research or projects, please cite it as:
+
+```bibtex
+@software{libane,
+  author = {Sheldon Aristide},
+  title = {{libane}: a native Apple Neural Engine runtime},
+  url = {https://github.com/AmiraniLabs/libane},
+  version = {0.0},
+  year = {2026},
+}
+```
+
+See [CITATION.cff](CITATION.cff) for structured citation metadata.
+
+---
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
